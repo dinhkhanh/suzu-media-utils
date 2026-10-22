@@ -15,6 +15,7 @@ struct PeopleGrid: View {
     @FocusState private var editing: Int64?
     @State private var suggesting = false
     @State private var exportAll: ExportMode?
+    @State private var galleryExport = false
 
     var shown: [PersonSummary] {
         model.people.filter { p in
@@ -59,6 +60,7 @@ struct PeopleGrid: View {
         .searchable(text: $search, prompt: "Search names")
         .sheet(isPresented: $suggesting) { CelebritySheet() }
         .sheet(item: $exportAll) { ExportSheet(scope: .all, mode: $0) }
+        .sheet(isPresented: $galleryExport) { GalleryExportSheet() }
         .toolbar {
             ToolbarItem {
                 Picker("Show", selection: $filter) {
@@ -70,6 +72,8 @@ struct PeopleGrid: View {
                 Menu {
                     Button("Copy All to Person Folders…") { exportAll = .copy }
                     Button("Move All to Person Folders…") { exportAll = .move }
+                    Divider()
+                    Button("Export Web Gallery…") { galleryExport = true }
                 } label: {
                     Label("Export All", systemImage: "folder.badge.person.crop")
                 }

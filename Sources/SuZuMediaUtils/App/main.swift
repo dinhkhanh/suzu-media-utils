@@ -87,6 +87,18 @@ func runHeadless(_ args: [String]) -> Never {
             sem.wait()
         }
     }
+    if let dir = value("--gallery") {
+        let t = Date()
+        let index = try! GalleryExporter(store: service.store).export(title: "Test", personIds: nil, options: GalleryExporter.Options(), to: URL(fileURLWithPath: dir))
+        print(String(format: "gallery %@ in %.1f s", index.path, Date().timeIntervalSince(t)))
+    }
+    if let seconds = value("--serve").flatMap(Double.init) {
+        let server = GalleryServer(store: service.store, token: "test") { pid, name in _ = try service.rename(pid, to: name) }
+        try! server.start(port: 8643)
+        print("serving \(server.url) for \(Int(seconds)) s")
+        Thread.sleep(forTimeInterval: seconds)
+        server.stop()
+    }
     if args.contains("--suggest-names") { suggestNamesHeadless(service, apply: args.contains("--apply")) }
     let failed = try! service.store.db.read { db in try Row.fetchAll(db, sql: "SELECT path, error FROM media WHERE status = 'failed' LIMIT 5") }
     for f in failed { print("  failed: \(f["path"] as String): \(f["error"] as String? ?? "")") }

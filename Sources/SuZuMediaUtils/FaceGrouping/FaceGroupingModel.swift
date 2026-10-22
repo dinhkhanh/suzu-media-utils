@@ -66,6 +66,8 @@ final class FaceGroupingModel: ObservableObject {
     @Published var stats = LibraryStats()
     @Published var rate: Double = 0
     @Published var albums: [SmartAlbum] = []
+    @Published var sharingURL: String?
+    private var server: GalleryServer?
     @Published var rules: [DeliveryRule] = []
     /// Folders being removed in the background; hidden from the sidebar right away.
     @Published var removing: Set<Int64> = []
@@ -95,6 +97,7 @@ final class FaceGroupingModel: ObservableObject {
         service!.start()
         observe()
         if !rules.isEmpty { Notifier.requestPermission() }
+        if UserDefaults.standard.bool(forKey: "sharingEnabled") { setSharing(true) }
     }
 
     var store: LibraryStore? { service?.store }
@@ -293,6 +296,36 @@ final class FaceGroupingModel: ObservableObject {
         let chosen = people.filter { ids.contains($0.id) }
         guard let target = chosen.first(where: { $0.name != nil }) ?? chosen.max(by: { $0.faces < $1.faces }) else { return }
         perform { try $0.merge(Array(ids), into: target.id) }
+    }
+
+    /// Starts or stops the local-network gallery (remembered across launches).
+    func setSharing(_ on: Bool) {
+        server?.stop()
+        server = nil
+        sharingURL = nil
+        UserDefaults.standard.set(on, forKey: "sharingEnabled")
+        guard on, let service else { return }
+        var token = UserDefaults.standard.string(forKey: "sharingToken") ?? ""
+        if token.isEmpty {
+            token = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16)).lowercased()
+            UserDefaults.standard.set(token, forKey: "sharingToken")
+        }
+        let s = GalleryServer(store: service.store, token: token) { [weak self] pid, name in
+            _ = try service.rename(pid, to: name)
+            Task { @MainActor in self?.refresh() }
+        }
+        do {
+            try s.start()
+            server = s
+            sharingURL = s.url
+        } catch {
+            actionError = "Couldn't start the gallery: \(error.localizedDescription)"
+        }
+    }
+
+    func regenerateSharingToken() {
+        UserDefaults.standard.removeObject(forKey: "sharingToken")
+        setSharing(true)
     }
 
     func saveAlbum(id: Int64?, name: String, query: MediaQuery) {

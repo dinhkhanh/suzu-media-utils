@@ -24,6 +24,8 @@ struct SuZuMediaUtilsApp: App {
                     .tabItem { Label("Face Grouping", systemImage: "person.2.crop.square.stack") }
                 EditingSettings()
                     .tabItem { Label("Editing", systemImage: "wand.and.stars") }
+                SharingSettings()
+                    .tabItem { Label("Sharing", systemImage: "network") }
             }
             .environmentObject(faces)
         }
