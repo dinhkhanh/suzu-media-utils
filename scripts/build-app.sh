@@ -36,6 +36,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-# Ad-hoc signature so macOS remembers folder permissions between launches.
-codesign --force --deep --sign - "$APP"
+# SIGN_IDENTITY set (scripts/release.sh): Developer ID with hardened runtime and a secure timestamp, as notarization
+# requires. Otherwise an ad-hoc signature so macOS still remembers folder permissions between launches.
+if [[ -n "${SIGN_IDENTITY:-}" ]]; then
+  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
+else
+  codesign --force --sign - "$APP"
+fi
 echo "built $APP"
