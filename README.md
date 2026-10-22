@@ -1,0 +1,98 @@
+<p align="center"><img src="Resources/AppIcon-1024.png" width="128" alt=""></p>
+
+# SuZu Media Utils
+
+A native macOS app (Apple Silicon, macOS 15+) with tools for SuZu Media's photo and video work. Everything runs
+locally; nothing leaves the Mac unless you opt into celebrity naming.
+
+## Tools
+
+### Face Grouping
+Point it at any folders — NAS share, external drive or local disk — and it finds every face in the photos and videos,
+groups them by person, keeps up as new files arrive, and files each person's media into a folder named after them.
+
+- Photos (JPEG, HEIC, PNG, TIFF) and videos (MP4/MOV natively; AV1, WebM, MKV, AVI… via ffmpeg). Videos are sampled
+  at 1 frame per second; a person counts once per video.
+- Groups form automatically; known people are recognised as soon as a file finishes copying (local: ~1–2 s, NAS: ~5–10 s).
+- Name people right in the grid, merge groups, fix mistakes ("Not this person", "Move to…").
+- Copy/Move to Folder for one person, or Export All for everyone: `<folder>/<Person Name>/`. Existing files are
+  never overwritten (skip by default, or keep both). Group photos in Move All go to the main subject and are copied
+  to the others.
+- Auto-naming: a Known-People folder (`<folder>/<Name>/<photos>`) names matching groups offline; optional Amazon
+  Rekognition celebrity lookup ("Suggest Names…").
+- Files are tracked by content, so moving/renaming in Finder or copying never loses names or duplicates work.
+
+Speed on an M2 dev Mac: ~45–70 photos/s from local disk, NAS-bound (~110 MB/s) over 1 GbE; 4K video at ~100× real time.
+Details and measurements: [PLAN.md](PLAN.md).
+
+## Setup
+
+Requirements: Xcode (Swift 6), macOS 15+, Homebrew.
+
+```sh
+brew install ffmpeg           # optional, for AV1/WebM/MKV/AVI video
+```
+
+### Models
+The face-recognition model is not in the repository (it's large, and InsightFace's weights are licensed for
+non-commercial use only and may not be redistributed). Build it once:
+
+```sh
+mkdir -p ~/fg-models && cd ~/fg-models
+curl -LO https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip && unzip buffalo_l.zip -d buffalo_l
+curl -L -o sface.onnx https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx
+brew install uv && uv venv --python 3.12 venv
+VIRTUAL_ENV=venv uv pip install torch onnx onnx2torch coremltools onnxruntime numpy
+cd -  # back to the repo
+~/fg-models/venv/bin/python tools/convert_models.py ~/fg-models models
+for m in ArcFaceR50 SFace; do xcrun coremlcompiler compile models/$m.mlpackage models/compiled; done
+```
+
+### Build and run
+
+```sh
+scripts/build-app.sh          # -> dist/SuZu Media Utils.app (model and icon bundled)
+open "dist/SuZu Media Utils.app"
+swift test                    # library tests (no model needed)
+```
+
+To use it on another Mac, copy `dist/SuZu Media Utils.app` over (and `brew install ffmpeg` there for web video formats).
+
+### Celebrity naming (optional)
+1. AWS console → IAM → Users → Create user (e.g. `suzu-media-utils`), inline policy allowing only
+   `rekognition:RecognizeCelebrities`.
+2. Security credentials → Create access key.
+3. App → Settings → Face Grouping: paste the keys, region Singapore, Test Connection.
+
+About $1 per 1,000 faces; up to 3 face crops per unnamed group are sent, each face only once.
+
+## Command line
+
+```sh
+.build/release/SuZuMediaUtils --headless <folder> [--reference <known-people folder>] [--library <dir>] \
+    [--suggest-names [--apply]]          # full pipeline without UI, prints the people found
+.build/release/facescan scan <folder> --out runs/x && .build/release/facescan cluster runs/x --sweep   # research CLI
+```
+
+## Project layout
+
+| Path | What |
+|---|---|
+| `Sources/FaceCore` | Detection (Vision), alignment, Core ML embeddings, clustering, video sampling, ffmpeg fallback |
+| `Sources/FaceLibrary` | SQLite library (GRDB), folder monitor, processor, grouping engine, exporter, Rekognition |
+| `Sources/SuZuMediaUtils/App` | App shell: window, sidebar, settings, headless mode |
+| `Sources/SuZuMediaUtils/FaceGrouping` | Face Grouping UI |
+| `Sources/facescan` | Research CLI used to benchmark and tune thresholds |
+| `Tests/FaceLibraryTests` | Library tests |
+| `tools/` | Model conversion, icon, evaluation scripts |
+
+### Adding a tool
+1. Put the tool's logic in its own library target (like `FaceLibrary`) with tests.
+2. Add a case to `AppRoute` in `Sources/SuZuMediaUtils/App/AppShell.swift`.
+3. Add a sidebar section view whose rows are tagged with that case, list it in `AppShell`'s sidebar, and add a branch in
+   its `detail` switch.
+4. Settings go in a new tab in `SuZuMediaUtilsApp`.
+
+## Data
+Library: `~/Library/Application Support/SuZu Media Utils/Face Grouping` (SQLite database and face thumbnails).
+AWS keys: login Keychain. Source photos and videos are only read, except when you choose Move.

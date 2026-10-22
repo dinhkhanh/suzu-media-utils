@@ -1,0 +1,12 @@
+.build/
+.swiftpm/
+dist/
+runs/
+models/
+*.onnx
+*.mlpackage
+*.mlmodelc
+.DS_Store
+xcuserdata/
+__pycache__/
+*.pyc
