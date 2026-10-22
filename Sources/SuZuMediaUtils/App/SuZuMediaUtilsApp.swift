@@ -22,6 +22,8 @@ struct SuZuMediaUtilsApp: App {
             TabView {
                 FaceGroupingSettings()
                     .tabItem { Label("Face Grouping", systemImage: "person.2.crop.square.stack") }
+                EditingSettings()
+                    .tabItem { Label("Editing", systemImage: "wand.and.stars") }
             }
             .environmentObject(faces)
         }

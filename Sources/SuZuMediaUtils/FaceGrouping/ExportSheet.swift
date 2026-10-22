@@ -1,4 +1,5 @@
 import FaceLibrary
+import MediaKit
 import SwiftUI
 
 enum ExportScope: Identifiable {
@@ -17,6 +18,11 @@ struct ExportSheet: View {
     @State private var chosen: Set<Int64> = []
     @State private var base: URL?
     @State private var policy = CollisionPolicy.skip
+    @State private var editPhotos = false
+    @State private var recipe = EditRecipe()
+    @State private var writeNames = false
+    @State private var topN: Int?
+    @State private var bestOfBurst = false
     @State private var plan: Exporter.Plan?
     @State private var running = false
     @State private var progress = 0
@@ -34,15 +40,18 @@ struct ExportSheet: View {
     var named: [PersonSummary] { model.people.filter { $0.name != nil && $0.faces > 0 } }
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 14) {
             Text(isAll ? "\(verb) everyone's files to their folders" : "\(verb) to “\(folder.isEmpty ? "…" : folder)” folder")
                 .font(.title2.bold())
             if let result { resultView(result) } else { form }
         }
         .padding(20)
-        .frame(width: 560)
+        }
+        .frame(maxHeight: 780)
+        .frame(width: 620)
         .onAppear { chosen = Set(named.map(\.id)) }
-        .task(id: "\(name)|\(base?.path ?? "")|\(chosen.sorted())") { replan() }
+        .task(id: "\(name)|\(base?.path ?? "")|\(chosen.sorted())|\(editPhotos)|\(recipe.hashValue)|\(writeNames)|\(topN ?? 0)|\(bestOfBurst)") { replan() }
     }
 
     @ViewBuilder
@@ -73,6 +82,7 @@ struct ExportSheet: View {
             .pickerStyle(.radioGroup)
             .labelsHidden()
         }
+        extras
         if let plan { summary(plan) }
         if running {
             ProgressView(value: Double(progress), total: Double(max(1, plan?.items.count ?? 1)))
@@ -84,6 +94,44 @@ struct ExportSheet: View {
             Button(isAll ? "\(verb) All" : verb) { run() }
                 .keyboardShortcut(.defaultAction)
                 .disabled(running || (!isAll && folder.isEmpty) || (plan?.items.isEmpty ?? true))
+        }
+    }
+
+    var options: Exporter.Options {
+        var o = Exporter.Options()
+        o.recipe = editPhotos ? recipe : nil
+        o.writeNames = writeNames
+        o.topN = topN
+        o.bestOfBurst = bestOfBurst
+        return o
+    }
+
+    @ViewBuilder
+    var extras: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Which photos:").font(.headline)
+            HStack {
+                Picker("", selection: $topN) {
+                    Text("All of them").tag(Int?.none)
+                    ForEach([10, 20, 50, 100], id: \.self) { Text("Best \($0) per person").tag(Int?.some($0)) }
+                }
+                .labelsHidden().fixedSize()
+                Toggle("Skip similar shots (best of each burst)", isOn: $bestOfBurst).toggleStyle(.checkbox)
+            }
+            Toggle("Write people's names into the files (Lightroom, Photos, Bridge)", isOn: $writeNames)
+                .toggleStyle(.checkbox)
+                .disabled(editPhotos)
+                .help(editPhotos ? "Edited photos always get the names" : "Only the copies are tagged; originals are never changed")
+            Toggle("Edit photos: auto tone, social crop, watermark, resize", isOn: $editPhotos.animation())
+                .toggleStyle(.checkbox)
+            if editPhotos {
+                EditOptionsView(recipe: $recipe, previewSource: plan?.items.first { !["mp4", "mov", "m4v"].contains($0.from.pathExtension.lowercased()) }?.from,
+                                previewFocus: plan?.items.first?.focus)
+                    .padding(.leading, 20)
+                if mode == .move {
+                    Text("Edited versions are saved as new JPEGs; originals stay where they are.").font(.caption).foregroundStyle(.orange)
+                }
+            }
         }
     }
 
@@ -173,9 +221,9 @@ struct ExportSheet: View {
         switch scope {
         case .all:
             let people = named.filter { chosen.contains($0.id) }.map { (id: $0.id, name: $0.name!) }
-            plan = try? service.exporter.planAll(people: people, base: base, mode: mode)
+            plan = try? service.exporter.planAll(people: people, base: base, mode: mode, options: options)
         case .person(let id):
-            plan = folder.isEmpty ? nil : try? service.exporter.plan(personId: id, name: name, base: base, mode: mode)
+            plan = folder.isEmpty ? nil : try? service.exporter.plan(personId: id, name: name, base: base, mode: mode, options: options)
         }
     }
 

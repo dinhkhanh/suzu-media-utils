@@ -174,6 +174,13 @@ public final class LibraryService: @unchecked Sendable {
         return p.id!
     }
 
+    /// Picks the face used as a person's picture; nil goes back to the best shot automatically.
+    public func setCover(_ personId: Int64, faceId: Int64?) throws {
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE person SET coverFaceId = ? WHERE id = ?", arguments: [faceId, personId])
+        }
+    }
+
     /// Unnamed people with no faces left are clutter; named ones are kept so their name is not lost.
     public func deleteEmptyPeople() {
         try? store.db.write { db in

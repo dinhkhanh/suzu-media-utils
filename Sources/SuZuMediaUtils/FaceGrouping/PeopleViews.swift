@@ -142,6 +142,11 @@ struct PersonCell: View {
     }
 }
 
+enum MediaSort: String, CaseIterable, Identifiable {
+    case best = "Best First", time = "By Time", name = "By Name"
+    var id: String { rawValue }
+}
+
 enum DetailTab: String, CaseIterable, Identifiable {
     case photos = "Photos", videos = "Videos", faces = "Faces"
     var id: String { rawValue }
@@ -158,6 +163,10 @@ struct PersonDetail: View {
     @State private var alsoWith: Set<Int64> = []
     @State private var selectedFaces: Set<Int64> = []
     @State private var export: ExportMode?
+    @State private var sort = MediaSort.best
+    @State private var collapseBursts = true
+    @State private var topN: Int?
+    @State private var session: Int?
 
     var person: PersonSummary? { model.people.first { $0.id == personId } }
 
@@ -167,8 +176,8 @@ struct PersonDetail: View {
             Divider()
             ScrollView {
                 switch tab {
-                case .photos: mediaGrid(media.filter { $0.kind == .photo }, empty: "No photos of this person")
-                case .videos: mediaGrid(media.filter { $0.kind == .video }, empty: "No videos of this person")
+                case .photos: mediaGrid(shown(.photo), empty: "No photos of this person")
+                case .videos: mediaGrid(shown(.video), empty: "No videos of this person")
                 case .faces: faceGrid
                 }
             }
@@ -194,6 +203,10 @@ struct PersonDetail: View {
     var header: some View {
         HStack(spacing: 16) {
             FaceImage(faceId: person?.coverFaceId, side: 84).clipShape(Circle())
+                .contextMenu {
+                    Button("Pick Best Shot Automatically") { model.setCover(personId, faceId: nil) }
+                }
+                .help("Right-click a photo or face to use it as the picture")
             VStack(alignment: .leading, spacing: 6) {
                 TextField("Add a name", text: $name)
                     .textFieldStyle(.plain)
@@ -244,6 +257,60 @@ struct PersonDetail: View {
         }
     }
 
+    var sessions: [Sessions.Session] { Sessions.split(media.compactMap(\.takenAt)) }
+
+    /// The grid after session filter, sort, burst collapsing and Top N.
+    func shown(_ kind: MediaKind) -> [PersonMedia] {
+        var items = media.filter { $0.kind == kind }
+        if let s = session, s < sessions.count {
+            let range = sessions[s].start...sessions[s].end
+            items = items.filter { $0.takenAt.map(range.contains) ?? false }
+        }
+        if collapseBursts {
+            var best: [Int64: Int] = [:]
+            var out: [PersonMedia] = []
+            for item in items.sorted(by: { $0.score > $1.score }) {
+                if let b = item.burstId, let i = best[b] { out[i].hiddenInBurst += 1; continue }
+                if let b = item.burstId { best[b] = out.count }
+                out.append(item)
+            }
+            items = out
+        }
+        switch sort {
+        case .best: items.sort { $0.score > $1.score }
+        case .time: items.sort { ($0.takenAt ?? .distantPast, $0.path) < ($1.takenAt ?? .distantPast, $1.path) }
+        case .name: items.sort { $0.path < $1.path }
+        }
+        if let n = topN { items = Array(items.sorted { $0.score > $1.score }.prefix(n)) }
+        return items
+    }
+
+    var viewControls: some View {
+        HStack(spacing: 10) {
+            Picker("", selection: $sort) { ForEach(MediaSort.allCases) { Text($0.rawValue).tag($0) } }
+                .fixedSize()
+            Picker("", selection: $topN) {
+                Text("All").tag(Int?.none)
+                ForEach([10, 20, 50, 100], id: \.self) { Text("Best \($0)").tag(Int?.some($0)) }
+            }
+            .fixedSize()
+            .help("Show only the best shots (sharp, eyes open, facing the camera, smiling)")
+            if sessions.count > 1 {
+                Picker("", selection: $session) {
+                    Text("All sessions").tag(Int?.none)
+                    ForEach(sessions) { Text($0.label).tag(Int?.some($0.index)) }
+                }
+                .fixedSize()
+                .help("Shooting sessions, split wherever there's a gap of 30 minutes or more")
+            }
+            Toggle("Hide similar shots", isOn: $collapseBursts)
+                .toggleStyle(.checkbox)
+                .help("Show only the best photo of each burst of near-identical shots")
+            Spacer()
+        }
+        .padding(.horizontal, 16).padding(.top, 10)
+    }
+
     func tabTitle(_ t: DetailTab) -> String {
         switch t {
         case .photos: "Photos (\(media.filter { $0.kind == .photo }.count))"
@@ -258,13 +325,24 @@ struct PersonDetail: View {
             ContentUnavailableView(empty, systemImage: tab == .videos ? "video.slash" : "photo")
                 .padding(.top, 60)
         }
+        viewControls
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 8)], spacing: 8) {
             ForEach(items) { item in
                 MediaThumbnail(item: item)
+                    .overlay(alignment: .topTrailing) {
+                        if item.hiddenInBurst > 0 {
+                            Text("+\(item.hiddenInBurst)")
+                                .font(.caption.bold()).padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(.black.opacity(0.6), in: Capsule()).foregroundStyle(.white).padding(6)
+                                .help("\(item.hiddenInBurst) similar shots hidden; this is the best of the burst")
+                        }
+                    }
                     .onTapGesture(count: 2) { NSWorkspace.shared.open(item.url) }
                     .contextMenu {
                         Button("Open") { NSWorkspace.shared.open(item.url) }
                         Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
+                        Divider()
+                        Button("Use as \(person?.name ?? "Person")'s Picture") { model.setCover(personId, faceId: item.faceId) }
                     }
                     .help(item.url.lastPathComponent)
             }
@@ -273,7 +351,9 @@ struct PersonDetail: View {
     }
 
     var faceGrid: some View {
-        FaceGrid(faces: faces, selection: $selectedFaces)
+        FaceGrid(faces: faces, selection: $selectedFaces) { faceId in
+            Button("Use as \(person?.name ?? "Person")'s Picture") { model.setCover(personId, faceId: faceId) }
+        }
     }
 
     @ToolbarContentBuilder
@@ -305,9 +385,10 @@ extension ExportMode: Identifiable {
     public var id: String { rawValue }
 }
 
-struct FaceGrid: View {
+struct FaceGrid<Menu: View>: View {
     let faces: [FaceItem]
     @Binding var selection: Set<Int64>
+    var menu: (Int64) -> Menu
 
     var body: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 6)], spacing: 6) {
@@ -319,10 +400,17 @@ struct FaceGrid: View {
                         if selection.contains(f.id) { selection.remove(f.id) } else { selection.insert(f.id) }
                     }
                     .onTapGesture(count: 2) { NSWorkspace.shared.open(URL(fileURLWithPath: f.path)) }
+                    .contextMenu { menu(f.id) }
                     .help("\(URL(fileURLWithPath: f.path).lastPathComponent)\(f.time.map { " at " + MediaThumbnail.timecode($0) } ?? "")")
             }
         }
         .padding(16)
+    }
+}
+
+extension FaceGrid where Menu == EmptyView {
+    init(faces: [FaceItem], selection: Binding<Set<Int64>>) {
+        self.init(faces: faces, selection: selection) { _ in EmptyView() }
     }
 }
 

@@ -20,7 +20,7 @@ let package = Package(
         .target(name: "FaceLibrary", dependencies: ["FaceCore", "MediaKit", .product(name: "GRDB", package: "GRDB.swift")], swiftSettings: v5),
         .executableTarget(name: "facescan", dependencies: ["FaceCore", "MediaKit"], swiftSettings: v5),
         .executableTarget(name: "SuZuMediaUtils", dependencies: ["FaceLibrary", "MediaKit"], swiftSettings: v5),
-        .testTarget(name: "FaceLibraryTests", dependencies: ["FaceLibrary"], swiftSettings: v5),
+        .testTarget(name: "FaceLibraryTests", dependencies: ["FaceLibrary", "MediaKit"], swiftSettings: v5),
         .testTarget(name: "MediaKitTests", dependencies: ["MediaKit"], swiftSettings: v5),
     ]
 )

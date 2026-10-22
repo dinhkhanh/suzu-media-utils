@@ -41,6 +41,11 @@ struct PersonMedia: Identifiable, Hashable {
     var kind: MediaKind
     var faceId: Int64
     var time: Double?
+    var score: Double
+    var takenAt: Date?
+    var burstId: Int64?
+    /// Other shots of the same burst hidden behind this one when bursts are collapsed.
+    var hiddenInBurst = 0
     var url: URL { URL(fileURLWithPath: path) }
 }
 
@@ -153,7 +158,8 @@ final class FaceGroupingModel: ObservableObject {
                 SUM(COALESCE(s.kind, 'media') = 'media') AS faces,
                 COUNT(DISTINCT CASE WHEN COALESCE(s.kind, 'media') = 'media' AND m.kind = 'photo' THEN m.id END) AS photos,
                 COUNT(DISTINCT CASE WHEN COALESCE(s.kind, 'media') = 'media' AND m.kind = 'video' THEN m.id END) AS videos,
-                (SELECT f2.id FROM face f2 WHERE f2.personId = p.id ORDER BY f2.quality DESC LIMIT 1) AS cover
+                COALESCE((SELECT c.id FROM face c WHERE c.id = p.coverFaceId AND c.personId = p.id),
+                         (SELECT f.id FROM face f WHERE f.personId = p.id ORDER BY \(BestShot.coverOrderSQL) DESC LIMIT 1)) AS cover
             FROM person p
             JOIN face f ON f.personId = p.id
             JOIN media m ON m.id = f.mediaId
@@ -196,10 +202,11 @@ final class FaceGroupingModel: ObservableObject {
         guard let db = store?.db else { return [] }
         let rows = (try? db.read { db in
             try Row.fetchAll(db, sql: """
-                SELECT m.id, m.path, m.kind, f.id AS faceId, f.time FROM face f
+                SELECT m.id, m.path, m.kind, m.takenAt, m.burstId, f.id AS faceId, f.time,
+                    COALESCE(f.score, f.quality * 0.6, 0) AS score FROM face f
                 JOIN media m ON m.id = f.mediaId LEFT JOIN source s ON s.id = m.sourceId
                 WHERE f.personId = ? AND COALESCE(s.kind, 'media') = 'media'
-                ORDER BY m.path, f.quality DESC
+                ORDER BY m.path, score DESC
                 """, arguments: [personId])
         }) ?? []
         var allowed: Set<Int64>?
@@ -214,7 +221,8 @@ final class FaceGroupingModel: ObservableObject {
             let id: Int64 = r["id"]
             guard seen.insert(id).inserted, allowed?.contains(id) ?? true else { return nil }
             return PersonMedia(id: id, path: r["path"], kind: MediaKind(rawValue: r["kind"]) ?? .photo,
-                               faceId: r["faceId"], time: r["time"])
+                               faceId: r["faceId"], time: r["time"], score: r["score"],
+                               takenAt: (r["takenAt"] as Double?).map(Date.init(timeIntervalSince1970:)), burstId: r["burstId"])
         }
     }
 
@@ -276,6 +284,8 @@ final class FaceGroupingModel: ObservableObject {
         guard let target = chosen.first(where: { $0.name != nil }) ?? chosen.max(by: { $0.faces < $1.faces }) else { return }
         perform { try $0.merge(Array(ids), into: target.id) }
     }
+
+    func setCover(_ personId: Int64, faceId: Int64?) { perform { try $0.setCover(personId, faceId: faceId) } }
 
     func reject(_ faceIds: Set<Int64>, from personId: Int64) { perform { try $0.reject(faceIds: Array(faceIds), from: personId) } }
     func assign(_ faceIds: Set<Int64>, to personId: Int64) { perform { try $0.assign(faceIds: Array(faceIds), to: personId) } }

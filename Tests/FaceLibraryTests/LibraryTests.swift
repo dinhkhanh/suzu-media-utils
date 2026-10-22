@@ -1,4 +1,6 @@
 import GRDB
+import ImageIO
+import MediaKit
 import XCTest
 @testable import FaceLibrary
 
@@ -277,6 +279,65 @@ final class LibraryTests: XCTestCase {
         // Running it again changes nothing: everything is already in place.
         let again = try exporter.planAll(people: [(an, "An"), (binh, "Bình")], base: nil, mode: .move)
         XCTAssertEqual(exporter.run(again).done, 0)
+    }
+
+    func makeRealJPEG(_ rel: String, seed: Int) throws -> URL {
+        let url = root.appendingPathComponent(rel)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let ctx = CGContext(data: nil, width: 600, height: 400, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.setFillColor(CGColor(red: Double(seed % 7) / 7, green: 0.4, blue: 0.5, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: 600, height: 400))
+        let d = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil)!
+        CGImageDestinationAddImage(d, ctx.makeImage()!, nil)
+        CGImageDestinationFinalize(d)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -3600)], ofItemAtPath: url.path)
+        return url
+    }
+
+    func testExportTopNBestOfBurstEditsAndNames() throws {
+        for i in 0..<4 { try makeRealJPEG("e/\(i).png.jpg", seed: i) }
+        monitor().scan()
+        let all = try media()
+        let an = try newPerson("An")
+        var faceIds: [Int64] = []
+        for m in all { faceIds.append(try addFace(mediaId: m.id!, personId: an)) }
+        // Scores: photo 2 best, 0 next; photos 0 and 1 are one burst.
+        try store.db.write { db in
+            for (i, s) in [0.8, 0.5, 0.9, 0.3].enumerated() {
+                try db.execute(sql: "UPDATE face SET score = ? WHERE id = ?", arguments: [s, faceIds[i]])
+            }
+            try db.execute(sql: "UPDATE media SET burstId = ? WHERE id IN (?, ?)", arguments: [all[0].id, all[0].id, all[1].id])
+        }
+        let exporter = Exporter(store: store)
+        var opts = Exporter.Options()
+        opts.bestOfBurst = true
+        opts.topN = 2
+        var plan = try exporter.plan(personId: an, name: "An", base: nil, options: opts)
+        XCTAssertEqual(Set(plan.items.map(\.mediaId)), [all[2].id!, all[0].id!], "top 2 after dropping the weaker burst shot")
+
+        opts.recipe = EditRecipe()
+        opts.recipe!.aspect = .square
+        opts.recipe!.maxLongSide = 300
+        plan = try exporter.plan(personId: an, name: "An", base: nil, mode: .move, options: opts)
+        XCTAssertTrue(plan.items.allSatisfy { $0.operation == .copy && $0.to.pathExtension == "jpg" }, "edits never move originals")
+        let r = exporter.run(plan)
+        XCTAssertEqual(r.done, 2, "\(r.failed)")
+        let out = plan.items[0].to
+        XCTAssertEqual(Metadata.people(in: out), ["An"])
+        let p = CGImageSourceCopyPropertiesAtIndex(CGImageSourceCreateWithURL(out as CFURL, nil)!, 0, nil) as! [CFString: Any]
+        XCTAssertEqual(p[kCGImagePropertyPixelWidth] as? Int, 300)
+        XCTAssertEqual(p[kCGImagePropertyPixelHeight] as? Int, 300)
+        // Edited copies are known to the library, so a rescan adds nothing to process.
+        monitor().scan()
+        XCTAssertEqual(try store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'pending'") }, 0)
+
+        var tag = Exporter.Options()
+        tag.writeNames = true
+        let tagged = try exporter.plan(personId: an, name: "An tagged", base: nil, options: tag)
+        _ = exporter.run(tagged)
+        XCTAssertEqual(Metadata.people(in: tagged.items[0].to), ["An"])
+        XCTAssertTrue(Metadata.people(in: all[0].url).isEmpty, "originals untouched")
     }
 
     // MARK: - Grouping

@@ -1,6 +1,7 @@
 import FaceCore
 import Foundation
 import GRDB
+import MediaKit
 
 public enum ExportMode: String, Sendable { case copy, move }
 
@@ -21,6 +22,23 @@ public struct Exporter: Sendable {
         public var alsoHasOtherNamedPeople: Bool
         public var operation: ExportMode = .copy
         public var personName = ""
+        /// Named people in the file (for metadata) and where they are (for face-aware crops).
+        public var people: [String] = []
+        public var focus: FocusHint?
+    }
+
+    /// Optional extras applied to every export.
+    public struct Options: Sendable {
+        /// Photos are rendered through this recipe (auto tone, crop, watermark, resize) as new JPEGs. Videos are
+        /// copied unchanged. Implies copying: originals are never replaced by edited versions.
+        public var recipe: EditRecipe?
+        /// Write the names of the people in each photo into the copy's metadata (Lightroom, Photos…).
+        public var writeNames = false
+        /// Keep only each person's N best photos (best-shot score); nil = all.
+        public var topN: Int?
+        /// From a burst of near-identical shots keep only the best one.
+        public var bestOfBurst = false
+        public init() {}
     }
 
     public struct Plan: Sendable {
@@ -31,6 +49,7 @@ public struct Exporter: Sendable {
         public var videos: Int { items.count - photos }
         public var sharedCount: Int { items.filter(\.alsoHasOtherNamedPeople).count }
         public var copies: Int { items.filter { $0.operation == .copy }.count }
+        public var options = Options()
         public var moves: Int { items.filter { $0.operation == .move }.count }
     }
 
@@ -53,7 +72,7 @@ public struct Exporter: Sendable {
     }
 
     /// `base` nil means "inside each file's own source folder".
-    public func plan(personId: Int64, name: String, base: URL?, mode: ExportMode = .copy) throws -> Plan {
+    public func plan(personId: Int64, name: String, base: URL?, mode: ExportMode = .copy, options: Options = Options()) throws -> Plan {
         let rows = try store.db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT m.id, m.path, s.path AS sourcePath,
@@ -76,15 +95,15 @@ public struct Exporter: Sendable {
                 continue
             }
             plan.items.append(Item(mediaId: r["id"], from: from, to: dir.appendingPathComponent(from.lastPathComponent),
-                                   alsoHasOtherNamedPeople: r["shared"], operation: mode, personName: name))
+                                   alsoHasOtherNamedPeople: r["shared"], operation: options.recipe == nil ? mode : .copy, personName: name))
         }
-        return plan
+        return try decorate(plan, personIds: [personId], options: options)
     }
 
     /// Every given person's files into "<base>/<Name>/" in one go. With `.move`, a file showing several of these
     /// people is moved to the folder of the one whose face is largest in it and copied into the others' folders,
     /// so no one's folder loses it.
-    public func planAll(people: [(id: Int64, name: String)], base: URL?, mode: ExportMode) throws -> Plan {
+    public func planAll(people: [(id: Int64, name: String)], base: URL?, mode: ExportMode, options: Options = Options()) throws -> Plan {
         let names = Dictionary(people.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
         let ids = people.map { String($0.id) }.joined(separator: ",")
         guard !ids.isEmpty else { return Plan() }
@@ -112,14 +131,65 @@ public struct Exporter: Sendable {
                     moveUsed = true  // it already lives in one person's folder: the rest get copies
                     continue
                 }
-                let op: ExportMode = (mode == .move && !moveUsed && k == 0) ? .move : .copy
+                let op: ExportMode = (mode == .move && options.recipe == nil && !moveUsed && k == 0) ? .move : .copy
                 if op == .move { moveUsed = true }
                 plan.items.append(Item(mediaId: r["id"], from: from, to: dir.appendingPathComponent(from.lastPathComponent),
                                        alsoHasOtherNamedPeople: ordered.count > 1, operation: op, personName: name))
             }
         }
+        plan = try decorate(plan, personIds: people.map(\.id), options: options)
         // Copies read the original, so they run before the move of the same file.
         plan.items.sort { ($0.operation == .copy ? 0 : 1, $0.mediaId) < ($1.operation == .copy ? 0 : 1, $1.mediaId) }
+        return plan
+    }
+
+    /// Applies Top N / best-of-burst and fills in each file's people and face positions; edited photos become .jpg.
+    func decorate(_ input: Plan, personIds: [Int64], options: Options) throws -> Plan {
+        var plan = input
+        let mediaIds = Array(Set(plan.items.map(\.mediaId)))
+        guard !mediaIds.isEmpty else { return plan }
+        let list = mediaIds.map(String.init).joined(separator: ",")
+        let names = Dictionary(uniqueKeysWithValues: try store.db.read { db in
+            try Row.fetchAll(db, sql: "SELECT id, name FROM person WHERE id IN (\(personIds.map(String.init).joined(separator: ",")))")
+        }.map { ($0["name"] as String? ?? "", $0["id"] as Int64) })
+        let faces = try store.db.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT f.mediaId, f.personId, f.x, f.y, f.w, f.h, COALESCE(f.score, f.quality, 0) AS s, p.name, m.burstId
+                FROM face f JOIN media m ON m.id = f.mediaId LEFT JOIN person p ON p.id = f.personId
+                WHERE f.mediaId IN (\(list)) AND f.time IS NULL
+                """)
+        }
+        let byMedia = Dictionary(grouping: faces) { $0["mediaId"] as Int64 }
+        func score(_ mediaId: Int64, _ personId: Int64?) -> Double {
+            byMedia[mediaId]?.filter { ($0["personId"] as Int64?) == personId }.map { $0["s"] as Double }.max() ?? 0
+        }
+        // Per person: optionally only the best of each burst, then only the top N.
+        var keep: Set<String> = []
+        for (name, group) in Dictionary(grouping: plan.items, by: \.personName) {
+            let pid = names[name]
+            var items = group.sorted { score($0.mediaId, pid) > score($1.mediaId, pid) }
+            if options.bestOfBurst {
+                var seen: Set<Int64> = []
+                items = items.filter { item in
+                    guard let b = byMedia[item.mediaId]?.first?["burstId"] as Int64? else { return true }
+                    return seen.insert(b).inserted
+                }
+            }
+            if let n = options.topN { items = Array(items.prefix(n)) }
+            for i in items { keep.insert("\(i.mediaId)|\(name)") }
+        }
+        plan.items = plan.items.filter { keep.contains("\($0.mediaId)|\($0.personName)") }
+        for i in plan.items.indices {
+            let fs = byMedia[plan.items[i].mediaId] ?? []
+            plan.items[i].people = Array(Set(fs.compactMap { $0["name"] as String? })).sorted()
+            func rect(_ r: Row) -> CGRect { CGRect(x: r["x"] as Double, y: r["y"] as Double, width: r["w"] as Double, height: r["h"] as Double) }
+            let mine = fs.filter { ($0["name"] as String?) == plan.items[i].personName }.max { ($0["s"] as Double) < ($1["s"] as Double) }
+            plan.items[i].focus = FocusHint(primary: mine.map(rect), others: fs.filter { ($0["name"] as String?) != nil && $0 != mine }.map(rect))
+            if options.recipe != nil, !MediaKindHint.isVideo(plan.items[i].from) {
+                plan.items[i].to = plan.items[i].to.deletingPathExtension().appendingPathExtension("jpg")
+            }
+        }
+        plan.options = options
         return plan
     }
 
@@ -134,6 +204,13 @@ public struct Exporter: Sendable {
                     result.skippedExisting += 1
                     continue
                 }
+                let edit = plan.options.recipe.flatMap { MediaKindHint.isVideo(item.from) ? nil : $0 }
+                if let edit {
+                    try EditPipeline.render(item.from, recipe: edit, focus: item.focus, people: item.people, to: dest)
+                    try recordCopy(of: item.mediaId, at: dest)
+                    result.done += 1
+                    continue
+                }
                 switch item.operation {
                 case .move:
                     try fm.moveItem(at: item.from, to: dest)
@@ -143,6 +220,7 @@ public struct Exporter: Sendable {
                     }
                 case .copy:
                     try fm.copyItem(at: item.from, to: dest)
+                    if plan.options.writeNames { _ = try? Metadata.writePeople(item.people, to: dest) }
                     try recordCopy(of: item.mediaId, at: dest)
                 }
                 result.done += 1
@@ -179,19 +257,17 @@ public struct Exporter: Sendable {
             .max { $0.path.count < $1.path.count }?.id
     }
 
-    /// Registers the copy as a duplicate right away, so the folder scan neither re-processes it nor shows it twice.
+    /// Registers an exported copy (plain, tagged or edited) as derived from the original right away, so the folder
+    /// scan neither re-processes it nor shows the person twice.
     func recordCopy(of mediaId: Int64, at dest: URL) throws {
+        let attrs = try FileManager.default.attributesOfItem(atPath: dest.path)
+        let size = (attrs[.size] as? Int64) ?? 0
+        let key = ContentKey.compute(dest, size: size)
         try store.db.write { db in
-            guard var original = try MediaRecord.fetchOne(db, key: mediaId) else { return }
-            if original.contentKey == nil {
-                original.contentKey = ContentKey.compute(original.url, size: original.size)
-                try original.update(db)
-            }
-            let attrs = try FileManager.default.attributesOfItem(atPath: dest.path)
-            var copy = MediaRecord(sourceId: try Self.sourceId(for: dest, db: db), path: dest.path, kind: original.kind,
-                                   size: original.size,
-                                   mtime: (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0,
-                                   contentKey: original.contentKey)
+            guard let original = try MediaRecord.fetchOne(db, key: mediaId) else { return }
+            var copy = MediaRecord(sourceId: try Self.sourceId(for: dest, db: db), path: dest.path,
+                                   kind: MediaKindHint.isVideo(dest) ? .video : original.kind, size: size,
+                                   mtime: (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0, contentKey: key)
             copy.duplicateOf = mediaId
             copy.status = .done
             try copy.insert(db, onConflict: .replace)
