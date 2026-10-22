@@ -110,6 +110,13 @@ final class FaceGroupingModel: ObservableObject {
     @Published var sharingURL: String?
     private var server: GalleryServer?
     @Published var rules: [DeliveryRule] = []
+    /// Projects shared with other Macs through a folder (see TeamSync), and how the sharing is going.
+    @Published var teams: [TeamRecord] = []
+    @Published var teamStatus: [Int64: TeamSync.TeamStatus] = [:]
+    @Published var askShareTeam = false
+    @Published var askJoinTeam = false
+    /// The open project's team, if it is shared.
+    var currentTeam: TeamRecord? { currentProject.flatMap { p in teams.first { $0.projectId == p } } }
     /// Bumped after ratings, labels or flags change, so every view showing them re-reads.
     @Published var marksVersion = 0
     /// Folders being removed in the background; hidden from the sidebar right away.
@@ -147,6 +154,7 @@ final class FaceGroupingModel: ObservableObject {
     private func attach(_ service: LibraryService) {
         self.service = service
         service.onDelivered = { report in Notifier.post(report) }
+        service.teamSync.onChange = { [weak self] in Task { @MainActor in self?.applyTeamStatus() } }
         ToolWork.faces = self
         service.start()
         observe()
@@ -160,7 +168,8 @@ final class FaceGroupingModel: ObservableObject {
     private func observe() {
         guard let db = store?.db else { return }
         regionObserver = DatabaseRegionObservation(tracking: Table("face"), Table("person"), Table("media"), Table("source"),
-                                                   Table("smartAlbum"), Table("deliveryRule"), Table("project"))
+                                                   Table("smartAlbum"), Table("deliveryRule"), Table("project"),
+                                                   Table("sessionLabel"), Table("team"))
             .start(in: db, onError: { _ in }, onChange: { [weak self] _ in
                 DispatchQueue.main.async { self?.dirty = true }
             })
@@ -186,6 +195,7 @@ final class FaceGroupingModel: ObservableObject {
             lastTick = now
         }
         applySources(sources)
+        applyTeamStatus()
         guard dirty, !refreshing, let db = store?.db else { return }
         dirty = false
         refreshing = true
@@ -194,15 +204,17 @@ final class FaceGroupingModel: ObservableObject {
             let result = try? await db.read { db in
                 (try Self.fetchPeople(db, project: project, taken: range), try Self.fetchSources(db),
                  try Self.fetchStats(db, project: project, taken: range),
-                 try SmartAlbum.order(Column("name")).fetchAll(db), try DeliveryRule.order(Column("createdAt")).fetchAll(db),
+                 try SmartAlbum.order(Column("name")).fetchAll(db), try DeliveryService.rules(db),
                  try Self.fetchProjects(db), try Self.fetchKnownPeople(db),
-                 project == nil ? [] : try EventSessions.list(db, project: project, gap: gap))
+                 project == nil ? [] : try EventSessions.list(db, project: project, gap: gap),
+                 try TeamRecord.order(Column("joinedAt")).fetchAll(db))
             }
             await MainActor.run {
                 defer { self.refreshing = false }
                 // The project changed while reading: the next tick reads the new one.
                 guard project == self.currentProject, range == self.sessionRange else { self.dirty = true; return }
-                if let (people, sources, stats, albums, rules, projects, known, sessions) = result {
+                if let (people, sources, stats, albums, rules, projects, known, sessions, teams) = result {
+                    if teams != self.teams { self.teams = teams; self.applyTeamStatus() }
                     if sessions != self.sessions {
                         self.sessions = sessions
                         // The session may have grown, merged or split: re-read with its current range.
@@ -231,6 +243,13 @@ final class FaceGroupingModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func applyTeamStatus() {
+        guard let sync = service?.teamSync else { return }
+        var status: [Int64: TeamSync.TeamStatus] = [:]
+        for t in teams { if let s = sync.status(t.id!) { status[t.id!] = s } }
+        if status != teamStatus { teamStatus = status }
     }
 
     private func applySources(_ list: [SourceSummary]) {
@@ -565,20 +584,44 @@ final class FaceGroupingModel: ObservableObject {
 
     func addRule(_ rule: DeliveryRule, includeExisting: Bool) {
         Notifier.requestPermission()
-        perform { try $0.delivery.add(rule, includeExisting: includeExisting) }
+        perform { try $0.delivery.add(rule, includeExisting: includeExisting); $0.teamSync.pushSoon() }
+    }
+
+    func updateRule(_ rule: DeliveryRule) {
+        perform { try $0.delivery.update(rule); $0.teamSync.pushSoon() }
     }
 
     func setRule(_ rule: DeliveryRule, enabled: Bool) {
-        perform { service in
-            var r = rule
-            r.enabled = enabled
-            try service.store.db.write { db in try r.update(db) }
-        }
+        var r = rule
+        r.enabled = enabled
+        updateRule(r)
     }
 
     func deleteRule(_ rule: DeliveryRule) {
-        perform { service in try service.store.db.write { db in _ = try rule.delete(db) } }
+        perform { try $0.delivery.delete(rule); $0.teamSync.pushSoon() }
     }
+
+    // MARK: - Teams
+
+    /// Shares the open project with other Macs through `folder`; they join by picking the same folder.
+    func createTeam(named name: String, folder: URL) -> Bool {
+        guard let project = currentProject else { return false }
+        var ok = false
+        perform { try $0.teamSync.create(name: name, folder: folder, project: project); ok = true }
+        return ok
+    }
+
+    /// Joins the team in `folder`: a new project named after it (nil), or the open project.
+    func joinTeam(folder: URL, project: Int64?) -> Bool {
+        var joined: TeamRecord?
+        perform { joined = try $0.teamSync.join(folder: folder, project: project) }
+        if let joined, joined.projectId != currentProject { currentProject = joined.projectId }
+        return joined != nil
+    }
+
+    func leaveTeam(_ id: Int64) { perform { try $0.teamSync.leave(id) } }
+
+    func syncTeamNow() { service?.teamSync.syncSoon() }
 
     func setCover(_ personId: Int64, faceId: Int64?) { perform { try $0.setCover(personId, faceId: faceId) } }
 

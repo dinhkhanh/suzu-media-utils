@@ -115,9 +115,40 @@ public struct PersonRecord: Codable, FetchableRecord, MutablePersistableRecord, 
     public var name: String?
     public var createdAt: Date
     public var coverFaceId: Int64?
+    /// Stable across Macs (team sync): the same person has the same id everywhere.
+    public var uuid: String
+    /// When the name was last set, seconds since 1970; a teammate's newer name wins over an older one.
+    public var nameAt: Double?
 
-    public init(name: String? = nil) { self.name = name; createdAt = Date() }
+    public init(name: String? = nil, uuid: String = SyncIds.new()) {
+        self.name = name
+        createdAt = Date()
+        self.uuid = uuid
+        nameAt = name == nil ? nil : Date().timeIntervalSince1970
+    }
     public mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
+}
+
+/// Ids that are the same on every Mac.
+public enum SyncIds {
+    public static func new() -> String { UUID().uuidString.lowercased() }
+}
+
+/// A project shared with other Macs through a folder they can all reach (see TeamSync).
+public struct TeamRecord: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Hashable, Sendable {
+    public static let databaseTableName = "team"
+    public var id: Int64?
+    public var uuid: String
+    public var name: String
+    public var folder: String
+    public var projectId: Int64
+    public var joinedAt: Date
+
+    public init(uuid: String, name: String, folder: String, projectId: Int64) {
+        self.uuid = uuid; self.name = name; self.folder = folder; self.projectId = projectId; joinedAt = Date()
+    }
+    public mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
+    public var url: URL { URL(fileURLWithPath: folder, isDirectory: true) }
 }
 
 public enum Vector {

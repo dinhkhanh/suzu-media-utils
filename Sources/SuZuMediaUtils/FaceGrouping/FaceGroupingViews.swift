@@ -32,7 +32,7 @@ struct FaceGroupingDetail: View {
                 case .unassigned: UnassignedView()
                 case .search: SearchView(albumId: nil)
                 case .album(let id): SearchView(albumId: id)
-                case .rules: DeliveryRulesView()
+                case .rules: RulesView()
                 case .source(let id): SourceView(sourceId: id)
                 }
             }
@@ -63,7 +63,7 @@ struct FaceGroupingSidebar: View {
                 .tag(AppRoute.faces(.unassigned))
             Label("Search", systemImage: "magnifyingglass")
                 .tag(AppRoute.faces(.search))
-            Label("Delivery Rules", systemImage: "paperplane")
+            Label("Auto Rules", systemImage: "wand.and.stars")
                 .badge(model.rules.filter(\.enabled).count)
                 .tag(AppRoute.faces(.rules))
         }

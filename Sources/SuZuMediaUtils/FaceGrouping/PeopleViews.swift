@@ -200,7 +200,7 @@ struct PersonDetail: View {
         .toolbar { toolbar }
         .task(id: reloadKey) { await reload() }
         .onAppear { name = person?.name ?? "" }
-        .sheet(isPresented: $notifyRule) { NewRuleSheet(presetPerson: personId, notifyOnly: true) }
+        .sheet(isPresented: $notifyRule) { RuleSheet(presetPerson: personId, notifyOnly: true) }
         .sheet(isPresented: $videoExport) { VideoExportSheet(personId: personId, name: person?.name ?? "Person") }
         .sheet(item: $export) { mode in
             ExportSheet(scope: .person(personId), mode: mode, initialName: person?.name ?? name)

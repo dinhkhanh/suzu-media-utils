@@ -197,6 +197,76 @@ public final class LibraryStore: @unchecked Sendable {
                 t.add(column: "flag", .integer).notNull().defaults(to: 0)  // PickFlag
             }
         }
+        m.registerMigration("v9-team-sync") { db in
+            // Team sync (see TeamSync): people, session names and rules travel between Macs by a stable id, and the
+            // newest change wins.
+            try db.alter(table: "person") { t in
+                t.add(column: "uuid", .text)
+                /// When the name was last set, seconds since 1970 (a newer name from a teammate replaces an older one).
+                t.add(column: "nameAt", .double)
+            }
+            for id in try Int64.fetchAll(db, sql: "SELECT id FROM person") {
+                try db.execute(sql: "UPDATE person SET uuid = ? WHERE id = ?", arguments: [SyncIds.new(), id])
+            }
+            try db.create(index: "person_uuid", on: "person", columns: ["uuid"], unique: true)
+            try db.alter(table: "deliveryRule") { t in
+                t.add(column: "uuid", .text)
+                t.add(column: "name", .text)
+                /// JSON MediaQuery; nil = the person in personId (rules made before queries).
+                t.add(column: "query", .text)
+                /// "person" = a folder per person; "flat" = everything into the folder.
+                t.add(column: "layout", .text).notNull().defaults(to: "person")
+                t.add(column: "updatedAt", .double).notNull().defaults(to: 0)
+                /// Kept (not deleted) so teammates' Macs learn of the deletion.
+                t.add(column: "deletedAt", .double)
+            }
+            for id in try Int64.fetchAll(db, sql: "SELECT id FROM deliveryRule") {
+                try db.execute(sql: "UPDATE deliveryRule SET uuid = ? WHERE id = ?", arguments: [SyncIds.new(), id])
+            }
+            try db.alter(table: "sessionLabel") { t in t.add(column: "updatedAt", .double).notNull().defaults(to: 0) }
+            try db.create(table: "team") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("uuid", .text).notNull().unique()
+                t.column("name", .text).notNull()
+                /// The shared folder every Mac of the team reads and writes (NAS, Dropbox, iCloud Drive…).
+                t.column("folder", .text).notNull()
+                t.column("projectId", .integer).notNull().unique().references("project", onDelete: .cascade)
+                t.column("joinedAt", .datetime).notNull()
+            }
+            /// A teammate's Mac's summary of a person's faces: the mean of their embeddings and how many.
+            try db.create(table: "personRemote") { t in
+                t.column("personId", .integer).notNull().references("person", onDelete: .cascade)
+                t.column("teamId", .integer).notNull().references("team", onDelete: .cascade)
+                t.column("deviceId", .text).notNull()
+                t.column("centroid", .blob).notNull()
+                t.column("count", .integer).notNull()
+                t.primaryKey(["personId", "teamId", "deviceId"])
+            }
+            /// A person merged into another (by id), so teammates' Macs merge them too.
+            try db.create(table: "personMerge") { t in
+                t.primaryKey("fromUuid", .text)
+                t.column("intoUuid", .text).notNull()
+                t.column("at", .double).notNull()
+            }
+            /// Per team: what this Mac has published and how far it has read each teammate's log.
+            try db.create(table: "syncState") { t in
+                t.column("teamId", .integer).notNull().references("team", onDelete: .cascade)
+                t.column("key", .text).notNull()
+                t.column("value", .text).notNull()
+                t.primaryKey(["teamId", "key"])
+            }
+            /// Changes read from a teammate that can't be applied yet (a rule naming a person not yet known).
+            try db.create(table: "syncDeferred") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("teamId", .integer).notNull().references("team", onDelete: .cascade)
+                t.column("op", .text).notNull()
+            }
+            try db.create(table: "meta") { t in
+                t.primaryKey("key", .text)
+                t.column("value", .text).notNull()
+            }
+            try db.execute(sql: "INSERT INTO meta (key, value) VALUES ('deviceId', ?)", arguments: [SyncIds.new()])
+        }
         return m
     }
 }

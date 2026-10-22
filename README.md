@@ -14,7 +14,7 @@ Point it at any folders — NAS share, external drive or local disk — and it f
 groups them by person, keeps up as new files arrive, and files each person's media into a folder named after them.
 
 - **Projects:** one project per event, each with its own folders. Switch at the top of the sidebar (or File → Open
-  Project); people, search, albums, delivery rules, exports, the gallery and the batch tools follow the open project.
+  Project); people, search, albums, auto rules, exports, the gallery and the batch tools follow the open project.
   People are shared: name someone once and they are recognised in every later project (typing a name suggests
   people named before; "This Is…" merges a group into them).
 - Photos (JPEG, HEIC, PNG, TIFF) and videos (MP4/MOV natively; AV1, WebM, MKV, AVI… via ffmpeg). Videos are sampled
@@ -34,9 +34,18 @@ groups them by person, keeps up as new files arrive, and files each person's med
 and one for landscapes — logo, text or banner watermark, resize — auto tone
   turns on with crops and watermarks), Top N, best of each burst, and people's names written into the files
   (IPTC/XMP, read by Lightroom, Photo Mechanic, Bridge and Photos).
-- **Delivery rules:** new photos of a person (or anyone named) are copied — optionally edited — into a folder (put
-  it inside Google Drive or Dropbox to share automatically) with a notification on the Mac. Runs only while no new
-  file is waiting, so it never slows recognition.
+- **Auto rules:** when new files match a smart-album-style query — photos of one person, everyone with a name, best
+  solo shots of anyone, group shots… — they are copied into a folder (on the NAS, or inside Google Drive or Dropbox
+  to share automatically), either a folder per person or straight into one folder, optionally levelled, auto-toned,
+  cropped, watermarked and resized, with names in the metadata and a notification on the Mac. Edit a rule any time.
+  Runs only while no new file is waiting, so it never slows recognition.
+- **Teams (several Macs, one event):** share a project through a folder every Mac can reach (the NAS share, Dropbox,
+  iCloud Drive): File → Share Project with Team…, teammates pick the same folder with File → Join a Team… and add
+  their own photo folders. From then on a person named on any Mac is recognised on every Mac (names, merges, session
+  names and auto rules are shared; photos, faces and crops stay where they are), within seconds, with no account or
+  server. Each Mac appends to its own log in the folder and reads the others', so a Mac that was offline catches up,
+  the newest change wins, and the same name given on two Macs becomes one person. The sidebar shows the team, its
+  Macs and when it last synced; Leave Team keeps the names and forgets the rest.
 - **Video moments:** per person, a clip of each appearance (cut without re-encoding), a highlight reel of the best
   moments, or the best still frames.
 - **Web gallery:** export a self-contained gallery folder, or share a live gallery on the local network (secret link,

@@ -174,6 +174,21 @@ public struct Exporter: Sendable {
         return try decorate(plan, options: options)
     }
 
+    /// Files straight into `base` (flat rules). Always copies.
+    public func planFlat(_ mediaIds: [Int64], base: URL, options: Options) throws -> Plan {
+        guard !mediaIds.isEmpty else { return Plan() }
+        let rows = try store.db.read { db in
+            try Row.fetchAll(db, sql: "SELECT id, path FROM media WHERE id IN (\(mediaIds.map(String.init).joined(separator: ",")))")
+        }
+        var plan = Plan()
+        for r in rows {
+            let from = URL(fileURLWithPath: r["path"], isDirectory: false)
+            plan.items.append(Item(mediaId: r["id"], from: from, to: base.appendingPathComponent(from.lastPathComponent),
+                                   alsoHasOtherNamedPeople: false, operation: .copy))
+        }
+        return try decorate(plan, options: options)
+    }
+
     /// Specific (file, person) pairs into "<base>/<Name>/" (delivery rules). Always copies.
     public func planPairs(_ pairs: [(mediaId: Int64, personId: Int64, name: String)], base: URL, options: Options) throws -> Plan {
         guard !pairs.isEmpty else { return Plan() }

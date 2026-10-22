@@ -212,47 +212,68 @@ struct SearchView: View {
     }
 }
 
-/// Delivery rules: copy new photos of people to folders (Drive, Dropbox, NAS…) and/or notify.
-struct DeliveryRulesView: View {
+/// Auto rules: when new files match a smart-album-style query, copy them — edited or not — into a folder, and
+/// notify. In a project shared with a team, rules run on every Mac.
+struct RulesView: View {
     @EnvironmentObject var model: FaceGroupingModel
     @State private var adding = false
+    @State private var editing: DeliveryRule?
 
     /// Rules of the open project and rules for every project.
     var rules: [DeliveryRule] { model.rules.filter { model.currentProject == nil || $0.projectId == nil || $0.projectId == model.currentProject } }
 
     var body: some View {
         List {
+            if let team = model.currentTeam {
+                Label("Shared with team \(team.name): every Mac runs these rules on the files it processes.", systemImage: "person.3")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
             if rules.isEmpty {
-                ContentUnavailableView("No delivery rules", systemImage: "paperplane",
-                                       description: Text("Send new photos of a person to a folder — a Google Drive or Dropbox folder, a NAS share — and get notified, automatically as they arrive."))
+                ContentUnavailableView("No rules yet", systemImage: "wand.and.stars",
+                                       description: Text("As new photos arrive and are recognised, a rule copies the ones that match — best solo shots, everything of one person, group shots — into a folder (NAS, Google Drive, Dropbox…), edited the way you want, and tells you."))
             }
             ForEach(rules) { rule in
                 HStack {
                     Toggle("", isOn: Binding(get: { rule.enabled }, set: { model.setRule(rule, enabled: $0) })).labelsHidden()
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(rule.personId.flatMap { id in model.knownPeople.first { $0.id == id }?.displayName } ?? "Everyone with a name")
-                            .font(.headline)
+                        Text(rule.displayName { id in model.knownPeople.first { $0.id == id }?.displayName }).font(.headline)
                         Text(describe(rule)).font(.caption).foregroundStyle(.secondary)
+                        if let f = rule.folder, !FileManager.default.fileExists(atPath: f) {
+                            Label("Folder not reachable on this Mac — files wait until it is", systemImage: "exclamationmark.triangle")
+                                .font(.caption).foregroundStyle(.orange)
+                        }
                     }
                     Spacer()
+                    Button { editing = rule } label: { Image(systemName: "pencil") }.buttonStyle(.borderless).help("Edit Rule")
                     Button(role: .destructive) { model.deleteRule(rule) } label: { Image(systemName: "trash") }.buttonStyle(.borderless)
+                }
+                .contextMenu {
+                    Button("Edit Rule…") { editing = rule }
+                    if let f = rule.folder { Button("Show Folder in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: f) } }
+                    Divider()
+                    Button("Delete Rule", role: .destructive) { model.deleteRule(rule) }
                 }
             }
         }
-        .navigationTitle("Delivery Rules")
+        .navigationTitle("Auto Rules")
         .navigationSubtitle("Runs when new files are processed; never slows recognition")
         .toolbar { ToolbarItem { Button { adding = true } label: { Label("New Rule…", systemImage: "plus") } } }
-        .sheet(isPresented: $adding) { NewRuleSheet() }
+        .sheet(isPresented: $adding) { RuleSheet() }
+        .sheet(item: $editing) { RuleSheet(rule: $0) }
     }
 
     func describe(_ r: DeliveryRule) -> String {
         var parts: [String] = [r.projectId.flatMap { id in model.projects.first { $0.id == id }?.name } ?? "All projects"]
-        if let f = r.folder { parts.append("Copy to \(f)/<Name>/") } else { parts.append("Notify only") }
+        if let f = r.folder {
+            let short = (f as NSString).abbreviatingWithTildeInPath
+            parts.append(r.layout == .person ? "Copy to \(short)/<Name>/" : "Copy to \(short)/")
+        } else { parts.append("Notify only") }
         if let e = r.editRecipe {
             var edits: [String] = []
+            if e.straighten == true { edits.append("level") }
             if e.autoTone { edits.append("auto tone") }
             if let c = e.cropDescription { edits.append(c) }
-            if e.watermark != nil { edits.append("logo") }
+            if e.watermark != nil { edits.append("watermark") }
             if let l = e.maxLongSide { edits.append("\(l) px") }
             if !edits.isEmpty { parts.append(edits.joined(separator: ", ")) }
         }
@@ -262,14 +283,19 @@ struct DeliveryRulesView: View {
     }
 }
 
-struct NewRuleSheet: View {
+/// New or existing rule: what to match (like a smart album), where copies go, how they are edited.
+struct RuleSheet: View {
     @EnvironmentObject var model: FaceGroupingModel
     @Environment(\.dismiss) private var dismiss
+    /// Editing this rule (nil = a new one).
+    var rule: DeliveryRule?
     var presetPerson: Int64?
     var notifyOnly = false
-    @State private var personId: Int64?
+    @State private var name = ""
+    @State private var query = MediaQuery()
     @State private var copy = true
     @State private var folder: URL?
+    @State private var layout = DeliveryRule.Layout.person
     @State private var edit = false
     @State private var recipe = EditRecipe()
     @State private var writeNames = true
@@ -277,54 +303,121 @@ struct NewRuleSheet: View {
     @State private var allProjects = false
     @State private var samples: [ToolItem] = []
 
+    var named: [PersonSummary] { model.knownPeople }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("New Delivery Rule").font(.title2.bold())
-            Picker("When new photos of", selection: $personId) {
-                Text("anyone with a name").tag(Int64?.none)
-                ForEach(model.knownPeople) { Text($0.displayName).tag(Int64?.some($0.id)) }
+            Text(rule == nil ? "New Auto Rule" : "Edit Auto Rule").font(.title2.bold())
+            TextField("Name (optional)", text: $name, prompt: Text("e.g. Best solo shots to NAS")).textFieldStyle(.roundedBorder)
+            Text("When new files match").font(.headline)
+            FlowLayout(spacing: 8, lineSpacing: 6) {
+                Menu(query.people.isEmpty ? "Anyone" : "Add Person") {
+                    ForEach(named.filter { !query.people.contains($0.id) }) { p in Button(p.displayName) { query.people.append(p.id) } }
+                }
+                .fixedSize()
+                ForEach(query.people, id: \.self) { id in
+                    Button { query.people.removeAll { $0 == id } } label: {
+                        Label(named.first { $0.id == id }?.displayName ?? "?", systemImage: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.bordered).controlSize(.small).fixedSize()
+                }
+                if query.people.count > 1 {
+                    Picker("", selection: $query.match) {
+                        Text("All of them together").tag(MediaQuery.PeopleMatch.all)
+                        Text("Any of them").tag(MediaQuery.PeopleMatch.any)
+                    }
+                    .fixedSize()
+                }
+                Picker("", selection: $query.kind) {
+                    Text("Photos & videos").tag(MediaKind?.none)
+                    Text("Photos").tag(MediaKind?.some(.photo))
+                    Text("Videos").tag(MediaKind?.some(.video))
+                }
+                .fixedSize()
+                Picker("", selection: $query.crowd) {
+                    Text("Any number of people").tag(MediaQuery.Crowd.any)
+                    Text("Solo shots").tag(MediaQuery.Crowd.solo)
+                    Text("Group shots").tag(MediaQuery.Crowd.group)
+                }
+                .fixedSize()
+                Toggle("Best shots only", isOn: $query.bestOnly).toggleStyle(.checkbox).fixedSize()
+                Toggle("Skip similar shots", isOn: $query.collapseBursts).toggleStyle(.checkbox).fixedSize()
             }
-            Picker("arrive in", selection: $allProjects) {
+            Picker("In", selection: $allProjects) {
                 Text(model.currentProject == nil ? "Any project" : "This project (\(model.projectName))").tag(false)
                 Text("Any project, now and later").tag(true)
             }
-            .disabled(model.currentProject == nil)
-            Toggle("Copy them into a folder per person", isOn: $copy)
+            .disabled(model.currentProject == nil || model.currentTeam != nil)
+            Text("Then").font(.headline)
+            Toggle("Copy them into a folder", isOn: $copy)
             if copy {
                 HStack {
                     Text(folder?.path ?? "No folder chosen").foregroundStyle(folder == nil ? .secondary : .primary).lineLimit(1).truncationMode(.middle)
                     Spacer()
-                    Button("Choose…") { chooseFolder() }
+                    Button("Choose…") { Panels.chooseFolder { folder = $0 } }
                 }
                 .padding(.leading, 20)
-                Text("Tip: choose a folder inside Google Drive or Dropbox to share automatically.").font(.caption).foregroundStyle(.secondary).padding(.leading, 20)
+                Picker("", selection: $layout) {
+                    Text("A folder per person (<folder>/<Name>/)").tag(DeliveryRule.Layout.person)
+                    Text("Straight into the folder").tag(DeliveryRule.Layout.flat)
+                }
+                .pickerStyle(.radioGroup).padding(.leading, 20)
+                Text("Tip: a folder on the NAS, or inside Google Drive or Dropbox, to share automatically.").font(.caption).foregroundStyle(.secondary).padding(.leading, 20)
                 Toggle("Write names into the files", isOn: $writeNames).padding(.leading, 20)
-                Toggle("Edit photos (auto tone, crop, watermark, resize)", isOn: $edit).padding(.leading, 20)
+                Toggle("Edit photos (level, auto tone, crop, watermark, resize)", isOn: $edit).padding(.leading, 20)
                 if edit { EditOptionsView(recipe: $recipe, samples: samples, remember: "deliveryRule") }
             }
-            Toggle("Also handle files already in the library", isOn: $includeExisting)
-            Text("You'll get a notification on this Mac each time new files arrive.").font(.caption).foregroundStyle(.secondary)
+            if rule == nil { Toggle("Also handle files already in the library", isOn: $includeExisting) }
+            Text(model.currentTeam == nil ? "You'll get a notification on this Mac each time new files arrive."
+                 : "Shared with team \(model.currentTeam!.name): every Mac runs it on the files it processes, each with its own notification.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Add Rule") {
-                    model.addRule(DeliveryRule(personId: personId, folder: copy ? folder?.path : nil, recipe: copy && edit ? recipe : nil,
-                                               writeNames: writeNames, projectId: allProjects ? nil : model.currentProject),
-                                  includeExisting: includeExisting)
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(copy && folder == nil)
+                Button(rule == nil ? "Add Rule" : "Save") { save(); dismiss() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(copy && folder == nil)
             }
         }
         .padding(20)
-        .frame(width: copy && edit ? 960 : 560)
-        .onAppear { personId = presetPerson; copy = !notifyOnly }
-        .task(id: personId) { samples = await model.samples(personId: personId) }
+        .frame(width: copy && edit ? 960 : 620)
+        .onAppear(perform: load)
+        .task(id: query.people.first) { samples = await model.samples(personId: query.people.first) }
     }
 
-    func chooseFolder() {
-        Panels.chooseFolder { folder = $0 }
+    func load() {
+        if let rule {
+            name = rule.name ?? ""
+            query = rule.mediaQuery
+            copy = rule.folder != nil
+            folder = rule.folder.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            layout = rule.layout
+            edit = rule.editRecipe != nil
+            recipe = rule.editRecipe ?? EditRecipe()
+            writeNames = rule.writeNames
+            allProjects = rule.projectId == nil
+        } else {
+            if let presetPerson { query.people = [presetPerson]; query.match = .any }
+            copy = !notifyOnly
+        }
+    }
+
+    func save() {
+        let projectId = allProjects ? nil : model.currentProject
+        if var r = rule {
+            r.name = name.trimmingCharacters(in: .whitespaces).isEmpty ? nil : name
+            r.projectId = projectId
+            r.setQuery(query)
+            r.folder = copy ? folder?.path : nil
+            r.layout = layout
+            r.setRecipe(copy && edit ? recipe : nil)
+            r.writeNames = writeNames
+            model.updateRule(r)
+        } else {
+            model.addRule(DeliveryRule(name: name, query: query, folder: copy ? folder?.path : nil, layout: layout,
+                                       recipe: copy && edit ? recipe : nil, writeNames: writeNames, projectId: projectId),
+                          includeExisting: includeExisting)
+        }
     }
 }
 

@@ -39,7 +39,7 @@ struct AppShell: View {
                 ToolsSidebar()
             }
             .navigationSplitViewColumnWidth(min: 220, ideal: 250)
-            .safeAreaInset(edge: .top) { ProjectSwitcher() }
+            .safeAreaInset(edge: .top) { VStack(spacing: 0) { ProjectSwitcher(); TeamBar() } }
             .safeAreaInset(edge: .bottom) { FaceGroupingStatus() }
             .toolbar { FaceGroupingSidebarToolbar() }
         } detail: {
@@ -58,5 +58,7 @@ struct AppShell: View {
             if case .faces(let r) = route, r != .people, r != .unassigned, r != .search, r != .rules { route = .faces(.people) }
         }
         .sheet(isPresented: $faces.askNewProject) { NewProjectSheet() }
+        .sheet(isPresented: $faces.askShareTeam) { ShareTeamSheet() }
+        .sheet(isPresented: $faces.askJoinTeam) { JoinTeamSheet() }
     }
 }

@@ -42,7 +42,8 @@ public enum EventSessions {
             }
         }
         guard let project, !out.isEmpty else { return out }
-        let labels = try Row.fetchAll(db, sql: "SELECT at, name FROM sessionLabel WHERE projectId = ? ORDER BY at", arguments: [project])
+        // A cleared name is kept as an empty one (so teammates' Macs clear it too).
+        let labels = try Row.fetchAll(db, sql: "SELECT at, name FROM sessionLabel WHERE projectId = ? AND name != '' ORDER BY at", arguments: [project])
         for l in labels {
             let at: Double = l["at"]
             if let i = out.firstIndex(where: { $0.contains(at) }), out[i].name == nil { out[i].name = l["name"] }
@@ -53,14 +54,28 @@ public enum EventSessions {
     /// Names a session (nil or empty clears it).
     public static func setName(_ store: LibraryStore, project: Int64, session: EventSession, name: String?) throws {
         let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        try store.db.write { db in
-            try db.execute(sql: "DELETE FROM sessionLabel WHERE projectId = ? AND at BETWEEN ? AND ?",
-                           arguments: [project, session.start, session.end])
-            if !trimmed.isEmpty {
-                try db.execute(sql: "INSERT INTO sessionLabel (projectId, at, name) VALUES (?, ?, ?)",
-                               arguments: [project, session.start, trimmed])
-            }
+        _ = try store.db.write { db in
+            try setName(db, project: project, at: session.start, name: trimmed, updatedAt: Date().timeIntervalSince1970,
+                        clearing: session.start...session.end)
         }
+    }
+
+    /// Stores a name for the moment `at` when it is newer than the one there. Other names within `clearing` are
+    /// emptied (kept as rows, so the clearing travels to teammates' Macs).
+    @discardableResult
+    static func setName(_ db: Database, project: Int64, at: Double, name: String, updatedAt: Double,
+                        clearing: ClosedRange<Double>? = nil) throws -> Bool {
+        if let clearing {
+            try db.execute(sql: "UPDATE sessionLabel SET name = '', updatedAt = ? WHERE projectId = ? AND at BETWEEN ? AND ? AND at != ? AND name != ''",
+                           arguments: [updatedAt, project, clearing.lowerBound, clearing.upperBound, at])
+        }
+        if let existing = try Double.fetchOne(db, sql: "SELECT updatedAt FROM sessionLabel WHERE projectId = ? AND at = ?", arguments: [project, at]) {
+            guard updatedAt > existing else { return false }
+            try db.execute(sql: "UPDATE sessionLabel SET name = ?, updatedAt = ? WHERE projectId = ? AND at = ?", arguments: [name, updatedAt, project, at])
+        } else {
+            try db.execute(sql: "INSERT INTO sessionLabel (projectId, at, name, updatedAt) VALUES (?, ?, ?, ?)", arguments: [project, at, name, updatedAt])
+        }
+        return true
     }
 
     /// SQL condition on media alias `m`: captured within the range (true when nil).

@@ -8,7 +8,7 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Tính năng | Mô tả ngắn |
 |---|---|
 | Dự án (Project) | Mỗi sự kiện là một dự án gồm nhiều thư mục; chuyển dự án ở đầu thanh bên (⇧⌘N để tạo mới). |
-| Làm việc theo dự án | Người, tìm kiếm, album, quy tắc gửi, xuất file, gallery và công cụ hàng loạt chỉ hiển thị dữ liệu của dự án đang mở. |
+| Làm việc theo dự án | Người, tìm kiếm, album, quy tắc tự động, xuất file, gallery và công cụ hàng loạt chỉ hiển thị dữ liệu của dự án đang mở. |
 | Tất cả dự án | Xem gộp mọi dự án cùng lúc. |
 | Nguồn NAS / ổ ngoài / ổ trong | Thêm thư mục từ NAS (SMB), ổ cứng ngoài hoặc ổ máy; NAS kiểm tra mỗi 5 giây, ổ trong theo dõi tức thì. |
 | Theo dõi file mới | File mới chép vào được xử lý ngay khi chép xong; file đang chép dở sẽ được chờ. |
@@ -79,7 +79,20 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Không ghi đè | Bỏ qua file đã có hoặc giữ cả hai (thêm " (2)"). |
 | Ghi tên vào file | Ghi tên người vào metadata (IPTC/XMP) để Lightroom, Photo Mechanic, Bridge, Photos đọc được. |
 | Top N và bỏ ảnh trùng | Chỉ xuất N ảnh đẹp nhất mỗi người và ảnh đẹp nhất mỗi loạt. |
-| Quy tắc gửi tự động | Ảnh mới của một người (hoặc mọi người có tên) tự chép vào thư mục (vd. Google Drive, Dropbox), có thể kèm chỉnh sửa, và báo trên Mac. Thư mục đích chưa gắn hoặc lỗi chép thì tự thử lại sau. |
+| Quy tắc tự động (Auto Rules) | Khi có file mới khớp điều kiện kiểu album thông minh (ảnh của một người, mọi người có tên, ảnh đơn đẹp nhất của bất kỳ ai, ảnh nhóm, chỉ ảnh/chỉ video…), tự chép vào thư mục (NAS, Google Drive, Dropbox) — mỗi người một thư mục hoặc tất cả vào một thư mục — có thể kèm cân chỉnh thẳng, auto tone, cắt, watermark, đổi cỡ, ghi tên vào metadata, và báo trên Mac. Sửa quy tắc bất kỳ lúc nào. Thư mục đích chưa gắn hoặc lỗi chép thì tự thử lại sau. |
+
+## Nhóm làm việc (Team) — nhiều máy, một sự kiện
+
+| Tính năng | Mô tả ngắn |
+|---|---|
+| Chia sẻ dự án qua thư mục | File → Share Project with Team…: chọn một thư mục mọi máy đều mở được (share NAS, Dropbox, iCloud Drive). Không cần tài khoản hay máy chủ. |
+| Tham gia nhóm | Trên máy khác: File → Join a Team…, chọn đúng thư mục đó, rồi thêm thư mục ảnh của mình vào dự án. |
+| Nhận diện chung | Đặt tên một người trên máy nào thì mọi máy trong nhóm đều nhận ra người đó (kể cả máy của người khác) trong vài giây. |
+| Dữ liệu được chia sẻ | Tên người, gộp người, tên phiên và quy tắc tự động. Ảnh, khuôn mặt và ảnh cắt vẫn ở máy nào xử lý máy đó. |
+| Làm việc cùng lúc | Mỗi máy ghi vào nhật ký riêng của mình trong thư mục và đọc của máy khác, nên nhiều máy chạy cùng lúc không đụng nhau; máy mất mạng sẽ tự bắt kịp khi có lại. |
+| Thay đổi mới nhất thắng | Hai máy cùng sửa tên: tên sửa sau thắng. Cùng một tên đặt trên hai máy thì gộp thành một người. |
+| Trạng thái nhóm | Thanh bên hiện tên nhóm, số máy, lần đồng bộ gần nhất; thư mục không truy cập được thì báo và tự tiếp tục khi có lại. Sync Now, mở thư mục nhóm, Leave Team (giữ tên người). |
+| Quy tắc chạy trên mọi máy | Quy tắc tự động của dự án chia sẻ chạy trên từng máy với các file máy đó xử lý. Thư mục đích nên là đường dẫn giống nhau trên mọi máy (cùng share NAS). |
 | Khoảnh khắc video | Mỗi người: cắt từng đoạn xuất hiện (không nén lại), dựng video highlight, hoặc xuất khung hình đẹp nhất. |
 | Web gallery tĩnh | Xuất thư mục gallery có index.html, mở bằng trình duyệt hoặc chia sẻ qua Drive/NAS. |
 | Gallery trong mạng nội bộ | Chia sẻ gallery qua link bí mật trong mạng LAN để xem, phát video, tải ảnh gốc và đặt tên từ iPad, điện thoại. Chỉ truy cập được ảnh của dự án đang mở. |
@@ -99,7 +112,7 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Watermark dạng banner | Thanh ngang trải hết chiều rộng ảnh (trên, giữa hoặc dưới); một ảnh banner cho ảnh ngang, một cho ảnh dọc, tự chọn theo hướng ảnh. Đặt chiều cao banner (mặc định 112 px trên ảnh cạnh dài 2048 px, tính theo cạnh dài) nên ảnh ngang hay dọc, khung nào cũng cao như nhau; banner được căn giữa, hai bên dư được cắt bỏ (banner hẹp hơn ảnh thì được kéo giãn ngang, chiều cao không đổi). Làm banner rộng hơn ảnh một chút và để chữ, logo ở vùng an toàn giữa banner. |
 | Mẫu watermark (preset) | Lưu nhiều mẫu trong Settings → Watermarks; mỗi màn hình chọn và chỉnh mẫu riêng, lưu lại hoặc lưu thành mẫu mới. |
 | Căn vị trí watermark | Lưới 3×3 hoặc bấm thẳng lên ảnh xem trước để đặt watermark. |
-| Nhớ cài đặt theo màn hình | Mỗi màn hình (Batch Export, Copy/Move, quy tắc gửi, gallery, ảnh từ video) nhớ cài đặt chỉnh sửa riêng. |
+| Nhớ cài đặt theo màn hình | Mỗi màn hình (Batch Export, Copy/Move, quy tắc tự động, gallery, ảnh từ video) nhớ cài đặt chỉnh sửa riêng. |
 | Xem trước lớn | Ảnh xem trước lớn, so sánh trước/sau, hiện kích thước đầu ra, dải ảnh thu nhỏ để chọn ảnh khác. |
 | Thay đổi kích thước | Cạnh dài 1080–3000 px hoặc kích thước gốc. Khi cắt khung, mặc định cạnh dài 2048 px (Facebook hiển thị tới 2048 px mà không thu nhỏ); vẫn chọn được cỡ riêng của từng nền tảng (vd. 1350 px cho Instagram 4:5). Giữ khung gốc thì giữ kích thước gốc. |
 | Xuất JPEG hoặc PNG | JPEG chỉnh được chất lượng; PNG không nén mất dữ liệu, giữ không gian màu gốc, 16-bit nếu ảnh gốc sâu hơn 8-bit. |

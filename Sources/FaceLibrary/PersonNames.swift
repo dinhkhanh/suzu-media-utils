@@ -26,6 +26,20 @@ public enum PersonNames {
         let others = others.filter { $0 != target }
         guard !others.isEmpty else { return }
         let list = others.map(String.init).joined(separator: ",")
+        // Teammates' Macs merge the same people (by their stable ids); a chain of merges resolves to the last.
+        if let into = try String.fetchOne(db, sql: "SELECT uuid FROM person WHERE id = ?", arguments: [target]) {
+            let now = Date().timeIntervalSince1970
+            for from in try String.fetchAll(db, sql: "SELECT uuid FROM person WHERE id IN (\(list))") where from != into {
+                try db.execute(sql: "INSERT OR REPLACE INTO personMerge (fromUuid, intoUuid, at) VALUES (?, ?, ?)", arguments: [from, into, now])
+                try db.execute(sql: "UPDATE personMerge SET intoUuid = ? WHERE intoUuid = ?", arguments: [into, from])
+            }
+            // The newest name wins when the target is renamed later; keep its own name now.
+            try db.execute(sql: """
+                UPDATE person SET nameAt = MAX(COALESCE(nameAt, 0), COALESCE((SELECT MAX(nameAt) FROM person WHERE id IN (\(list))), 0))
+                WHERE id = ? AND name IS NOT NULL
+                """, arguments: [target])
+        }
+        try db.execute(sql: "UPDATE OR IGNORE personRemote SET personId = ? WHERE personId IN (\(list))", arguments: [target])
         try db.execute(sql: "UPDATE face SET personId = ? WHERE personId IN (\(list))", arguments: [target])
         try db.execute(sql: "UPDATE face SET rejectedPersonId = ? WHERE rejectedPersonId IN (\(list))", arguments: [target])
         try db.execute(sql: "UPDATE person SET coverFaceId = (SELECT coverFaceId FROM person WHERE id IN (\(list)) AND coverFaceId IS NOT NULL LIMIT 1) WHERE id = ? AND coverFaceId IS NULL", arguments: [target])
@@ -34,13 +48,23 @@ public enum PersonNames {
         try db.execute(sql: "UPDATE OR IGNORE delivery SET personId = ? WHERE personId IN (\(list))", arguments: [target])
         try db.execute(sql: "DELETE FROM delivery WHERE personId IN (\(list))")
         let set = Set(others)
-        for var album in try SmartAlbum.fetchAll(db) {
-            var q = album.mediaQuery
-            guard q.people.contains(where: set.contains) else { continue }
+        func rewrite(_ q: inout MediaQuery) -> Bool {
+            guard q.people.contains(where: set.contains) else { return false }
             var seen: Set<Int64> = []
             q.people = q.people.map { set.contains($0) ? target : $0 }.filter { seen.insert($0).inserted }
+            return true
+        }
+        for var album in try SmartAlbum.fetchAll(db) {
+            var q = album.mediaQuery
+            guard rewrite(&q) else { continue }
             album.query = String(decoding: (try? JSONEncoder().encode(q)) ?? Data(), as: UTF8.self)
             try album.update(db)
+        }
+        for var rule in try DeliveryRule.fetchAll(db) where rule.query != nil {
+            var q = rule.mediaQuery
+            guard rewrite(&q) else { continue }
+            rule.setQuery(q)
+            try rule.update(db)
         }
         try db.execute(sql: "DELETE FROM person WHERE id IN (\(list))")
     }

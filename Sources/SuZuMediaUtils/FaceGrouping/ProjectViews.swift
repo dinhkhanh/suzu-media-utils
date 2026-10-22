@@ -27,6 +27,11 @@ struct ProjectSwitcher: View {
                 Button("Rename Project…") { newName = current?.name ?? ""; renaming = true }
                 Button("Delete Project…", role: .destructive) { confirmDelete = true }
             }
+            Divider()
+            if current != nil {
+                Button(model.currentTeam == nil ? "Share Project with Team…" : "Team “\(model.currentTeam!.name)”…") { model.askShareTeam = true }
+            }
+            Button("Join a Team…") { model.askJoinTeam = true }
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: model.currentProject == nil ? "square.stack.3d.up" : "calendar")

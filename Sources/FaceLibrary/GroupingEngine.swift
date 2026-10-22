@@ -82,6 +82,29 @@ public final class GroupingEngine: @unchecked Sendable {
         queue.async { [self] in try? recluster() }
     }
 
+    /// Teammates' summaries of these people arrived (team sync): re-match waiting faces and name matching groups.
+    public func remoteChanged(_ ids: Set<Int64>) {
+        guard !ids.isEmpty else { return }
+        queue.async { [self] in
+            try? rebuild(personIds: ids)
+            try? assignAllPending()
+            try? autoName()
+        }
+    }
+
+    /// The mean of a person's own faces on this Mac (teammates' summaries left out) and how many units it covers;
+    /// nil when they have no usable face here. What this Mac publishes to its teams.
+    public func localSummary(_ personId: Int64) -> (centroid: [Float], count: Int)? {
+        queue.sync {
+            guard let rows = try? loadRows("face.personId = ?", [personId]) else { return nil }
+            let us = units(rows)
+            guard !us.isEmpty else { return nil }
+            var sum = [Float](repeating: 0, count: 512)
+            for u in us { for i in 0..<min(512, u.vector.count) { sum[i] += u.vector[i] } }
+            return (sum.map { $0 / Float(us.count) }, us.count)
+        }
+    }
+
     /// Blocks until queued engine work is done (tests, shutdown).
     public func waitUntilIdle() { queue.sync {} }
 
@@ -145,6 +168,7 @@ public final class GroupingEngine: @unchecked Sendable {
         for (pid, rs) in Dictionary(grouping: rows, by: { $0.face.personId! }) {
             for u in units(rs) { add(u.vector, to: pid) }
         }
+        try addRemote("1")
     }
 
     func rebuild(personIds: Set<Int64>) throws {
@@ -152,7 +176,25 @@ public final class GroupingEngine: @unchecked Sendable {
             people[pid] = nil
             for u in units(try loadRows("face.personId = ?", [pid])) { add(u.vector, to: pid) }
         }
+        try addRemote("personId IN (\(personIds.map(String.init).joined(separator: ",")))")
     }
+
+    /// Faces a teammate's Mac saw count as if they were here: the mean of their embeddings, weighted by how many
+    /// (capped, so one Mac's thousands of faces never drown out what this Mac sees).
+    func addRemote(_ condition: String) throws {
+        let rows = try store.db.read { db in
+            try Row.fetchAll(db, sql: "SELECT personId, centroid, count FROM personRemote WHERE \(condition)")
+        }
+        for r in rows {
+            let pid: Int64 = r["personId"], centroid = Vector.decode(r["centroid"]), n = min(Int(r["count"] as Int64), Self.remoteWeightCap)
+            guard centroid.count == 512, n > 0 else { continue }
+            var p = people[pid] ?? ([Float](repeating: 0, count: 512), 0)
+            for i in 0..<512 { p.sum[i] += centroid[i] * Float(n) }
+            p.count += n
+            people[pid] = p
+        }
+    }
+    static let remoteWeightCap = 30
 
     // MARK: - Assignment
 

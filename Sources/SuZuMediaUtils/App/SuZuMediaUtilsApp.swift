@@ -24,6 +24,10 @@ struct SuZuMediaUtilsApp: App {
                 Button("Add Photo & Video Folder…") { faces.addFolder(kind: .media) }
                     .keyboardShortcut("o")
                 Button("Add Known-People Folder…") { faces.addFolder(kind: .reference) }
+                Divider()
+                Button("Share Project with Team…") { faces.askShareTeam = true }
+                    .disabled(faces.currentProject == nil)
+                Button("Join a Team…") { faces.askJoinTeam = true }
             }
         }
         // Photos opened from the library: Batch Export with just them.

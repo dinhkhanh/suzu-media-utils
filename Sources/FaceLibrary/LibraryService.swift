@@ -17,17 +17,21 @@ public final class LibraryService: @unchecked Sendable {
     /// Called (on a background queue) after delivery rules handled new files: person name -> count.
     public var onDelivered: (@Sendable (DeliveryService.Report) -> Void)?
     public var delivery: DeliveryService { DeliveryService(store: store) }
+    /// Projects shared with other Macs through a folder (see TeamSync).
+    public let teamSync: TeamSync
 
     public init(modelURL: URL, directory: URL = LibraryStore.defaultDirectory) throws {
         store = try LibraryStore(directory: directory)
         engine = GroupingEngine(store: store)
         processor = try Processor(store: store, engine: engine, modelURL: modelURL)
+        teamSync = TeamSync(store: store, engine: engine)
     }
 
     public func start() {
         // Interrupted runs leave nothing half-written (faces and status change in one transaction); just requeue.
         engine.start()
         processor.enqueuePending()
+        teamSync.start()
         for s in (try? store.db.read { db in try SourceRecord.fetchAll(db) }) ?? [] { startMonitor(s) }
         let t = DispatchSource.makeTimerSource(queue: maintenanceQueue)
         t.schedule(deadline: .now() + 10, repeating: 10)
@@ -318,9 +322,11 @@ public final class LibraryService: @unchecked Sendable {
             return existing
         }
         try store.db.write { db in
-            try db.execute(sql: "UPDATE person SET name = ? WHERE id = ?", arguments: [name.isEmpty ? nil : name, personId])
+            try db.execute(sql: "UPDATE person SET name = ?, nameAt = ? WHERE id = ?",
+                           arguments: [name.isEmpty ? nil : name, Date().timeIntervalSince1970, personId])
         }
         engine.reclusterNow()  // runs autoName, so unnamed groups that match this person join it
+        teamSync.pushSoon()
         return personId
     }
 
@@ -329,6 +335,7 @@ public final class LibraryService: @unchecked Sendable {
         guard !others.isEmpty else { return }
         try store.db.write { db in try PersonNames.merge(others, into: target, db: db) }
         engine.peopleChanged(Set(ids))
+        teamSync.pushSoon()
     }
 
     /// "Not this person": the faces leave the person and are never auto-assigned back to them.
@@ -353,6 +360,7 @@ public final class LibraryService: @unchecked Sendable {
         }
         engine.peopleChanged(previous.union([personId]))
         deleteEmptyPeople()
+        teamSync.pushSoon()
     }
 
     /// Creates a named person from faces (e.g. picked from "Unassigned"). A name someone already has adds the

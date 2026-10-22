@@ -158,7 +158,7 @@ final class SafetyTests: XCTestCase {
         try store.db.read { db in
             XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM person"), 1)
             XCTAssertEqual(try Int64.fetchOne(db, sql: "SELECT personId FROM face"), a)
-            XCTAssertEqual(try Int64.fetchOne(db, sql: "SELECT personId FROM deliveryRule"), a, "the rule follows the person")
+            XCTAssertEqual(try DeliveryRule.fetchOne(db)!.mediaQuery.people, [a], "the rule follows the person")
             XCTAssertEqual(try SmartAlbum.fetchOne(db)!.mediaQuery.people, [a])
         }
     }

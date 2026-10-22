@@ -299,3 +299,32 @@ and after every feature below; same 92 people.
 - Copy Verifier: checksums on by default, unreadable files count as damaged, repairs go through a checked temp file.
 - Move All re-runs keep a photo already in someone's folder; files seen growing settle for 5 s (15 s on NAS); a
   folder offline at launch is polled every 5 s until its volume is known; copies are only duplicates within a project.
+
+## v0.6 (2026-10-23): teams (several Macs, one event) and auto rules
+- **Team sync** (`TeamSync`): a project is shared through a folder every Mac can reach (NAS share, Dropbox, iCloud
+  Drive). Chosen over CloudKit/Bonjour for now: nothing to sign up for, works at the venue with no internet, and it
+  is testable here end to end. The folder holds `team.json`, `devices/<deviceId>.jsonl` (each Mac appends only its
+  own log: person, merge, session, rule changes with the time they were made) and `summaries/<deviceId>.json` (the
+  mean ArcFace embedding and face count per person, rewritten at most once a minute). No locking is needed because
+  nobody writes anyone else's file; readers consume whole lines only, so a half-appended line is read next pass.
+- Stable ids: `person.uuid`, `deliveryRule.uuid`; `person.nameAt`, `deliveryRule.updatedAt`, `sessionLabel.updatedAt`
+  give last-writer-wins. Merges are tombstoned in `personMerge` (chains rewritten) so every Mac merges the same
+  people; the same name given on two Macs independently converges on the smaller uuid. Rules travel with people as
+  uuids and wait in `syncDeferred` until those people are known. Deleted rules and cleared session names are kept as
+  rows (`deletedAt`, empty name) so the deletion travels.
+- Recognition across Macs: `personRemote` rows feed the grouping engine as weighted units (`addRemote`, capped at
+  30 per teammate's Mac), so a face on Mac B matches a person named only on Mac A, and autoName merges B's unnamed
+  group into them. The published centroid is computed from local faces only (`localSummary`).
+- Scope: a person travels to a team when they have faces in the team's project (or a rule of it names them). People
+  named elsewhere stay private to the Mac until they appear in the event. Leaving a team keeps names, drops summaries.
+- Passes every 5 s; a user change (`pushSoon`) publishes on the next pass. Status (reachable, Macs, last sync) is
+  shown under the project switcher. 9 tests (`TeamSyncTests`) run two libraries against one folder.
+- Known limits, for later: rule target folders are shared as paths (works when every Mac mounts the same share at
+  the same path; otherwise the rule waits and the list says so); two Macs ingesting the same card both export (plain
+  copies dedupe by content key, edited copies don't); embeddings are only comparable within one model (`model` tag).
+  Next transport candidates on the same files: CloudKit (join by link with the Apple ID; needs the iCloud entitlement
+  and a provisioning profile in `build-app.sh`) and Bonjour for venues without a NAS.
+- **Auto rules** generalise delivery rules: the trigger is a `MediaQuery` (people all/any, solo/group, photos/videos,
+  best shots, one per burst), the layout is per-person folders or flat, and rules can be edited. Older rules keep
+  working (the person becomes a one-person query). `DeliveryService.pending` runs the query and subtracts the
+  `delivery` ledger; flat rules use `delivery.personId = 0`. 3 tests (`RuleTests`).
