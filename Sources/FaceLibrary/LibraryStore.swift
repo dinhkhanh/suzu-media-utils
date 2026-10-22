@@ -98,6 +98,7 @@ public final class LibraryStore: @unchecked Sendable {
                 t.add(column: "smile", .double)
                 t.add(column: "sharpness", .double)
                 t.add(column: "yaw", .double)
+                t.add(column: "pitch", .double)
                 /// Best-shot score 0-1 (see BestShot); higher is better.
                 t.add(column: "score", .double)
             }

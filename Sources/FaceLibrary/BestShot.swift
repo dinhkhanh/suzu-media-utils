@@ -10,22 +10,26 @@ public enum BestShot {
         v.map { min(1, max(0, (log10(max($0, 1)) - 1.6) / 1.4)) }
     }
 
-    /// 1 facing the camera, 0 at ~40° or more to the side (Vision yaw is in radians).
-    public static func frontalScore(_ yaw: Double?) -> Double {
-        guard let yaw else { return 0.7 }
-        return 1 - min(1, abs(yaw) / 0.7)
+    /// 1 facing the camera, 0 turned ~40° to the side or tilted ~35° up/down (Vision angles are radians).
+    public static func frontalScore(yaw: Double?, pitch: Double?) -> Double {
+        let y = yaw.map { 1 - min(1, abs($0) / 0.7) } ?? 0.7
+        let p = pitch.map { 1 - min(1, abs($0) / 0.6) } ?? 0.8
+        return y * p
     }
 
-    /// 0-1. Weights favour faces that are well exposed and in focus (Vision capture quality, sharpness), then eyes
-    /// open, facing the camera, smiling and reasonably large. Missing measurements count as average.
-    public static func score(quality: Double?, sharpness: Double?, eyesOpen: Double?, smile: Double?, yaw: Double?, widthPixels: Double) -> Double {
+    /// 0-1. Vision's capture quality already judges a portrait well (exposure, focus, pose, expression), so it
+    /// carries most weight; sharpness, open eyes and facing the camera refine it; smile and size are tie-breakers.
+    /// Closed eyes cut the score hard. Missing measurements count as average.
+    public static func score(quality: Double?, sharpness: Double?, eyesOpen: Double?, smile: Double?, yaw: Double?,
+                             pitch: Double? = nil, widthPixels: Double) -> Double {
         let q = quality ?? 0.4
         let s = sharpnessScore(sharpness) ?? 0.5
         let e = eyesOpen ?? 0.6
         let m = smile ?? 0.4
-        let f = frontalScore(yaw)
+        let f = frontalScore(yaw: yaw, pitch: pitch)
         let size = min(1, widthPixels / 250)
-        return 0.30 * q + 0.25 * s + 0.15 * e + 0.10 * m + 0.10 * f + 0.10 * size
+        let base = 0.45 * q + 0.20 * s + 0.12 * e + 0.05 * m + 0.13 * f + 0.05 * size
+        return e < 0.35 ? base * 0.6 : base
     }
 
     /// SQL expression ranking a person's faces for their picture: best score, strongly preferring faces that look
@@ -33,6 +37,8 @@ public enum BestShot {
     public static let coverOrderSQL = """
         COALESCE(f.score, f.quality * 0.6, 0)
           * (CASE WHEN ABS(COALESCE(f.yaw, 0)) < 0.35 THEN 1.0 ELSE 0.55 END)
+          * (CASE WHEN ABS(COALESCE(f.pitch, 0)) < 0.3 THEN 1.0 ELSE 0.6 END)
+          * (CASE WHEN COALESCE(f.eyesOpen, 1) >= 0.5 THEN 1.0 ELSE 0.5 END)
           * (CASE WHEN f.sharpness IS NULL OR f.sharpness >= 120 THEN 1.0 ELSE 0.6 END)
           * (CASE WHEN f.time IS NULL THEN 1.0 ELSE 0.85 END)
         """

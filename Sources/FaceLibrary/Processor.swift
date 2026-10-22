@@ -101,9 +101,10 @@ public final class Processor: @unchecked Sendable {
             quality: q, time: af.time, embedding: vector.map(Vector.encode),
             track: nil, personId: nil, assignment: .none, rejectedPersonId: nil,
             eyesOpen: af.face.eyesOpen.map(Double.init), smile: af.face.smile.map(Double.init), sharpness: af.sharpness,
-            yaw: af.face.yaw.map(Double.init),
+            yaw: af.face.yaw.map(Double.init), pitch: af.face.pitch.map(Double.init),
             score: BestShot.score(quality: q, sharpness: af.sharpness, eyesOpen: af.face.eyesOpen.map(Double.init),
-                                  smile: af.face.smile.map(Double.init), yaw: af.face.yaw.map(Double.init), widthPixels: af.face.w))
+                                  smile: af.face.smile.map(Double.init), yaw: af.face.yaw.map(Double.init),
+                                  pitch: af.face.pitch.map(Double.init), widthPixels: af.face.w))
     }
 
     // MARK: - Upgrading older analyses
@@ -166,8 +167,8 @@ public final class Processor: @unchecked Sendable {
                     guard let match = existing.filter({ $0.time == fresh.time }).max(by: {
                         Self.iou(CGRect(x: $0.x, y: $0.y, width: $0.w, height: $0.h), box) < Self.iou(CGRect(x: $1.x, y: $1.y, width: $1.w, height: $1.h), box)
                     }), Self.iou(CGRect(x: match.x, y: match.y, width: match.w, height: match.h), box) > 0.4 else { continue }
-                    try db.execute(sql: "UPDATE face SET eyesOpen = ?, smile = ?, sharpness = ?, yaw = ?, score = ? WHERE id = ?",
-                                   arguments: [fresh.eyesOpen, fresh.smile, fresh.sharpness, fresh.yaw, fresh.score, match.id])
+                    try db.execute(sql: "UPDATE face SET eyesOpen = ?, smile = ?, sharpness = ?, yaw = ?, pitch = ?, score = ? WHERE id = ?",
+                                   arguments: [fresh.eyesOpen, fresh.smile, fresh.sharpness, fresh.yaw, fresh.pitch, fresh.score, match.id])
                 }
                 try db.execute(sql: "UPDATE media SET takenAt = ? WHERE id = ?",
                                arguments: [(analyzed.takenAt ?? Date(timeIntervalSince1970: media.mtime)).timeIntervalSince1970, mediaId])

@@ -85,6 +85,7 @@ public struct FaceRecord: Codable, FetchableRecord, MutablePersistableRecord, Id
     public var smile: Double?
     public var sharpness: Double?
     public var yaw: Double?
+    public var pitch: Double?
     public var score: Double?
 
     public mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
