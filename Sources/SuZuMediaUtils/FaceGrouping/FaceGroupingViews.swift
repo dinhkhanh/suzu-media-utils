@@ -125,8 +125,12 @@ struct SourceRow: View {
             Image(systemName: !source.online ? "externaldrive.badge.xmark" : source.network ? "server.rack" : "folder")
         }
         .contextMenu {
-            Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: source.path) }
-            Button("Rescan") { model.rescan(source.id) }
+            if source.online {
+                Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: source.path) }
+                Button("Rescan") { model.rescan(source.id) }
+            }
+            // Renamed or moved in Finder: relink instead of removing (which forgets every face in it).
+            Button("Locate Folder…") { model.locateSource(source.id) }
             if source.kind == .media && model.projects.count > 1 {
                 Menu("Move to Project") {
                     ForEach(model.projects.filter { $0.id != source.projectId }) { p in
@@ -140,7 +144,7 @@ struct SourceRow: View {
     }
 
     var status: String {
-        if !source.online { return "Offline" }
+        if !source.online { return "Offline (renamed? right-click → Locate Folder…)" }
         if source.scanning && source.found > source.files { return "Scanning… \(source.found.formatted()) files found" }
         if source.pending > 0 { return "Processing \(source.pending.formatted()) of \(source.files.formatted())" }
         return "\(source.files.formatted()) files"

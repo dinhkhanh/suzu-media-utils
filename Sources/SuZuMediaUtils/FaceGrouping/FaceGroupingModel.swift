@@ -491,6 +491,14 @@ final class FaceGroupingModel: ObservableObject {
     }
     func rescan(_ id: Int64) { service?.rescan(id) }
 
+    /// The folder was renamed or moved in Finder: point the library at it again, keeping every face and name.
+    func locateSource(_ id: Int64) {
+        let start = sources.first { $0.id == id }.map { URL(fileURLWithPath: $0.path).deletingLastPathComponent() }
+        Panels.chooseFolder(prompt: "Use This Folder", start: start) { [weak self] url in
+            self?.perform { try $0.relinkSource(id, to: url) }
+        }
+    }
+
     @discardableResult
     func rename(_ personId: Int64, to name: String) -> Int64 {
         var result = personId

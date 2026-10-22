@@ -59,25 +59,43 @@ public struct RenamePattern: Sendable, Equatable {
         return t.trimmingCharacters(in: CharacterSet(charactersIn: "_- ."))
     }
 
-    /// Renames in two steps (through temporary names) so swaps like a<->b work. Returns (old, new) per renamed file.
-    public static func apply(_ items: [Item], names: [String]) throws -> [(URL, URL)] {
+    public struct Outcome: Sendable {
+        /// (old, new) per renamed file.
+        public var renamed: [(URL, URL)] = []
+        /// Files left as they were (or, if even that failed, under the temporary name in the message).
+        public var failed: [(URL, String)] = []
+    }
+
+    /// Renames in two steps (through temporary names) so swaps like a<->b and shifted numbers work. Never throws
+    /// half-way: a file that can't take its new name goes back to its old one.
+    public static func apply(_ items: [Item], names: [String]) -> Outcome {
         let fm = FileManager.default
-        var temps: [(URL, URL, URL)] = []
+        var out = Outcome()
+        var temps: [(old: URL, tmp: URL, new: URL)] = []
         for (item, name) in zip(items, names) where item.url.lastPathComponent != name {
             let tmp = item.url.deletingLastPathComponent().appendingPathComponent(".rename-\(UUID().uuidString)")
-            try fm.moveItem(at: item.url, to: tmp)
-            temps.append((item.url, tmp, item.url.deletingLastPathComponent().appendingPathComponent(name)))
-        }
-        var done: [(URL, URL)] = []
-        for (old, tmp, new) in temps {
-            if fm.fileExists(atPath: new.path) {
-                try fm.moveItem(at: tmp, to: old)  // a different file already has that name: leave this one as it was
-                continue
+            do {
+                try fm.moveItem(at: item.url, to: tmp)
+                temps.append((item.url, tmp, item.url.deletingLastPathComponent().appendingPathComponent(name)))
+            } catch {
+                out.failed.append((item.url, error.localizedDescription))
             }
-            try fm.moveItem(at: tmp, to: new)
-            done.append((old, new))
         }
-        return done
+        for t in temps {
+            do {
+                // A file outside this batch already has that name.
+                if fm.fileExists(atPath: t.new.path) { throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: t.new.path]) }
+                try fm.moveItem(at: t.tmp, to: t.new)
+                out.renamed.append((t.old, t.new))
+            } catch {
+                if (try? fm.moveItem(at: t.tmp, to: t.old)) != nil {
+                    out.failed.append((t.old, error.localizedDescription))
+                } else {
+                    out.failed.append((t.old, "\(error.localizedDescription) It is now named “\(t.tmp.lastPathComponent)”."))
+                }
+            }
+        }
+        return out
     }
 
     public static func captureDate(_ url: URL) -> Date? {

@@ -50,7 +50,9 @@ public enum FolderVerifier {
             guard a[rel] == b[rel] else { r.sizeMismatch.append(rel); continue }
             if checksums {
                 r.bytesChecked += a[rel]! * 2
-                if sha256(source.appendingPathComponent(rel)) != sha256(destination.appendingPathComponent(rel)) {
+                // A file that can't be read counts as damaged, never as matching.
+                let x = sha256(source.appendingPathComponent(rel)), y = sha256(destination.appendingPathComponent(rel))
+                if x == nil || x != y {
                     r.contentMismatch.append(rel)
                     continue
                 }
@@ -61,21 +63,37 @@ public enum FolderVerifier {
     }
 
     /// Copies missing files and replaces broken copies (size or content mismatch). Never touches extra files.
-    public static func repair(_ report: Report, source: URL, destination: URL, progress: (Int, Int) -> Void = { _, _ in }) -> [String: String] {
+    /// Each file is copied to a temporary name and checked (size, and contents with `checksums`) before it takes
+    /// the place of the broken copy, so a failed repair never leaves less than there was.
+    /// Returns the files repaired and the ones that failed (relative path -> reason).
+    public static func repair(_ report: Report, source: URL, destination: URL, checksums: Bool = true,
+                              progress: (Int, Int) -> Void = { _, _ in }) -> (repaired: [String], failed: [String: String]) {
         let fm = FileManager.default
+        var repaired: [String] = []
         var failures: [String: String] = [:]
         let todo = report.missing + report.sizeMismatch + report.contentMismatch
         for (i, rel) in todo.enumerated() {
             progress(i + 1, todo.count)
             let s = source.appendingPathComponent(rel), d = destination.appendingPathComponent(rel)
+            let tmp = d.deletingLastPathComponent().appendingPathComponent(".repair-\(UUID().uuidString)")
             do {
                 try fm.createDirectory(at: d.deletingLastPathComponent(), withIntermediateDirectories: true)
-                if fm.fileExists(atPath: d.path) { try fm.removeItem(at: d) }
-                try fm.copyItem(at: s, to: d)
+                try fm.copyItem(at: s, to: tmp)
+                let size = { (u: URL) in (try? fm.attributesOfItem(atPath: u.path)[.size] as? Int64) ?? -1 }
+                guard size(tmp) == size(s), !checksums || (sha256(s).map { $0 == sha256(tmp) } ?? false) else {
+                    throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "The new copy did not match the original."])
+                }
+                if fm.fileExists(atPath: d.path) {
+                    _ = try fm.replaceItemAt(d, withItemAt: tmp)
+                } else {
+                    try fm.moveItem(at: tmp, to: d)
+                }
+                repaired.append(rel)
             } catch {
+                try? fm.removeItem(at: tmp)
                 failures[rel] = error.localizedDescription
             }
         }
-        return failures
+        return (repaired, failures)
     }
 }

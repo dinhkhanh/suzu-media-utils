@@ -71,27 +71,28 @@ public struct VideoExport: Sendable {
         let apps = try appearances(personId: personId, project: project)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let safe = Exporter.folderName(name)
+        let names = OutputNames()  // two cameras' C0001.MP4, or an earlier export: never overwritten
         var out: [URL] = []
         switch kind {
         case .clips:
             for (i, a) in apps.enumerated() {
                 progress(i, apps.count)
-                let ext = ["mov", "mp4", "m4v"].contains(a.url.pathExtension.lowercased()) ? a.url.pathExtension : a.url.pathExtension
-                let dest = folder.appendingPathComponent("\(safe) – \(a.url.deletingPathExtension().lastPathComponent) \(VideoTools.timecode(a.segment.start).replacingOccurrences(of: ":", with: "."))")
-                    .appendingPathExtension(ext)
+                let dest = names.reserve(in: folder, base: "\(safe) – \(a.url.deletingPathExtension().lastPathComponent) \(VideoTools.timecode(a.segment.start).replacingOccurrences(of: ":", with: "."))",
+                                         ext: a.url.pathExtension)
                 try await VideoTools.exportClip(a.url, segment: a.segment, to: dest)
                 out.append(dest)
             }
         case .reel(let maxSeconds):
             progress(0, 1)
             let parts = Self.reelSelection(apps, maxSeconds: maxSeconds).map { (url: $0.url, segment: $0.segment) }
-            let dest = folder.appendingPathComponent("\(safe) – highlights.mov")
+            let dest = names.reserve(in: folder, base: "\(safe) – highlights", ext: "mov")
             try await VideoTools.exportReel(parts, to: dest)
             out.append(dest)
         case .stills(let recipe):
             for (i, a) in apps.enumerated() {
                 progress(i, apps.count)
-                let dest = folder.appendingPathComponent("\(safe) – \(a.url.deletingPathExtension().lastPathComponent) \(VideoTools.timecode(a.bestTime).replacingOccurrences(of: ":", with: ".")).\(recipe.fileExtension)")
+                let dest = names.reserve(in: folder, base: "\(safe) – \(a.url.deletingPathExtension().lastPathComponent) \(VideoTools.timecode(a.bestTime).replacingOccurrences(of: ":", with: "."))",
+                                         ext: recipe.fileExtension)
                 try VideoTools.still(a.url, at: a.bestTime, recipe: recipe, focus: FocusHint(primary: a.bestBox), people: [name], to: dest)
                 out.append(dest)
             }

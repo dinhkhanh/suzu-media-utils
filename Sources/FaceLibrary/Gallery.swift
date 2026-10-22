@@ -21,7 +21,7 @@ struct GalleryData {
                   COUNT(DISTINCT CASE WHEN m.kind = 'photo' THEN m.id END) AS photos,
                   COUNT(DISTINCT CASE WHEN m.kind = 'video' THEN m.id END) AS videos,
                   COALESCE((SELECT c.id FROM face c WHERE c.id = p.coverFaceId AND c.personId = p.id),
-                           \(BestShot.coverSubquery(project: project))) AS cover
+                           \(BestShot.coverSubquery(project: project, eventsOnly: true))) AS cover
                 FROM person p JOIN face f ON f.personId = p.id JOIN media m ON m.id = f.mediaId LEFT JOIN source s ON s.id = m.sourceId
                 WHERE p.name IS NOT NULL AND \(ProjectScope.sql(project)) AND m.duplicateOf IS NULL
                   \(ids.map { "AND p.id IN (\($0.map(String.init).joined(separator: ",")))" } ?? "")
@@ -47,6 +47,30 @@ struct GalleryData {
         if bestOfBurst { files = files.filter { f in f.burstId.map { bursts.insert($0).inserted } ?? true } }
         if let topN { files = Array(files.prefix(topN)) }
         return files
+    }
+
+    /// A file the gallery shows: an event file (not a known-people reference photo) of this project with a named
+    /// person in it. Anything else is "not found", so a link can't be edited to reach other projects' files.
+    func mediaPath(_ id: Int64) throws -> (String, Bool) {
+        guard let r = try store.db.read({ db in
+            try Row.fetchOne(db, sql: """
+                SELECT m.path, m.kind FROM media m JOIN source s ON s.id = m.sourceId
+                WHERE m.id = ? AND \(ProjectScope.sql(project))
+                  AND EXISTS (SELECT 1 FROM face f JOIN person p ON p.id = f.personId WHERE f.mediaId = m.id AND p.name IS NOT NULL)
+                """, arguments: [id])
+        }) else { throw CocoaError(.fileNoSuchFile) }
+        return (r["path"], (r["kind"] as String) == "video")
+    }
+
+    /// A named person's face from one of the gallery's files, or the picture chosen for them.
+    func showsFace(_ id: Int64) throws -> Bool {
+        try store.db.read { db in
+            try Bool.fetchOne(db, sql: """
+                SELECT EXISTS (SELECT 1 FROM face f JOIN person p ON p.id = f.personId
+                               JOIN media m ON m.id = f.mediaId LEFT JOIN source s ON s.id = m.sourceId
+                               WHERE f.id = ? AND p.name IS NOT NULL AND (\(ProjectScope.sql(project)) OR p.coverFaceId = f.id))
+                """, arguments: [id]) ?? false
+        }
     }
 }
 
@@ -80,8 +104,12 @@ public struct GalleryExporter: Sendable {
         let lists = try people.map { try data.files(personId: $0.id, topN: options.topN, bestOfBurst: options.bestOfBurst).filter { options.includeVideos || !$0.isVideo } }
         let total = lists.map(\.count).reduce(0, +)
         var done = 0
+        // Folder names drop accents, so Hùng and Hưng (or Thu and Thư) would share one: number the second.
+        var slugs: Set<String> = []
         for (p, files) in zip(people, lists) {
-            let slug = Self.slug(p.name).isEmpty ? "person-\(p.id)" : Self.slug(p.name)
+            let base = Self.slug(p.name).isEmpty ? "person-\(p.id)" : Self.slug(p.name)
+            var slug = base, n = 2
+            while !slugs.insert(slug.lowercased()).inserted { slug = "\(base)-\(n)"; n += 1 }
             let dir = folder.appendingPathComponent(slug)
             try fm.createDirectory(at: dir.appendingPathComponent("thumbs"), withIntermediateDirectories: true)
             if let c = p.cover { try? fm.copyItem(at: store.faceCropURL(c), to: folder.appendingPathComponent("faces/\(slug).jpg")) }
@@ -223,35 +251,35 @@ public final class GalleryServer: @unchecked Sendable {
             case ("POST", "person", 3) where route[2] == "name":
                 let form = String(decoding: r.body, as: UTF8.self).replacingOccurrences(of: "+", with: " ")
                 let name = form.split(separator: "&").first { $0.hasPrefix("name=") }.map { String($0.dropFirst(5)).removingPercentEncoding ?? "" } ?? ""
-                if let pid = Int64(route[1]), !name.trimmingCharacters(in: .whitespaces).isEmpty { try rename(pid, name) }
+                // Only people this gallery shows can be renamed (or merged by naming them like someone else).
+                if let pid = Int64(route[1]), !name.trimmingCharacters(in: .whitespaces).isEmpty, try !data.people([pid]).isEmpty {
+                    try rename(pid, name)
+                }
                 send(c, status: "303 See Other", type: "text/plain", body: Data(), extra: ["Location": "/\(token)/"])
             case ("GET", "face", 2):
                 let id = Int64(route[1].replacingOccurrences(of: ".jpg", with: "")) ?? 0
+                guard try data.showsFace(id) else { throw CocoaError(.fileNoSuchFile) }
                 send(c, type: "image/jpeg", body: (try? Data(contentsOf: store.faceCropURL(id))) ?? Data())
             case ("GET", "thumb", 2):
-                send(c, type: "image/jpeg", body: try image(Int64(route[1]) ?? 0, side: 480, time: r.query["t"].flatMap(Double.init)))
+                send(c, type: "image/jpeg", body: try image(data, Int64(route[1]) ?? 0, side: 480, time: r.query["t"].flatMap(Double.init)))
             case ("GET", "view", 2):
-                send(c, type: "image/jpeg", body: try image(Int64(route[1]) ?? 0, side: 2048, time: nil))
+                send(c, type: "image/jpeg", body: try image(data, Int64(route[1]) ?? 0, side: 2048, time: nil))
             case ("GET", "file", 2):
-                try sendFile(c, mediaId: Int64(route[1]) ?? 0, request: r)
+                try sendFile(c, data, mediaId: Int64(route[1]) ?? 0, request: r)
             default:
                 send(c, status: "404 Not Found", type: "text/plain", body: Data("Not found".utf8))
             }
+        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+            send(c, status: "404 Not Found", type: "text/plain", body: Data("Not found".utf8))
         } catch {
             send(c, status: "500 Internal Server Error", type: "text/plain", body: Data(error.localizedDescription.utf8))
         }
     }
 
-    func mediaPath(_ id: Int64) throws -> (String, Bool) {
-        guard let r = try store.db.read({ db in try Row.fetchOne(db, sql: "SELECT path, kind FROM media WHERE id = ?", arguments: [id]) })
-        else { throw CocoaError(.fileNoSuchFile) }
-        return (r["path"], (r["kind"] as String) == "video")
-    }
-
-    func image(_ id: Int64, side: Int, time: Double?) throws -> Data {
+    func image(_ data: GalleryData, _ id: Int64, side: Int, time: Double?) throws -> Data {
+        let (path, isVideo) = try data.mediaPath(id)
         let key = "\(id)-\(side)" as NSString
         if let d = thumbCache.object(forKey: key) { return d as Data }
-        let (path, isVideo) = try mediaPath(id)
         let url = URL(fileURLWithPath: path, isDirectory: false)
         var cg: CGImage?
         if isVideo { cg = VideoSampler.frameSync(url, at: time ?? 0, maxPixel: side) }
@@ -266,8 +294,8 @@ public final class GalleryServer: @unchecked Sendable {
     }
 
     /// Originals, with byte ranges so videos stream and seek in the browser.
-    func sendFile(_ c: NWConnection, mediaId: Int64, request r: Request) throws {
-        let (path, isVideo) = try mediaPath(mediaId)
+    func sendFile(_ c: NWConnection, _ data: GalleryData, mediaId: Int64, request r: Request) throws {
+        let (path, isVideo) = try data.mediaPath(mediaId)
         let url = URL(fileURLWithPath: path, isDirectory: false)
         let size = (try FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0
         let type = isVideo ? (url.pathExtension.lowercased() == "mov" ? "video/quicktime" : "video/mp4") : "image/jpeg"

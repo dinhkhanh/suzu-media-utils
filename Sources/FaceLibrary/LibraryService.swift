@@ -1,6 +1,7 @@
 import FaceCore
 import Foundation
 import GRDB
+import MediaKit
 
 /// Wires the library together: source monitors -> processor -> grouping engine, plus the user's people edits.
 public final class LibraryService: @unchecked Sendable {
@@ -102,6 +103,12 @@ public final class LibraryService: @unchecked Sendable {
     public func addSource(_ url: URL, kind: SourceKind = .media, project: Int64? = nil) throws -> SourceRecord {
         let path = canonicalPath(url)
         if kind == .media && project == nil { throw ProjectError.noProject }
+        // The same event folder, renamed or moved in Finder: relink it rather than start over.
+        if let old = try Self.offlineSource(matching: path, kind: kind, store: store) {
+            try relinkSource(old, to: url)
+            if kind == .media, let project { try moveSource(old, to: project) }
+            if let s = try store.db.read({ db in try SourceRecord.fetchOne(db, key: old) }) { return s }
+        }
         try Self.checkNewFolder(path, store: store)
         var s = SourceRecord(path: path, kind: kind, projectId: kind == .media ? project : nil)
         try store.db.write { db in try s.insert(db) }
@@ -185,15 +192,127 @@ public final class LibraryService: @unchecked Sendable {
 
     public func rescan(_ sourceId: Int64) { monitor(sourceId)?.scanSoon() }
 
+    /// Runs `body` while every folder watcher waits, so no scan sees files half-way through being renamed or
+    /// relinked (it would take them for deleted and new files and drop their faces). Call it off the main thread.
+    func holdingMonitors<T>(_ body: () throws -> T) rethrows -> T {
+        let queues = lock.withLock { monitors.sorted { $0.key < $1.key }.map(\.value.queue) }
+        func hold(_ rest: ArraySlice<DispatchQueue>) throws -> T {
+            guard let q = rest.first else { return try body() }
+            return try q.sync { try hold(rest.dropFirst()) }
+        }
+        return try hold(queues[...])
+    }
+
+    /// Batch Rename: renames the files and their library records together, so faces, names and fixes stay with
+    /// each file. Swaps and shifted numbers are fine; the database is updated in two steps for the same reason.
+    public func renameFiles(_ items: [RenamePattern.Item], names: [String]) throws -> RenamePattern.Outcome {
+        var affected: Set<Int64> = []
+        let outcome = try holdingMonitors { () throws -> RenamePattern.Outcome in
+            // Library paths are canonical; work them out while the old names still exist.
+            let before = Dictionary(items.map { ($0.url, canonicalPath($0.url)) }, uniquingKeysWith: { a, _ in a })
+            let outcome = RenamePattern.apply(items, names: names)
+            affected = try Self.recordRenames(outcome.renamed.map { (before[$0.0] ?? canonicalPath($0.0), $0.1.lastPathComponent) }, store: store)
+            return outcome
+        }
+        if !affected.isEmpty { engine.peopleChanged(affected); deleteEmptyPeople() }
+        return outcome
+    }
+
+    /// Points library records at their files' new names: (old canonical path, new file name in the same folder).
+    /// Two steps, so swaps and shifted numbers never collide with each other's old names. Returns the people who
+    /// lost faces (only from leftover records of files no longer on disk).
+    static func recordRenames(_ renames: [(path: String, newName: String)], store: LibraryStore) throws -> Set<Int64> {
+        guard !renames.isEmpty else { return [] }
+        return try store.db.write { db in
+            var affected: Set<Int64> = []
+            var moved: [(id: Int64, path: String)] = []
+            for r in renames {
+                let newPath = (r.path as NSString).deletingLastPathComponent + "/" + r.newName
+                if let id = try Int64.fetchOne(db, sql: "SELECT id FROM media WHERE path = ?", arguments: [r.path]) { moved.append((id, newPath)) }
+            }
+            for m in moved {
+                try db.execute(sql: "UPDATE media SET path = ? WHERE id = ?", arguments: ["\u{1}renaming/\(m.id)", m.id])
+            }
+            let ids = Set(moved.map(\.id))
+            for m in moved {
+                // A leftover record of a file that is no longer on disk under that name.
+                if let stale = try Int64.fetchOne(db, sql: "SELECT id FROM media WHERE path = ?", arguments: [m.path]), !ids.contains(stale) {
+                    affected.formUnion(try SourceMonitor.remove(mediaId: stale, db: db))
+                }
+                try db.execute(sql: "UPDATE media SET path = ? WHERE id = ?", arguments: [m.path, m.id])
+            }
+            return affected
+        }
+    }
+
+    /// A folder renamed or moved in Finder: points the library at its new place, keeping every face and name.
+    /// Throws if the new folder overlaps another one in the library.
+    public func relinkSource(_ id: Int64, to url: URL) throws {
+        let path = canonicalPath(url)
+        guard let source = try store.db.read({ db in try SourceRecord.fetchOne(db, key: id) }) else { return }
+        guard source.path != path else { return }
+        let others = try store.db.read { db in
+            try Row.fetchAll(db, sql: "SELECT s.path, p.name FROM source s LEFT JOIN project p ON p.id = s.projectId WHERE s.id != ?", arguments: [id])
+        }
+        for r in others {
+            let other: String = r["path"]
+            if other == path || path.hasPrefix(other + "/") || other.hasPrefix(path + "/") {
+                throw ProjectError.overlaps(folder: (path as NSString).lastPathComponent, other: (other as NSString).lastPathComponent, project: r["name"])
+            }
+        }
+        if let m = lock.withLock({ monitors.removeValue(forKey: id) }) {
+            m.stop()
+            m.queue.sync {}  // let a scan already under way finish first
+        }
+        try Self.relinkPaths(id, from: source.path, to: path, store: store)
+        if let s = try store.db.read({ db in try SourceRecord.fetchOne(db, key: id) }) { startMonitor(s) }
+    }
+
+    static func relinkPaths(_ id: Int64, from old: String, to new: String, store: LibraryStore) throws {
+        let oldPrefix = old + "/"
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE source SET path = ? WHERE id = ?", arguments: [new, id])
+            // substr counts code points from 1 (not Swift characters: "ư" may be two): keep what follows the old path.
+            try db.execute(sql: "UPDATE media SET path = ? || substr(path, ?) WHERE sourceId = ? AND substr(path, 1, ?) = ?",
+                           arguments: [new + "/", oldPrefix.unicodeScalars.count + 1, id, oldPrefix.unicodeScalars.count, oldPrefix])
+        }
+    }
+
+    /// An offline folder (renamed, moved, or its drive not mounted) whose files are all found under `path`.
+    /// Adding that folder again relinks the old entry instead, so nothing is lost or processed twice.
+    static func offlineSource(matching path: String, kind: SourceKind, store: LibraryStore) throws -> Int64? {
+        let fm = FileManager.default
+        let offline = try store.db.read { db in try SourceRecord.filter(Column("kind") == kind.rawValue).fetchAll(db) }
+            .filter { !fm.fileExists(atPath: $0.path) }
+        for s in offline {
+            let sample = try store.db.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT path, size, contentKey FROM media WHERE sourceId = ? AND duplicateOf IS NULL AND contentKey IS NOT NULL
+                    ORDER BY random() LIMIT 12
+                    """, arguments: [s.id])
+            }
+            guard !sample.isEmpty else { continue }
+            let prefix = s.path + "/"
+            // Same relative path is not enough (cameras restart at DSC_0001): the contents must match too.
+            let found = sample.filter { r in
+                let old: String = r["path"], size: Int64 = r["size"]
+                guard old.hasPrefix(prefix) else { return false }
+                let url = URL(fileURLWithPath: path + "/" + old.dropFirst(prefix.count), isDirectory: false)
+                let actual = (try? fm.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? -1
+                return actual == size && ContentKey.compute(url, size: size) == r["contentKey"]
+            }
+            if found.count == sample.count { return s.id }
+        }
+        return nil
+    }
+
     // MARK: - People
 
     /// Renames a person. If another person already has that name, the two are merged; returns the surviving id.
     @discardableResult
     public func rename(_ personId: Int64, to rawName: String) throws -> Int64 {
-        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let existing = try store.db.read { db in
-            try Int64.fetchOne(db, sql: "SELECT id FROM person WHERE name = ? COLLATE NOCASE AND id != ?", arguments: [name, personId])
-        }
+        let name = PersonNames.clean(rawName)
+        let existing = try store.db.read { db in try PersonNames.find(name, excluding: personId, db: db) }
         if let existing, !name.isEmpty {
             try merge([personId], into: existing)
             return existing
@@ -208,12 +327,7 @@ public final class LibraryService: @unchecked Sendable {
     public func merge(_ ids: [Int64], into target: Int64) throws {
         let others = ids.filter { $0 != target }
         guard !others.isEmpty else { return }
-        try store.db.write { db in
-            let list = others.map(String.init).joined(separator: ",")
-            try db.execute(sql: "UPDATE face SET personId = ? WHERE personId IN (\(list))", arguments: [target])
-            try db.execute(sql: "UPDATE face SET rejectedPersonId = ? WHERE rejectedPersonId IN (\(list))", arguments: [target])
-            try db.execute(sql: "DELETE FROM person WHERE id IN (\(list))")
-        }
+        try store.db.write { db in try PersonNames.merge(others, into: target, db: db) }
         engine.peopleChanged(Set(ids))
     }
 
@@ -241,13 +355,19 @@ public final class LibraryService: @unchecked Sendable {
         deleteEmptyPeople()
     }
 
-    /// Creates a named person from faces (e.g. picked from "Unassigned").
+    /// Creates a named person from faces (e.g. picked from "Unassigned"). A name someone already has adds the
+    /// faces to that person instead.
     @discardableResult
-    public func newPerson(name: String?, faceIds: [Int64]) throws -> Int64 {
-        var p = PersonRecord(name: name)
-        try store.db.write { db in try p.insert(db) }
-        try assign(faceIds: faceIds, to: p.id!)
-        return p.id!
+    public func newPerson(name rawName: String?, faceIds: [Int64]) throws -> Int64 {
+        let name = rawName.map(PersonNames.clean).flatMap { $0.isEmpty ? nil : $0 }
+        let id = try store.db.write { db -> Int64 in
+            if let name, let existing = try PersonNames.find(name, db: db) { return existing }
+            var p = PersonRecord(name: name)
+            try p.insert(db)
+            return p.id!
+        }
+        try assign(faceIds: faceIds, to: id)
+        return id
     }
 
     /// Picks the face used as a person's picture; nil goes back to the best shot automatically.

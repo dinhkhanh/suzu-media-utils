@@ -38,7 +38,7 @@ public struct MediaHit: Identifiable, Hashable, Sendable {
 }
 
 extension MediaQuery {
-    public func run(_ store: LibraryStore, limit: Int = 5000) throws -> [MediaHit] {
+    public func run(_ store: LibraryStore, limit: Int? = nil) throws -> [MediaHit] {
         var conds = ["m.duplicateOf IS NULL", "m.status = 'done'", ProjectScope.sql(project)]
         var args: [DatabaseValueConvertible?] = []
         if let kind { conds.append("m.kind = ?"); args.append(kind.rawValue) }
@@ -60,29 +60,32 @@ extension MediaQuery {
         // "+" keeps SQLite on the per-file index: by person it would scan all of a star's faces for every file
         // (24 s instead of 0.08 s for someone with 12,000 faces).
         let faceFilter = people.isEmpty ? "" : "AND +bf.personId IN (\(ids))"
-        let sql = """
+        // Every filter runs here, before any limit: "best shots" and "hide similar" over the whole event, not over
+        // its first files. One burst keeps its best-scoring file.
+        var sql = """
             SELECT m.id, m.path, m.kind, m.takenAt, m.burstId, bf.id AS faceId, bf.time, COALESCE(bf.score, bf.quality * 0.6, 0) AS score
             FROM media m LEFT JOIN source s ON s.id = m.sourceId
             LEFT JOIN face bf ON bf.id = (SELECT id FROM face bf WHERE bf.mediaId = m.id \(faceFilter)
                                           ORDER BY COALESCE(bf.score, bf.quality * 0.6, 0) DESC LIMIT 1)
             WHERE \(conds.joined(separator: " AND "))
-            ORDER BY m.takenAt, m.path
-            LIMIT \(limit)
             """
-        var hits = try store.db.read { db in
-            try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args)!).map { r in
+        var outer: [String] = []
+        if collapseBursts {
+            sql = "SELECT *, ROW_NUMBER() OVER (PARTITION BY burstId ORDER BY score DESC, id) AS burstRank FROM (\(sql))"
+            outer.append("(burstId IS NULL OR burstRank = 1)")
+        }
+        if bestOnly { outer.append("score >= \(bestThreshold)") }
+        let final = """
+            SELECT * FROM (\(sql)) \(outer.isEmpty ? "" : "WHERE " + outer.joined(separator: " AND "))
+            ORDER BY takenAt, path \(limit.map { "LIMIT \($0)" } ?? "")
+            """
+        return try store.db.read { db in
+            try Row.fetchAll(db, sql: final, arguments: StatementArguments(args)!).map { r in
                 MediaHit(id: r["id"], path: r["path"], kind: MediaKind(rawValue: r["kind"]) ?? .photo, faceId: r["faceId"],
                          time: r["time"], score: r["score"], takenAt: (r["takenAt"] as Double?).map(Date.init(timeIntervalSince1970:)),
                          burstId: r["burstId"])
             }
         }
-        if bestOnly { hits = hits.filter { $0.score >= bestThreshold } }
-        if collapseBursts {
-            var best: [Int64: MediaHit] = [:]
-            for h in hits { if let b = h.burstId, (best[b]?.score ?? -1) < h.score { best[b] = h } }
-            hits = hits.filter { h in h.burstId.map { best[$0]?.id == h.id } ?? true }
-        }
-        return hits
     }
 }
 

@@ -25,11 +25,13 @@ public final class SourceMonitor: @unchecked Sendable {
     struct FileInfo: Equatable { var size: Int64; var mtime: Double }
     struct DirEntry { var mtime: Double; var files: [String: FileInfo]; var subdirs: [String] }
     var dirCache: [String: DirEntry] = [:]
-    /// Unsettled files: last seen size/mtime and when.
-    var candidates: [String: (info: FileInfo, seen: Date)] = [:]
+    /// Unsettled files: last seen size/mtime, when it last changed, and whether it was seen growing.
+    var candidates: [String: (info: FileInfo, seen: Date, grew: Bool)] = [:]
     var stream: FSEventStreamRef?
     var timer: DispatchSourceTimer?
     var scanScheduled = false
+    /// Set once the folder was reachable and its volume (local or network) known.
+    var watchConfigured = false
 
     var settleInterval: Double { isNetwork ? 3 : 1 }
     /// Files untouched for this long are treated as complete without waiting for a second look.
@@ -45,16 +47,25 @@ public final class SourceMonitor: @unchecked Sendable {
     }
 
     public func start() {
-        let values = try? root.resourceValues(forKeys: [.volumeIsLocalKey])
-        isNetwork = values?.volumeIsLocal == false
-        if !isNetwork { startFSEvents() }
         let t = DispatchSource.makeTimerSource(queue: queue)
-        // Network: the poll is the watcher. Local: a slow safety net (missed events, remounted drives).
-        t.schedule(deadline: .now() + (isNetwork ? 5 : 60), repeating: isNetwork ? 5 : 60)
+        // Every 5 s until the folder's volume is known (a NAS not mounted yet is picked up as soon as it appears).
+        t.schedule(deadline: .now() + 5, repeating: 5)
         t.setEventHandler { [weak self] in self?.scan() }
         t.resume()
         timer = t
         queue.async { [weak self] in self?.scan() }
+    }
+
+    /// Network volumes get no FSEvents: the 5 s poll is the watcher. Local ones use FSEvents, with a slow poll as a
+    /// safety net (missed events, remounted drives). Runs on `queue` once the folder is reachable.
+    func configureWatching() {
+        guard !watchConfigured, timer != nil else { return }  // a scan on its own (tests, headless) watches nothing
+        watchConfigured = true
+        isNetwork = (try? root.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal == false
+        if !isNetwork {
+            startFSEvents()
+            timer?.schedule(deadline: .now() + 60, repeating: 60)
+        }
     }
 
     public func stop() {
@@ -162,6 +173,7 @@ public final class SourceMonitor: @unchecked Sendable {
             return
         }
         isOnline = true
+        configureWatching()
         isScanning = true
         defer { isScanning = false }
         let files = list()
@@ -183,13 +195,17 @@ public final class SourceMonitor: @unchecked Sendable {
         for (path, info) in files {
             let k = known[path]
             if let k, k.info == info { candidates[path] = nil; continue }
-            let old = now.timeIntervalSince1970 - info.mtime > settledAge
-            let stable = candidates[path].map { $0.info == info && now.timeIntervalSince($0.seen) >= settleInterval } ?? false
+            let c = candidates[path]
+            // Untouched for a while when first seen: complete. A file seen growing must sit still for longer, so a
+            // copy that pauses for a moment isn't processed half-written.
+            let old = c == nil && now.timeIntervalSince1970 - info.mtime > settledAge
+            let wait = c?.grew == true ? settledAge / 2 : settleInterval
+            let stable = c.map { $0.info == info && now.timeIntervalSince($0.seen) >= wait } ?? false
             if old || stable {
                 candidates[path] = nil
                 if let k { settledChanged.append((path, info, k.id)) } else { settledNew.append((path, info)) }
             } else {
-                if candidates[path]?.info != info { candidates[path] = (info, now) }
+                if let c, c.info != info { candidates[path] = (info, now, true) } else if c == nil { candidates[path] = (info, now, false) }
                 needFollowUp = true
             }
         }
@@ -225,12 +241,13 @@ public final class SourceMonitor: @unchecked Sendable {
                 }
             }
 
-            // Copies: likewise only files whose size matches an existing original of the same kind of folder.
+            // Copies: likewise only files whose size matches an existing original of the same kind of folder in
+            // the same project (a copy in another event's folder is that event's file).
             let sameKindSizes = Set(try store.db.read { db in
                 try Int64.fetchAll(db, sql: """
                     SELECT DISTINCT m.size FROM media m JOIN source s ON s.id = m.sourceId
-                    WHERE m.duplicateOf IS NULL AND s.kind = (SELECT kind FROM source WHERE id = ?)
-                    """, arguments: [sourceId])
+                    WHERE m.duplicateOf IS NULL AND \(Self.sameGroup)
+                    """, arguments: [sourceId, sourceId])
             })
             var start = 0
             while start < remaining.count {
@@ -283,14 +300,17 @@ public final class SourceMonitor: @unchecked Sendable {
         if needFollowUp { scanSoon(after: settleInterval) }
     }
 
+    /// Folders whose files can be copies of each other: same kind, same project (two `?` for this source's id).
+    static let sameGroup = "s.kind = (SELECT kind FROM source WHERE id = ?) AND s.projectId IS (SELECT projectId FROM source WHERE id = ?)"
+
     /// An original (not a copy) in a folder of this source's kind with this fingerprint, fingerprinting same-size
     /// candidates on demand.
     func originalWithKey(_ key: String, size: Int64) throws -> Int64? {
         let cands = try store.db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT m.id, m.path, m.contentKey FROM media m JOIN source s ON s.id = m.sourceId
-                WHERE m.size = ? AND m.duplicateOf IS NULL AND s.kind = (SELECT kind FROM source WHERE id = ?)
-                """, arguments: [size, sourceId])
+                WHERE m.size = ? AND m.duplicateOf IS NULL AND \(Self.sameGroup)
+                """, arguments: [size, sourceId, sourceId])
         }
         for c in cands {
             var ck: String? = c["contentKey"]

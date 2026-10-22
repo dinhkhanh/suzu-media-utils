@@ -5,7 +5,9 @@ import SwiftUI
 struct CopyVerifierTool: View {
     @State private var source: URL?
     @State private var destination: URL?
-    @State private var checksums = false
+    @State private var checksums = true
+    /// Whether the shown report compared contents.
+    @State private var compared = true
     @State private var running = false
     @State private var progress = (0, 0)
     @State private var report: FolderVerifier.Report?
@@ -16,7 +18,10 @@ struct CopyVerifierTool: View {
             Section("Folders") {
                 FolderField(title: "Original", url: $source)
                 FolderField(title: "Copy", url: $destination)
-                Toggle("Compare contents (SHA-256 checksums; reads every file twice, slower)", isOn: $checksums)
+                Toggle("Compare contents (SHA-256 checksums; reads every file twice)", isOn: $checksums)
+                if !checksums {
+                    Text("Sizes only: a damaged file of the right size passes.").font(.caption).foregroundStyle(.orange)
+                }
             }
             Section {
                 HStack {
@@ -26,7 +31,8 @@ struct CopyVerifierTool: View {
                 }
             }
             if let r = report {
-                Section(r.isComplete ? "✓ The copy is complete" : "Problems found") {
+                Section(r.isComplete ? (compared ? "✓ The copy is complete and identical" : "✓ Every file is there with the right size (contents not compared)")
+                                     : "Problems found") {
                     LabeledContent("Matching files", value: "\(r.matched)")
                     row("Missing from the copy", r.missing)
                     row("Incomplete (different size)", r.sizeMismatch)
@@ -60,6 +66,7 @@ struct CopyVerifierTool: View {
         guard let source, let destination else { return }
         running = true; report = nil; repairMessage = nil
         let checksums = checksums
+        compared = checksums
         ToolWork.begin()
         Task.detached(priority: .utility) {
             defer { Task { @MainActor in ToolWork.end() } }
@@ -73,14 +80,24 @@ struct CopyVerifierTool: View {
     func repair(_ r: FolderVerifier.Report) {
         guard let source, let destination else { return }
         running = true
+        ToolWork.begin()
         Task.detached(priority: .utility) {
-            let failures = FolderVerifier.repair(r, source: source, destination: destination) { d, t in
+            defer { Task { @MainActor in ToolWork.end() } }
+            let (repaired, failures) = FolderVerifier.repair(r, source: source, destination: destination) { d, t in
                 Task { @MainActor in progress = (d, t) }
             }
-            let again = FolderVerifier.verify(source: source, destination: destination, checksums: false)
+            // Each repaired file was checked as it was copied: move it from its problem list to the matches.
+            var after = r
+            let fixed = Set(repaired)
+            after.missing.removeAll { fixed.contains($0) }
+            after.sizeMismatch.removeAll { fixed.contains($0) }
+            after.contentMismatch.removeAll { fixed.contains($0) }
+            after.matched += repaired.count
+            let updated = after
             await MainActor.run {
-                repairMessage = failures.isEmpty ? "Repaired." : "\(failures.count) files could not be copied."
-                report = again
+                repairMessage = failures.isEmpty ? "Repaired \(repaired.count) files."
+                    : "\(failures.count) files could not be repaired: \(failures.first!.key): \(failures.first!.value)"
+                report = updated
                 running = false
             }
         }

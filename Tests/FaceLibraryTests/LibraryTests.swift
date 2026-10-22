@@ -369,6 +369,7 @@ final class LibraryTests: XCTestCase {
         let an = try newPerson("An")
         _ = try addFace(mediaId: try media()[0].id!, personId: an)
         let out = tmp.appendingPathComponent("Drive", isDirectory: true)
+        try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
         let service = DeliveryService(store: store)
         try service.add(DeliveryRule(personId: an, folder: out.path, recipe: nil, writeNames: false), includeExisting: false)
         try service.add(DeliveryRule(personId: nil, folder: nil, recipe: nil, writeNames: false), includeExisting: false)

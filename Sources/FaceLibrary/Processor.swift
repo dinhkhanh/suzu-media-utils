@@ -200,10 +200,10 @@ public final class Processor: @unchecked Sendable {
             else { return nil }
             let rel = media.path.dropFirst(source.path.count).split(separator: "/")
             guard rel.count >= 2 else { return nil }  // photos directly in the reference root have no name
-            let name = String(rel[0])
+            let name = PersonNames.clean(String(rel[0]))
             try db.execute(sql: "UPDATE face SET assignment = 'user' WHERE mediaId = ?", arguments: [media.id])
             guard let face = faces.filter({ $0.embedding != nil }).max(by: { $0.w * $0.h < $1.w * $1.h }) else { return nil }
-            var pid = try Int64.fetchOne(db, sql: "SELECT id FROM person WHERE name = ? COLLATE NOCASE", arguments: [name])
+            var pid = try PersonNames.find(name, db: db)
             if pid == nil {
                 var p = PersonRecord(name: name)
                 try p.insert(db)

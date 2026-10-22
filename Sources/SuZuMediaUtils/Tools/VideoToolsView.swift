@@ -48,17 +48,18 @@ struct VideoToolsView: View {
         guard let output else { return }
         running = true; finished = false; done = 0; failures = []
         let files = files, proxies = proxies, sheets = sheets, grid = grid
+        let names = OutputNames()  // never overwrites a video or an earlier proxy/sheet
         ToolWork.begin()
         Task.detached(priority: .utility) {
             for f in files {
                 let stem = f.deletingPathExtension().lastPathComponent
                 if proxies {
-                    do { try await VideoTools.proxy(f, to: output.appendingPathComponent(stem + "_proxy.mp4")) }
+                    do { try await VideoTools.proxy(f, to: names.reserve(in: output, base: stem + "_proxy", ext: "mp4")) }
                     catch { await MainActor.run { failures.append("\(f.lastPathComponent): \(error.localizedDescription)") } }
                     await MainActor.run { done += 1 }
                 }
                 if sheets {
-                    do { try VideoTools.contactSheet(f, columns: grid, rows: grid, to: output.appendingPathComponent(stem + "_sheet.jpg")) }
+                    do { try VideoTools.contactSheet(f, columns: grid, rows: grid, to: names.reserve(in: output, base: stem + "_sheet", ext: "jpg")) }
                     catch { await MainActor.run { failures.append("\(f.lastPathComponent): \(error.localizedDescription)") } }
                     await MainActor.run { done += 1 }
                 }

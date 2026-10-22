@@ -90,6 +90,9 @@ struct BatchExportTool: View {
         let items = chosen, recipe = recipe, suffix = suffix, perPerson = folderPerPerson && fromPeople
         total = items.count
         let workers = ToolWork.parallelism
+        // Never overwrites: not the originals (saving next to them), not files from an earlier run, and not another
+        // photo of this run with the same name (two cameras both shooting IMG_0001).
+        let names = OutputNames()
         ToolWork.begin()
         Task.detached(priority: .utility) {
             await withTaskGroup(of: String?.self) { group in
@@ -101,7 +104,7 @@ struct BatchExportTool: View {
                         var dir = output
                         if perPerson, let name = item.personName { dir = dir.appendingPathComponent(Exporter.folderName(name)) }
                         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                        let dest = dir.appendingPathComponent(item.url.deletingPathExtension().lastPathComponent + suffix).appendingPathExtension(recipe.fileExtension)
+                        let dest = names.reserve(in: dir, base: item.url.deletingPathExtension().lastPathComponent + suffix, ext: recipe.fileExtension)
                         do { try EditPipeline.render(item.url, recipe: recipe, focus: item.focus, people: item.people, to: dest); return nil }
                         catch { return "\(item.url.lastPathComponent): \(error.localizedDescription)" }
                     }

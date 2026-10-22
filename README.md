@@ -7,6 +7,8 @@ locally; nothing leaves the Mac unless you opt into celebrity naming.
 
 ## Tools
 
+Full feature list (Vietnamese): [docs/FEATURES.md](docs/FEATURES.md).
+
 ### Face Grouping
 Point it at any folders — NAS share, external drive or local disk — and it finds every face in the photos and videos,
 groups them by person, keeps up as new files arrive, and files each person's media into a folder named after them.
@@ -40,13 +42,18 @@ groups them by person, keeps up as new files arrive, and files each person's med
   Bonjour) to browse, play, download and rename people from a MacBook, iPad or phone.
 - **Auto-naming:** a Known-People folder (`<folder>/<Name>/<photos>`) names matching groups offline; optional Amazon
   Rekognition celebrity lookup ("Suggest Names…").
-- Files are tracked by content, so moving/renaming in Finder or copying never loses names or duplicates work.
+- Files are tracked by content, so moving/renaming in Finder or copying never loses names or duplicates work. A whole
+  event folder renamed or moved in Finder shows as Offline: right-click → **Locate Folder…** (or add it again) and it
+  is relinked with every face and name.
+- One name, one person: names match in any case or Unicode form (a name typed in the app and the same name from a
+  Finder folder), and "New Person…" with a name in use adds to that person.
 
 ### Batch Export
 Auto tone, face-aware social crops, watermark and resize for any photos or people's photos: a large preview of the
 result (film strip, before/after, click the photo to place the watermark) with the settings beside it. Tick or untick
 photos in the strip or in a grid of all of them (⇧-click for a range, Select All / None) to export only some; save as
-JPEG or as lossless PNG (the photo's own colour space, 16-bit when the original is).
+JPEG or as lossless PNG (the photo's own colour space, 16-bit when the original is). It never overwrites a file:
+a name already taken (an original, an earlier export, or another camera's photo of the same name) gets " (2)".
 
 ### Watermarks
 Save any number of watermark presets — logos or text credits — in Settings → Watermarks. Every editing screen (Batch
@@ -58,8 +65,9 @@ Patterns like `{event}_{date}_{person}_{seq:3}` with a live preview; people come
 library files keep their faces and names.
 
 ### Copy Verifier
-Checks that a copy (memory card → NAS, NAS → backup) is complete — missing, truncated or (with checksums) damaged
-files — and repairs it.
+Checks that a copy (memory card → NAS, NAS → backup) is complete — missing, truncated or damaged files (contents are
+compared with SHA-256 checksums unless you turn that off) — and repairs it. A repair copies to a temporary file and
+checks it before it replaces the broken copy.
 
 ### Video Tools
 720p proxies and contact sheets for many videos at once.

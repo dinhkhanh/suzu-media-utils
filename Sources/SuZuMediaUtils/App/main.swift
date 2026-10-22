@@ -83,6 +83,8 @@ func runHeadless(_ args: [String]) -> Never {
             time("search person with most faces") { try one.run(service.store).count }
             one.kind = .photo; one.crowd = .group
             time("  + photos, group shots") { try one.run(service.store).count }
+            one.crowd = .any; one.bestOnly = true; one.collapseBursts = true
+            time("  + best shots, one per burst") { try one.run(service.store).count }
             for album in try! service.store.db.read({ db in try SmartAlbum.fetchAll(db) }) {
                 time("album \(album.name)") { try album.mediaQuery.run(service.store).count }
             }

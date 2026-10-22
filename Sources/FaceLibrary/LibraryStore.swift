@@ -176,6 +176,19 @@ public final class LibraryStore: @unchecked Sendable {
             }
             try db.create(index: "sessionLabel_project", on: "sessionLabel", columns: ["projectId", "at"])
         }
+        m.registerMigration("v7-one-person-per-name") { db in
+            // Older versions could end up with two people of the same name (different case or Unicode form, or
+            // "New Person…" with a name in use). Merge them.
+            try PersonNames.mergeDuplicates(db: db)
+            // A copy belongs to its own project's folder: one in another project used to be hidden as "the same
+            // file as" the original elsewhere. Process those on their own.
+            try db.execute(sql: """
+                UPDATE media SET duplicateOf = NULL, status = 'pending' WHERE id IN (
+                    SELECT c.id FROM media c JOIN source cs ON cs.id = c.sourceId
+                    JOIN media o ON o.id = c.duplicateOf JOIN source os ON os.id = o.sourceId
+                    WHERE cs.kind = 'media' AND os.kind = 'media' AND cs.projectId IS NOT os.projectId)
+                """)
+        }
         return m
     }
 }

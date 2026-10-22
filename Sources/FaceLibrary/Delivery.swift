@@ -79,31 +79,69 @@ public struct DeliveryService: Sendable {
         }
     }
 
-    /// Handles up to `batch` new files per rule.
+    /// (rule, file, person) copies that failed, and when to try them again. In memory: a relaunch retries at once.
+    final class RetryBook: @unchecked Sendable {
+        private let lock = NSLock()
+        private var until: [String: Date] = [:]
+        static func key(_ rule: Int64, _ media: Int64, _ person: Int64) -> String { "\(rule)|\(media)|\(person)" }
+        func waiting(_ rule: Int64) -> Int {
+            let now = Date()
+            return lock.withLock { until.filter { $0.key.hasPrefix("\(rule)|") && $0.value > now }.count }
+        }
+        func isWaiting(_ key: String) -> Bool { lock.withLock { (until[key] ?? .distantPast) > Date() } }
+        func later(_ key: String) { lock.withLock { until[key] = Date().addingTimeInterval(300) } }
+        func clear(_ key: String) { lock.withLock { until[key] = nil } }
+    }
+    static let retries = RetryBook()
+
+    /// Handles up to `batch` new files per rule. Only files actually copied count as delivered: a target folder
+    /// that is unmounted or full is tried again later, never silently skipped.
     public func run(batch: Int = 25) throws -> Report {
         var report = Report()
         let rules = try store.db.read { db in try DeliveryRule.filter(sql: "enabled = 1").fetchAll(db) }
         let exporter = Exporter(store: store)
         for rule in rules {
-            let pairs = try pending(rule, limit: batch)
+            guard let ruleId = rule.id else { continue }
+            // Pairs that failed recently wait their turn; they don't block newer files.
+            let retry = Self.retries
+            let skip = retry.waiting(ruleId)
+            let candidates = try pending(rule, limit: batch + skip + 1)
+                .filter { !retry.isWaiting(RetryBook.key(ruleId, $0.mediaId, $0.personId)) }
+            let pairs = Array(candidates.prefix(batch))
             guard !pairs.isEmpty else { continue }
+            var delivered = pairs
             if let folder = rule.folder {
+                let base = URL(fileURLWithPath: folder, isDirectory: true)
+                var isDir: ObjCBool = false
+                // Unmounted drive or share: try the whole batch again later (and don't create the path on the Mac's disk).
+                guard FileManager.default.fileExists(atPath: base.path, isDirectory: &isDir), isDir.boolValue else { continue }
                 var opts = Exporter.Options()
                 opts.recipe = rule.editRecipe
                 opts.writeNames = rule.writeNames
-                let plan = try exporter.planPairs(pairs, base: URL(fileURLWithPath: folder, isDirectory: true), options: opts)
-                let r = exporter.run(plan, policy: .skip)
+                let plan = try exporter.planPairs(pairs, base: base, options: opts)
+                // Two cameras' IMG_0001.JPG for the same person: keep both. The same file already there counts as done.
+                let r = exporter.run(plan, policy: .keepBoth)
                 report.copied += r.done
                 report.failed += r.failed
-            }
-            try store.db.write { db in
-                for p in pairs {
-                    try db.execute(sql: "INSERT OR IGNORE INTO delivery (ruleId, mediaId, personId, deliveredAt) VALUES (?, ?, ?, ?)",
-                                   arguments: [rule.id, p.mediaId, p.personId, Date()])
+                let ok = Set(r.handled.map { "\(plan.items[$0].mediaId)|\(plan.items[$0].personId ?? -1)" })
+                let planned = Set(plan.items.map { "\($0.mediaId)|\($0.personId ?? -1)" })
+                // Delivered: copied, already there, or no longer a file to copy (gone from the library).
+                delivered = pairs.filter { ok.contains("\($0.mediaId)|\($0.personId)") || !planned.contains("\($0.mediaId)|\($0.personId)") }
+                for p in pairs where !delivered.contains(where: { $0.mediaId == p.mediaId && $0.personId == p.personId }) {
+                    retry.later(RetryBook.key(ruleId, p.mediaId, p.personId))
                 }
             }
-            for p in pairs { report.newFiles[p.name, default: 0] += 1 }
-            report.remaining += try pending(rule, limit: 1).count
+            try store.db.write { db in
+                for p in delivered {
+                    try db.execute(sql: "INSERT OR IGNORE INTO delivery (ruleId, mediaId, personId, deliveredAt) VALUES (?, ?, ?, ?)",
+                                   arguments: [ruleId, p.mediaId, p.personId, Date()])
+                }
+            }
+            for p in delivered {
+                retry.clear(RetryBook.key(ruleId, p.mediaId, p.personId))
+                report.newFiles[p.name, default: 0] += 1
+            }
+            if candidates.count > pairs.count { report.remaining += 1 }
         }
         return report
     }

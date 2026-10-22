@@ -28,8 +28,9 @@ final class ToolsTests: XCTestCase {
         try Data("a".utf8).write(to: dir.appendingPathComponent("a.jpg"))
         try Data("b".utf8).write(to: dir.appendingPathComponent("b.jpg"))
         let items = ["a.jpg", "b.jpg"].map { RenamePattern.Item(url: dir.appendingPathComponent($0)) }
-        let done = try RenamePattern.apply(items, names: ["b.jpg", "a.jpg"])
-        XCTAssertEqual(done.count, 2)
+        let done = RenamePattern.apply(items, names: ["b.jpg", "a.jpg"])
+        XCTAssertEqual(done.renamed.count, 2)
+        XCTAssertTrue(done.failed.isEmpty)
         XCTAssertEqual(try String(contentsOf: dir.appendingPathComponent("a.jpg"), encoding: .utf8), "b")
     }
 
@@ -56,7 +57,7 @@ final class ToolsTests: XCTestCase {
         XCTAssertEqual(r.matched, 2, "without checksums the same-size corrupt file passes")
         r = FolderVerifier.verify(source: src, destination: dst, checksums: true)
         XCTAssertEqual(r.contentMismatch, ["flip.jpg"])
-        XCTAssertTrue(FolderVerifier.repair(r, source: src, destination: dst).isEmpty)
+        XCTAssertTrue(FolderVerifier.repair(r, source: src, destination: dst).failed.isEmpty)
         XCTAssertTrue(FolderVerifier.verify(source: src, destination: dst, checksums: true).isComplete)
     }
 }
@@ -105,5 +106,19 @@ enum TestMovie {
         }
         input.markAsFinished()
         await writer.finishWriting()
+    }
+}
+
+final class OutputNamesTests: XCTestCase {
+    func testNeverHandsOutAnExistingOrRepeatedName() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("on-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("original".utf8).write(to: dir.appendingPathComponent("IMG_0001.jpg"))
+        let names = OutputNames()
+        XCTAssertEqual(names.reserve(in: dir, base: "IMG_0001", ext: "jpg").lastPathComponent, "IMG_0001 (2).jpg", "the original is never overwritten")
+        XCTAssertEqual(names.reserve(in: dir, base: "IMG_0001", ext: "jpg").lastPathComponent, "IMG_0001 (3).jpg", "nor another photo of the batch")
+        XCTAssertEqual(names.reserve(in: dir, base: "img_0001", ext: "JPG").lastPathComponent, "img_0001 (4).JPG", "names differing only in case clash on macOS")
+        XCTAssertEqual(names.reserve(in: dir, base: "IMG_0002", ext: "png").lastPathComponent, "IMG_0002.png")
     }
 }

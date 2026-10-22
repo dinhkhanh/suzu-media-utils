@@ -282,3 +282,20 @@ and after every feature below; same 92 people.
   clocks: a camera set to the wrong time lands its photos in odd sessions.
 - Batch Export picks photos with tick circles (whole top-right corner is the hit area, one click handler per
   thumbnail; v0.5's circle was a nested button that lost clicks to the thumbnail), a grid of all photos, and PNG.
+
+## v0.5.2 (2026-10-22): review fixes (data safety, privacy, correctness)
+- Nothing is overwritten: Batch Export, Video Tools and video moments reserve unique names (`OutputNames`, " (2)").
+- Batch Rename renames files and records together while every folder watcher waits (`holdingMonitors`); records move
+  through temporary paths so swaps and shifted numbers don't hit the unique path. A file that can't be renamed goes
+  back to its old name.
+- Renamed/moved event folder: "Locate Folder…" relinks it (`relinkSource`); adding it again relinks automatically
+  when a sample of its files matches by size and content key (names alone are not enough: cameras reuse DSC_0001).
+- Delivery marks only copies that landed (`Exporter.Result.handled`); an unmounted target is skipped without marking,
+  failed pairs wait 5 min, same-named files from two cameras are both kept.
+- One name, one person (`PersonNames`): NFC + case-insensitive in Swift (SQLite NOCASE only folds ASCII). Migration
+  v7 merges duplicates, moving faces, rules, delivery history and album queries. Export ranks and crops by person id.
+- LAN gallery: file/thumb/view/face routes and renames are limited to the shown project's event files.
+- Search filters (best shots, one per burst via a window function) run in SQL; no 5,000-file cap. Same speed.
+- Copy Verifier: checksums on by default, unreadable files count as damaged, repairs go through a checked temp file.
+- Move All re-runs keep a photo already in someone's folder; files seen growing settle for 5 s (15 s on NAS); a
+  folder offline at launch is polled every 5 s until its volume is known; copies are only duplicates within a project.

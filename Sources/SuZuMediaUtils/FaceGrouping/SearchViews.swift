@@ -333,7 +333,7 @@ enum Notifier {
         content.title = total == 1 ? "1 new photo" : "\(total) new photos"
         content.body = report.newFiles.sorted { $0.value > $1.value }.prefix(4).map { "\($0.key) \($0.value)" }.joined(separator: " · ")
             + (report.copied > 0 ? "\n\(report.copied) delivered to folders" : "")
-            + (report.failed.isEmpty ? "" : "\n\(report.failed.count) could not be copied")
+            + (report.failed.isEmpty ? "" : "\n\(report.failed.count) could not be copied yet (will retry)")
         content.sound = .default
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }

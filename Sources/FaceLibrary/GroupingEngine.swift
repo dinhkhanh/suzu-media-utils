@@ -194,10 +194,7 @@ public final class GroupingEngine: @unchecked Sendable {
         }
         guard !merges.isEmpty else { return }
         try store.db.write { db in
-            for m in merges {
-                try db.execute(sql: "UPDATE face SET personId = ? WHERE personId = ?", arguments: [m.into, m.from])
-                try db.execute(sql: "DELETE FROM person WHERE id = ?", arguments: [m.from])
-            }
+            for m in merges { try PersonNames.merge([m.from], into: m.into, db: db) }
         }
         for m in merges {
             if let p = people.removeValue(forKey: m.from), var n = people[m.into] {

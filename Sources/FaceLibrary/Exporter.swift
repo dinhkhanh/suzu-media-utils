@@ -22,6 +22,8 @@ public struct Exporter: Sendable {
         public var alsoHasOtherNamedPeople: Bool
         public var operation: ExportMode = .copy
         public var personName = ""
+        /// The person this copy is for (nil for search results and albums): ranks Top N and centres crops.
+        public var personId: Int64?
         /// Named people in the file (for metadata) and where they are (for face-aware crops).
         public var people: [String] = []
         public var focus: FocusHint?
@@ -62,6 +64,8 @@ public struct Exporter: Sendable {
         /// Not written because the target already had a file with that name (or the identical file).
         public var skippedExisting = 0
         public var failed: [(String, String)] = []
+        /// Indexes of plan items that are now in place: written, or the same file was already there.
+        public var handled: [Int] = []
     }
 
     let store: LibraryStore
@@ -99,9 +103,10 @@ public struct Exporter: Sendable {
                 continue
             }
             plan.items.append(Item(mediaId: r["id"], from: from, to: dir.appendingPathComponent(from.lastPathComponent),
-                                   alsoHasOtherNamedPeople: r["shared"], operation: options.recipe == nil ? mode : .copy, personName: name))
+                                   alsoHasOtherNamedPeople: r["shared"], operation: options.recipe == nil ? mode : .copy, personName: name,
+                                   personId: personId))
         }
-        return try decorate(plan, personIds: [personId], options: options)
+        return try decorate(plan, options: options)
     }
 
     /// Every given person's files into "<base>/<Name>/" in one go. With `.move`, a file showing several of these
@@ -125,24 +130,29 @@ public struct Exporter: Sendable {
         for (_, group) in Dictionary(grouping: rows, by: { $0["id"] as Int64 }).sorted(by: { $0.key < $1.key }) {
             let ordered = group.sorted { ($0["area"] as Double) > ($1["area"] as Double) }  // main subject first
             let from = URL(fileURLWithPath: ordered[0]["path"], isDirectory: false)
-            var moveUsed = false
-            for (k, r) in ordered.enumerated() {
-                let name = names[r["personId"]]!
+            let fromDir = from.deletingLastPathComponent().standardizedFileURL.path
+            func dir(_ r: Row) -> URL {
                 let root = base ?? (r["sourcePath"] as String?).map { URL(fileURLWithPath: $0, isDirectory: true) }
                     ?? from.deletingLastPathComponent()
-                let dir = root.appendingPathComponent(Self.folderName(name), isDirectory: true)
-                if from.deletingLastPathComponent().standardizedFileURL.path == dir.standardizedFileURL.path {
+                return root.appendingPathComponent(Self.folderName(names[r["personId"]]!), isDirectory: true)
+            }
+            // Already in one of these people's folders (an earlier Move All, or a single person's Move): it stays
+            // there and everyone else gets a copy, so a re-run never takes it out of someone's folder.
+            var moveUsed = ordered.contains { dir($0).standardizedFileURL.path == fromDir }
+            for (k, r) in ordered.enumerated() {
+                let name = names[r["personId"]]!
+                let dir = dir(r)
+                if fromDir == dir.standardizedFileURL.path {
                     plan.alreadyThere += 1
-                    moveUsed = true  // it already lives in one person's folder: the rest get copies
                     continue
                 }
                 let op: ExportMode = (mode == .move && options.recipe == nil && !moveUsed && k == 0) ? .move : .copy
                 if op == .move { moveUsed = true }
                 plan.items.append(Item(mediaId: r["id"], from: from, to: dir.appendingPathComponent(from.lastPathComponent),
-                                       alsoHasOtherNamedPeople: ordered.count > 1, operation: op, personName: name))
+                                       alsoHasOtherNamedPeople: ordered.count > 1, operation: op, personName: name, personId: r["personId"]))
             }
         }
-        plan = try decorate(plan, personIds: people.map(\.id), options: options)
+        plan = try decorate(plan, options: options)
         // Copies read the original, so they run before the move of the same file.
         plan.items.sort { ($0.operation == .copy ? 0 : 1, $0.mediaId) < ($1.operation == .copy ? 0 : 1, $1.mediaId) }
         return plan
@@ -154,12 +164,6 @@ public struct Exporter: Sendable {
         let rows = try store.db.read { db in
             try Row.fetchAll(db, sql: "SELECT id, path FROM media WHERE id IN (\(mediaIds.map(String.init).joined(separator: ",")))")
         }
-        let people = try store.db.read { db in
-            try Int64.fetchAll(db, sql: """
-                SELECT DISTINCT f.personId FROM face f JOIN person p ON p.id = f.personId
-                WHERE p.name IS NOT NULL AND f.mediaId IN (\(mediaIds.map(String.init).joined(separator: ",")))
-                """)
-        }
         let dir = base.appendingPathComponent(Self.folderName(folder), isDirectory: true)
         var plan = Plan()
         for r in rows {
@@ -167,7 +171,7 @@ public struct Exporter: Sendable {
             plan.items.append(Item(mediaId: r["id"], from: from, to: dir.appendingPathComponent(from.lastPathComponent),
                                    alsoHasOtherNamedPeople: false, operation: .copy, personName: folder))
         }
-        return try decorate(plan, personIds: people, options: options)
+        return try decorate(plan, options: options)
     }
 
     /// Specific (file, person) pairs into "<base>/<Name>/" (delivery rules). Always copies.
@@ -182,20 +186,18 @@ public struct Exporter: Sendable {
             let from = URL(fileURLWithPath: path, isDirectory: false)
             let dir = base.appendingPathComponent(Self.folderName(p.name), isDirectory: true)
             plan.items.append(Item(mediaId: p.mediaId, from: from, to: dir.appendingPathComponent(from.lastPathComponent),
-                                   alsoHasOtherNamedPeople: false, operation: .copy, personName: p.name))
+                                   alsoHasOtherNamedPeople: false, operation: .copy, personName: p.name, personId: p.personId))
         }
-        return try decorate(plan, personIds: Array(Set(pairs.map(\.personId))), options: options)
+        return try decorate(plan, options: options)
     }
 
     /// Applies Top N / best-of-burst and fills in each file's people and face positions; edited photos become .jpg.
-    func decorate(_ input: Plan, personIds: [Int64], options: Options) throws -> Plan {
+    /// Works by person id, so two people with the same name, or a name typed in the export dialog, change nothing.
+    func decorate(_ input: Plan, options: Options) throws -> Plan {
         var plan = input
         let mediaIds = Array(Set(plan.items.map(\.mediaId)))
         guard !mediaIds.isEmpty else { return plan }
         let list = mediaIds.map(String.init).joined(separator: ",")
-        let names = Dictionary(uniqueKeysWithValues: try store.db.read { db in
-            try Row.fetchAll(db, sql: "SELECT id, name FROM person WHERE id IN (\(personIds.map(String.init).joined(separator: ",")))")
-        }.map { ($0["name"] as String? ?? "", $0["id"] as Int64) })
         let faces = try store.db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT f.mediaId, f.personId, f.x, f.y, f.w, f.h, COALESCE(f.score, f.quality, 0) AS s, p.name, m.burstId
@@ -206,17 +208,22 @@ public struct Exporter: Sendable {
         let byMedia = Dictionary(grouping: faces) { $0["mediaId"] as Int64 }
         // Best score per (file, person), read once: sorting thousands of files compares them many times.
         var best: [Int64: [Int64: Double]] = [:]
+        var bestAny: [Int64: Double] = [:]
         for f in faces {
-            guard let pid = f["personId"] as Int64? else { continue }
             let m: Int64 = f["mediaId"], s: Double = f["s"]
+            bestAny[m] = max(bestAny[m] ?? 0, s)
+            guard let pid = f["personId"] as Int64? else { continue }
             if s > best[m]?[pid] ?? -1 { best[m, default: [:]][pid] = s }
         }
-        func score(_ mediaId: Int64, _ personId: Int64?) -> Double { personId.flatMap { best[mediaId]?[$0] } ?? 0 }
-        // Per person: optionally only the best of each burst, then only the top N.
+        // A person's copy ranks by their own face; a search result or album by its best face.
+        func score(_ item: Item) -> Double {
+            item.personId.map { best[item.mediaId]?[$0] ?? 0 } ?? bestAny[item.mediaId] ?? 0
+        }
+        // Per person (per folder for albums): optionally only the best of each burst, then only the top N.
+        func group(_ item: Item) -> String { item.personId.map { "#\($0)" } ?? item.personName }
         var keep: Set<String> = []
-        for (name, group) in Dictionary(grouping: plan.items, by: \.personName) {
-            let pid = names[name]
-            var items = group.sorted { score($0.mediaId, pid) > score($1.mediaId, pid) }
+        for (key, group) in Dictionary(grouping: plan.items, by: group) {
+            var items = group.sorted { score($0) > score($1) }
             if options.bestOfBurst {
                 var seen: Set<Int64> = []
                 items = items.filter { item in
@@ -225,14 +232,15 @@ public struct Exporter: Sendable {
                 }
             }
             if let n = options.topN { items = Array(items.prefix(n)) }
-            for i in items { keep.insert("\(i.mediaId)|\(name)") }
+            for i in items { keep.insert("\(i.mediaId)|\(key)") }
         }
-        plan.items = plan.items.filter { keep.contains("\($0.mediaId)|\($0.personName)") }
+        plan.items = plan.items.filter { keep.contains("\($0.mediaId)|\(group($0))") }
         for i in plan.items.indices {
             let fs = byMedia[plan.items[i].mediaId] ?? []
             plan.items[i].people = Array(Set(fs.compactMap { $0["name"] as String? })).sorted()
             func rect(_ r: Row) -> CGRect { CGRect(x: r["x"] as Double, y: r["y"] as Double, width: r["w"] as Double, height: r["h"] as Double) }
-            let mine = fs.filter { ($0["name"] as String?) == plan.items[i].personName }.max { ($0["s"] as Double) < ($1["s"] as Double) }
+            let pid = plan.items[i].personId
+            let mine = pid == nil ? nil : fs.filter { ($0["personId"] as Int64?) == pid }.max { ($0["s"] as Double) < ($1["s"] as Double) }
             plan.items[i].focus = FocusHint(primary: mine.map(rect), others: fs.filter { ($0["name"] as String?) != nil && $0 != mine }.map(rect))
             if let recipe = options.recipe, !MediaKindHint.isVideo(plan.items[i].from) {
                 plan.items[i].to = plan.items[i].to.deletingPathExtension().appendingPathExtension(recipe.fileExtension)
@@ -251,6 +259,7 @@ public struct Exporter: Sendable {
                 try fm.createDirectory(at: item.to.deletingLastPathComponent(), withIntermediateDirectories: true)
                 guard let dest = try Self.destination(for: item, policy: policy) else {
                     result.skippedExisting += 1
+                    result.handled.append(i)
                     continue
                 }
                 let edit = plan.options.recipe.flatMap { MediaKindHint.isVideo(item.from) ? nil : $0 }
@@ -258,6 +267,7 @@ public struct Exporter: Sendable {
                     try EditPipeline.render(item.from, recipe: edit, focus: item.focus, people: item.people, to: dest)
                     try recordCopy(of: item.mediaId, at: dest)
                     result.done += 1
+                    result.handled.append(i)
                     continue
                 }
                 switch item.operation {
@@ -273,6 +283,7 @@ public struct Exporter: Sendable {
                     try recordCopy(of: item.mediaId, at: dest)
                 }
                 result.done += 1
+                result.handled.append(i)
             } catch {
                 result.failed.append((item.from.lastPathComponent, error.localizedDescription))
             }

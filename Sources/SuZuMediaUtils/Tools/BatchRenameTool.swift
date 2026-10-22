@@ -14,6 +14,7 @@ struct BatchRenameTool: View {
     @State private var names: [String] = []
     @State private var loading = false
     @State private var result: String?
+    @State private var renaming = false
 
     var body: some View {
         Form {
@@ -42,7 +43,7 @@ struct BatchRenameTool: View {
                 HStack {
                     if let result { Text(result).foregroundStyle(.secondary) }
                     Spacer()
-                    Button("Rename \(items.count) Files") { apply() }.keyboardShortcut(.defaultAction).disabled(items.isEmpty || loading || names.count != items.count)
+                    Button("Rename \(items.count) Files") { apply() }.keyboardShortcut(.defaultAction).disabled(items.isEmpty || loading || renaming || names.count != items.count)
                 }
             }
         }
@@ -105,20 +106,25 @@ struct BatchRenameTool: View {
     }
 
     func apply() {
-        do {
-            let done = try RenamePattern.apply(items, names: names)
-            if let store = faces.store {
-                try store.db.write { db in
-                    for (old, new) in done {
-                        try db.execute(sql: "UPDATE media SET path = ? WHERE path = ?", arguments: [canonicalPath(new), canonicalPath(old)])
-                    }
+        let items = items, names = names, service = faces.service
+        renaming = true
+        result = nil
+        // Off the main thread, and off Swift's task threads: it waits for the folder watchers to finish what they're
+        // doing before files change names.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outcome = Result { try service?.renameFiles(items, names: names) ?? RenamePattern.apply(items, names: names) }
+            DispatchQueue.main.async {
+                renaming = false
+                switch outcome {
+                case .success(let o):
+                    result = "Renamed \(o.renamed.count) of \(items.count) files."
+                        + (o.failed.isEmpty ? "" : " \(o.failed.count) kept their names: \(o.failed[0].0.lastPathComponent): \(o.failed[0].1)")
+                    let renamed = Dictionary(o.renamed.map { ($0.0, $0.1) }, uniquingKeysWith: { a, _ in a })
+                    input = input.map { var i = $0; i.url = renamed[i.url] ?? i.url; return i }
+                case .failure(let error):
+                    result = "Stopped: \(error.localizedDescription)"
                 }
             }
-            result = "Renamed \(done.count) of \(items.count) files."
-            let renamed = Dictionary(uniqueKeysWithValues: done.map { ($0.0, $0.1) })
-            input = input.map { var i = $0; i.url = renamed[i.url] ?? i.url; return i }
-        } catch {
-            result = "Stopped: \(error.localizedDescription)"
         }
     }
 }
