@@ -3,6 +3,7 @@ import SwiftUI
 /// Where the user is in the app. Add a case per tool; the tool decides what its own route values mean.
 enum AppRoute: Hashable {
     case faces(FaceRoute)
+    case tool(ToolRoute)
 }
 
 /// Main window: one sidebar listing every tool's sections, and the selected tool's views on the right.
@@ -17,6 +18,7 @@ struct AppShell: View {
         NavigationSplitView {
             List(selection: $route) {
                 FaceGroupingSidebar()
+                ToolsSidebar()
             }
             .navigationSplitViewColumnWidth(min: 220, ideal: 250)
             .safeAreaInset(edge: .bottom) { FaceGroupingStatus() }
@@ -25,6 +27,7 @@ struct AppShell: View {
             NavigationStack(path: $path) {
                 switch route ?? .faces(.people) {
                 case .faces(let r): FaceGroupingDetail(route: r, path: $path)
+                case .tool(let t): ToolDetail(route: t)
                 }
             }
         }

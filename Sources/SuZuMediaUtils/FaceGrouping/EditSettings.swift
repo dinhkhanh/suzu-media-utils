@@ -70,7 +70,8 @@ struct EditOptionsView: View {
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Auto tone", isOn: $recipe.autoTone)
+                Toggle("Auto tone & enhance", isOn: $recipe.autoTone)
+                    .help("Exposure, contrast, shadows/highlights, vibrance and skin-tone balance; on automatically with crops and watermarks")
                 Picker("Crop", selection: $recipe.aspect) {
                     Text("Keep original frame").tag(AspectPreset?.none)
                     ForEach(AspectPreset.allCases) { Text($0.label).tag(AspectPreset?.some($0)) }
@@ -94,6 +95,9 @@ struct EditOptionsView: View {
             .frame(width: 170, height: 170)
         }
         .onAppear { recipe.autoToneStrength = EditSettings.autoToneStrength }
+        // Photos going out with a social crop or the logo are auto-toned too (can still be switched off).
+        .onChange(of: recipe.aspect) { old, new in if old == nil && new != nil { recipe.autoTone = true } }
+        .onChange(of: recipe.watermark) { old, new in if old == nil && new != nil { recipe.autoTone = true } }
         .task(id: recipe) { await renderPreview() }
     }
 
