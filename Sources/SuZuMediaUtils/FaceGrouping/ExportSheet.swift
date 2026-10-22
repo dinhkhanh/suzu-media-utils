@@ -5,7 +5,15 @@ import SwiftUI
 enum ExportScope: Identifiable {
     case person(Int64)
     case all
-    var id: String { if case .person(let p) = self { "p\(p)" } else { "all" } }
+    /// Search results or a smart album, exported into one folder.
+    case media([Int64], title: String)
+    var id: String {
+        switch self {
+        case .person(let p): "p\(p)"
+        case .all: "all"
+        case .media(let ids, let t): "m\(t)\(ids.count)"
+        }
+    }
 }
 
 /// Copy or move people's files into "<base>/<Name>/". Base is each file's own source folder unless the user picks one.
@@ -35,6 +43,7 @@ struct ExportSheet: View {
     }
 
     var isAll: Bool { if case .all = scope { true } else { false } }
+    var isMedia: Bool { if case .media = scope { true } else { false } }
     var verb: String { mode == .copy ? "Copy" : "Move" }
     var folder: String { Exporter.folderName(name) }
     var named: [PersonSummary] { model.people.filter { $0.name != nil && $0.faces > 0 } }
@@ -59,12 +68,12 @@ struct ExportSheet: View {
         if isAll {
             peopleList
         } else {
-            TextField("Person's name (folder name)", text: $name).textFieldStyle(.roundedBorder)
+            TextField(isMedia ? "Folder name" : "Person's name (folder name)", text: $name).textFieldStyle(.roundedBorder)
         }
         VStack(alignment: .leading, spacing: 6) {
             Text(isAll ? "Put each person's folder:" : "Put the “\(folder)” folder:").font(.headline)
             Picker("", selection: Binding(get: { base == nil ? 0 : 1 }, set: { if $0 == 0 { base = nil } else { choose() } })) {
-                Text("Inside each file's source folder").tag(0)
+                Text(isMedia ? "Inside Pictures/SuZu Exports" : "Inside each file's source folder").tag(0)
                 Text(base.map { "Inside \($0.path)" } ?? "Inside another folder…").tag(1)
             }
             .pickerStyle(.radioGroup)
@@ -224,6 +233,10 @@ struct ExportSheet: View {
             plan = try? service.exporter.planAll(people: people, base: base, mode: mode, options: options)
         case .person(let id):
             plan = folder.isEmpty ? nil : try? service.exporter.plan(personId: id, name: name, base: base, mode: mode, options: options)
+        case .media(let ids, _):
+            // Search results have no source folder of their own: default to Pictures/SuZu Exports.
+            let root = base ?? FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0].appendingPathComponent("SuZu Exports")
+            plan = folder.isEmpty ? nil : try? service.exporter.planMedia(ids, folder: name, base: root, options: options)
         }
     }
 

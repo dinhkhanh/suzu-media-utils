@@ -340,6 +340,52 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(Metadata.people(in: all[0].url).isEmpty, "originals untouched")
     }
 
+    func testSearchAllAnySoloAndSmartAlbum() throws {
+        for i in 0..<4 { try makeFile("s/\(i).jpg", seed: UInt8(i + 1)) }
+        monitor().scan()
+        let m = try media()
+        let an = try newPerson("An"), binh = try newPerson("Bình")
+        _ = try addFace(mediaId: m[0].id!, personId: an)          // An solo
+        _ = try addFace(mediaId: m[1].id!, personId: an)          // An + Bình
+        _ = try addFace(mediaId: m[1].id!, personId: binh)
+        _ = try addFace(mediaId: m[2].id!, personId: binh)        // Bình solo
+        var q = MediaQuery()
+        q.people = [an, binh]
+        XCTAssertEqual(try q.run(store).map(\.id), [m[1].id!])
+        q.match = .any
+        XCTAssertEqual(Set(try q.run(store).map(\.id)), [m[0].id!, m[1].id!, m[2].id!])
+        q.crowd = .solo
+        XCTAssertEqual(Set(try q.run(store).map(\.id)), [m[0].id!, m[2].id!])
+
+        var album = SmartAlbum(name: "Solo shots", query: q)
+        try store.db.write { db in try album.insert(db) }
+        let loaded = try store.db.read { db in try SmartAlbum.fetchOne(db, key: album.id!)! }
+        XCTAssertEqual(loaded.mediaQuery, q)
+    }
+
+    func testDeliveryRuleCopiesNewFilesOnceAndNotifyOnly() throws {
+        try makeFile("d/old.jpg", seed: 1)
+        monitor().scan()
+        let an = try newPerson("An")
+        _ = try addFace(mediaId: try media()[0].id!, personId: an)
+        let out = tmp.appendingPathComponent("Drive", isDirectory: true)
+        let service = DeliveryService(store: store)
+        try service.add(DeliveryRule(personId: an, folder: out.path, recipe: nil, writeNames: false), includeExisting: false)
+        try service.add(DeliveryRule(personId: nil, folder: nil, recipe: nil, writeNames: false), includeExisting: false)
+        XCTAssertTrue(try service.run().newFiles.isEmpty, "existing files are not delivered unless asked")
+
+        try makeFile("d/new.jpg", seed: 2)
+        monitor().scan()
+        let newMedia = try media().first { $0.path.hasSuffix("new.jpg") }!
+        _ = try addFace(mediaId: newMedia.id!, personId: an)
+        let r = try service.run()
+        XCTAssertEqual(r.copied, 1)
+        XCTAssertEqual(r.newFiles["An"], 2, "one from the copy rule, one from the notify-only rule")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: out.appendingPathComponent("An/new.jpg").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: out.appendingPathComponent("An/old.jpg").path))
+        XCTAssertTrue(try service.run().newFiles.isEmpty, "nothing is delivered twice")
+    }
+
     // MARK: - Grouping
 
     /// Three synthetic identities: random direction plus small per-face noise.

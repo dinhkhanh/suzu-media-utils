@@ -5,6 +5,9 @@ import SwiftUI
 enum FaceRoute: Hashable {
     case people
     case unassigned
+    case search
+    case album(Int64)
+    case rules
     case source(Int64)
 }
 
@@ -27,6 +30,9 @@ struct FaceGroupingDetail: View {
                 switch route {
                 case .people: PeopleGrid(path: $path)
                 case .unassigned: UnassignedView()
+                case .search: SearchView(albumId: nil)
+                case .album(let id): SearchView(albumId: id)
+                case .rules: DeliveryRulesView()
                 case .source(let id): SourceView(sourceId: id)
                 }
             }
@@ -52,6 +58,20 @@ struct FaceGroupingSidebar: View {
             Label("Unassigned Faces", systemImage: "questionmark.square.dashed")
                 .badge(model.stats.unassignedFaces)
                 .tag(AppRoute.faces(.unassigned))
+            Label("Search", systemImage: "magnifyingglass")
+                .tag(AppRoute.faces(.search))
+            Label("Delivery Rules", systemImage: "paperplane")
+                .badge(model.rules.filter(\.enabled).count)
+                .tag(AppRoute.faces(.rules))
+        }
+        if !model.albums.isEmpty {
+            Section("Smart Albums") {
+                ForEach(model.albums) { a in
+                    Label(a.name, systemImage: "rectangle.stack.badge.person.crop")
+                        .tag(AppRoute.faces(.album(a.id!)))
+                        .contextMenu { Button("Delete Album", role: .destructive) { model.deleteAlbum(a.id!) } }
+                }
+            }
         }
         Section("Folders") {
             ForEach(model.sources.filter { $0.kind == .media }) { SourceRow(source: $0).tag(AppRoute.faces(.source($0.id))) }

@@ -117,6 +117,31 @@ public final class LibraryStore: @unchecked Sendable {
                 t.add(column: "coverFaceId", .integer).references("face", onDelete: .setNull)
             }
         }
+        m.registerMigration("v4-albums-delivery") { db in
+            try db.create(table: "smartAlbum") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("name", .text).notNull()
+                t.column("query", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.create(table: "deliveryRule") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("personId", .integer).references("person", onDelete: .cascade)  // nil = every named person
+                t.column("folder", .text)  // nil = notify only
+                t.column("recipe", .text)  // JSON EditRecipe, nil = plain copy
+                t.column("writeNames", .boolean).notNull().defaults(to: true)
+                t.column("enabled", .boolean).notNull().defaults(to: true)
+                t.column("createdAt", .datetime).notNull()
+            }
+            /// What each rule already delivered, so nothing is sent twice.
+            try db.create(table: "delivery") { t in
+                t.column("ruleId", .integer).notNull().references("deliveryRule", onDelete: .cascade)
+                t.column("mediaId", .integer).notNull().references("media", onDelete: .cascade)
+                t.column("personId", .integer).notNull()
+                t.column("deliveredAt", .datetime).notNull()
+                t.primaryKey(["ruleId", "mediaId", "personId"])
+            }
+        }
         return m
     }
 }

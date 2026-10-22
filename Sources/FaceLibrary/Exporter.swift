@@ -143,6 +143,45 @@ public struct Exporter: Sendable {
         return plan
     }
 
+    /// Any set of files (search results, smart albums) into "<base>/<folder>/".
+    public func planMedia(_ mediaIds: [Int64], folder: String, base: URL, options: Options) throws -> Plan {
+        guard !mediaIds.isEmpty else { return Plan() }
+        let rows = try store.db.read { db in
+            try Row.fetchAll(db, sql: "SELECT id, path FROM media WHERE id IN (\(mediaIds.map(String.init).joined(separator: ",")))")
+        }
+        let people = try store.db.read { db in
+            try Int64.fetchAll(db, sql: """
+                SELECT DISTINCT f.personId FROM face f JOIN person p ON p.id = f.personId
+                WHERE p.name IS NOT NULL AND f.mediaId IN (\(mediaIds.map(String.init).joined(separator: ",")))
+                """)
+        }
+        let dir = base.appendingPathComponent(Self.folderName(folder), isDirectory: true)
+        var plan = Plan()
+        for r in rows {
+            let from = URL(fileURLWithPath: r["path"])
+            plan.items.append(Item(mediaId: r["id"], from: from, to: dir.appendingPathComponent(from.lastPathComponent),
+                                   alsoHasOtherNamedPeople: false, operation: .copy, personName: folder))
+        }
+        return try decorate(plan, personIds: people, options: options)
+    }
+
+    /// Specific (file, person) pairs into "<base>/<Name>/" (delivery rules). Always copies.
+    public func planPairs(_ pairs: [(mediaId: Int64, personId: Int64, name: String)], base: URL, options: Options) throws -> Plan {
+        guard !pairs.isEmpty else { return Plan() }
+        let paths = Dictionary(uniqueKeysWithValues: try store.db.read { db in
+            try Row.fetchAll(db, sql: "SELECT id, path FROM media WHERE id IN (\(Set(pairs.map(\.mediaId)).map(String.init).joined(separator: ",")))")
+        }.map { ($0["id"] as Int64, $0["path"] as String) })
+        var plan = Plan()
+        for p in pairs {
+            guard let path = paths[p.mediaId] else { continue }
+            let from = URL(fileURLWithPath: path)
+            let dir = base.appendingPathComponent(Self.folderName(p.name), isDirectory: true)
+            plan.items.append(Item(mediaId: p.mediaId, from: from, to: dir.appendingPathComponent(from.lastPathComponent),
+                                   alsoHasOtherNamedPeople: false, operation: .copy, personName: p.name))
+        }
+        return try decorate(plan, personIds: Array(Set(pairs.map(\.personId))), options: options)
+    }
+
     /// Applies Top N / best-of-burst and fills in each file's people and face positions; edited photos become .jpg.
     func decorate(_ input: Plan, personIds: [Int64], options: Options) throws -> Plan {
         var plan = input

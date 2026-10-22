@@ -13,6 +13,9 @@ public final class LibraryService: @unchecked Sendable {
     var maintenance: DispatchSourceTimer?
     let maintenanceQueue = DispatchQueue(label: "maintenance", qos: .background)
     var burstsDirty = true
+    /// Called (on a background queue) after delivery rules handled new files: person name -> count.
+    public var onDelivered: (@Sendable (DeliveryService.Report) -> Void)?
+    public var delivery: DeliveryService { DeliveryService(store: store) }
 
     public init(modelURL: URL, directory: URL = LibraryStore.defaultDirectory) throws {
         store = try LibraryStore(directory: directory)
@@ -26,7 +29,7 @@ public final class LibraryService: @unchecked Sendable {
         processor.enqueuePending()
         for s in (try? store.db.read { db in try SourceRecord.fetchAll(db) }) ?? [] { startMonitor(s) }
         let t = DispatchSource.makeTimerSource(queue: maintenanceQueue)
-        t.schedule(deadline: .now() + 15, repeating: 15)
+        t.schedule(deadline: .now() + 10, repeating: 10)
         t.setEventHandler { [weak self] in self?.maintain() }
         t.resume()
         maintenance = t
@@ -38,6 +41,13 @@ public final class LibraryService: @unchecked Sendable {
     @discardableResult
     public func maintain() -> Bool {
         guard processor.queuedCount == 0, (try? pendingCount()) == 0 else { return false }
+        // Deliveries first: they're what people are waiting for. Grouping settles ~30 s after a batch, so files
+        // are only delivered once their faces are named.
+        engine.waitUntilIdle()
+        if let report = try? delivery.run(), !report.newFiles.isEmpty {
+            onDelivered?(report)
+            if report.remaining > 0 { return false }
+        }
         let (old, noPrint) = (try? store.db.read { db in
             (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'done' AND duplicateOf IS NULL AND analysisVersion < ?",
                               arguments: [BestShot.analysisVersion]) ?? 0,

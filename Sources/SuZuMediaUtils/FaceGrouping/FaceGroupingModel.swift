@@ -65,6 +65,8 @@ final class FaceGroupingModel: ObservableObject {
     @Published var sources: [SourceSummary] = []
     @Published var stats = LibraryStats()
     @Published var rate: Double = 0
+    @Published var albums: [SmartAlbum] = []
+    @Published var rules: [DeliveryRule] = []
     /// Folders being removed in the background; hidden from the sidebar right away.
     @Published var removing: Set<Int64> = []
     private var cancellables: Set<AnyCancellable> = []
@@ -89,8 +91,10 @@ final class FaceGroupingModel: ObservableObject {
             startupError = "Could not open the library: \(error.localizedDescription)"
             return
         }
+        service!.onDelivered = { report in Notifier.post(report) }
         service!.start()
         observe()
+        if !rules.isEmpty { Notifier.requestPermission() }
     }
 
     var store: LibraryStore? { service?.store }
@@ -99,7 +103,8 @@ final class FaceGroupingModel: ObservableObject {
     /// re-reads people, folders and stats on a background reader when something changed.
     private func observe() {
         guard let db = store?.db else { return }
-        regionObserver = DatabaseRegionObservation(tracking: Table("face"), Table("person"), Table("media"), Table("source"))
+        regionObserver = DatabaseRegionObservation(tracking: Table("face"), Table("person"), Table("media"), Table("source"),
+                                                   Table("smartAlbum"), Table("deliveryRule"))
             .start(in: db, onError: { _ in }, onChange: { [weak self] _ in
                 DispatchQueue.main.async { self?.dirty = true }
             })
@@ -129,12 +134,17 @@ final class FaceGroupingModel: ObservableObject {
         dirty = false
         refreshing = true
         Task.detached(priority: .userInitiated) {
-            let result = try? await db.read { db in (try Self.fetchPeople(db), try Self.fetchSources(db), try Self.fetchStats(db)) }
+            let result = try? await db.read { db in
+                (try Self.fetchPeople(db), try Self.fetchSources(db), try Self.fetchStats(db),
+                 try SmartAlbum.order(Column("name")).fetchAll(db), try DeliveryRule.order(Column("createdAt")).fetchAll(db))
+            }
             await MainActor.run {
-                if let (people, sources, stats) = result {
+                if let (people, sources, stats, albums, rules) = result {
                     if people != self.people { self.people = people }
                     self.applySources(sources)
                     if stats != self.stats { self.stats = stats }
+                    if albums != self.albums { self.albums = albums }
+                    if rules != self.rules { self.rules = rules }
                 }
                 self.refreshing = false
             }
@@ -283,6 +293,35 @@ final class FaceGroupingModel: ObservableObject {
         let chosen = people.filter { ids.contains($0.id) }
         guard let target = chosen.first(where: { $0.name != nil }) ?? chosen.max(by: { $0.faces < $1.faces }) else { return }
         perform { try $0.merge(Array(ids), into: target.id) }
+    }
+
+    func saveAlbum(id: Int64?, name: String, query: MediaQuery) {
+        perform { service in
+            var album = SmartAlbum(name: name.isEmpty ? "Untitled" : name, query: query)
+            album.id = id
+            try service.store.db.write { db in try album.save(db) }
+        }
+    }
+
+    func deleteAlbum(_ id: Int64) {
+        perform { service in try service.store.db.write { db in _ = try SmartAlbum.deleteOne(db, key: id) } }
+    }
+
+    func addRule(_ rule: DeliveryRule, includeExisting: Bool) {
+        Notifier.requestPermission()
+        perform { try $0.delivery.add(rule, includeExisting: includeExisting) }
+    }
+
+    func setRule(_ rule: DeliveryRule, enabled: Bool) {
+        perform { service in
+            var r = rule
+            r.enabled = enabled
+            try service.store.db.write { db in try r.update(db) }
+        }
+    }
+
+    func deleteRule(_ rule: DeliveryRule) {
+        perform { service in try service.store.db.write { db in _ = try rule.delete(db) } }
     }
 
     func setCover(_ personId: Int64, faceId: Int64?) { perform { try $0.setCover(personId, faceId: faceId) } }

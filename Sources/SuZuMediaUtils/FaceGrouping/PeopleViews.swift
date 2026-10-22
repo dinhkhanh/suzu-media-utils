@@ -167,6 +167,7 @@ struct PersonDetail: View {
     @State private var collapseBursts = true
     @State private var topN: Int?
     @State private var session: Int?
+    @State private var notifyRule = false
 
     var person: PersonSummary? { model.people.first { $0.id == personId } }
 
@@ -186,6 +187,7 @@ struct PersonDetail: View {
         .toolbar { toolbar }
         .task(id: reloadKey) { reload() }
         .onAppear { name = person?.name ?? "" }
+        .sheet(isPresented: $notifyRule) { NewRuleSheet(presetPerson: personId, notifyOnly: true) }
         .sheet(item: $export) { mode in
             ExportSheet(scope: .person(personId), mode: mode, initialName: person?.name ?? name)
         }
@@ -369,6 +371,10 @@ struct PersonDetail: View {
             ToolbarItem {
                 MoveFacesMenu(faces: selectedFaces, excluding: personId) { selectedFaces = [] }
             }
+        }
+        ToolbarItem {
+            Button { notifyRule = true } label: { Label("Deliver / Notify…", systemImage: "bell.badge") }
+                .help("Get notified, and optionally copy new photos of this person to a folder, as they arrive")
         }
         ToolbarItem {
             Button { export = .copy } label: { Label("Copy to Folder…", systemImage: "doc.on.doc") }
