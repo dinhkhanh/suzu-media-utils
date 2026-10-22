@@ -41,7 +41,9 @@ groups them by person, keeps up as new files arrive, and files each person's med
 
 ### Batch Export
 Auto tone, face-aware social crops, watermark and resize for any photos or people's photos: a large preview of the
-result (film strip, before/after, click the photo to place the watermark) with the settings beside it.
+result (film strip, before/after, click the photo to place the watermark) with the settings beside it. Tick or untick
+photos in the strip or in a grid of all of them (⇧-click for a range, Select All / None) to export only some; save as
+JPEG or as lossless PNG (the photo's own colour space, 16-bit when the original is).
 
 ### Watermarks
 Save any number of watermark presets — logos or text credits — in Settings → Watermarks. Every editing screen (Batch

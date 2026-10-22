@@ -13,12 +13,28 @@ public struct EditRecipe: Codable, Sendable, Equatable, Hashable {
     /// Long side in pixels after cropping; nil keeps the size.
     public var maxLongSide: Int?
     public var jpegQuality = 0.9
+    /// nil = JPEG.
+    public var format: OutputFormat?
     /// Names written into the exported file's metadata (IPTC PersonInImage + keywords).
     public var writePeopleNames = true
 
     public init() {}
 
+    public var outputFormat: OutputFormat { format ?? .jpeg }
+    public var fileExtension: String { outputFormat.fileExtension }
+
     public var isPassthrough: Bool { !autoTone && aspect == nil && watermark == nil && maxLongSide == nil }
+}
+
+public enum OutputFormat: String, Codable, Sendable, CaseIterable, Identifiable, Hashable {
+    /// Small files for sharing; quality slider applies.
+    case jpeg
+    /// Lossless, in the photo's own colour space, 16 bits per channel when the original has more than 8.
+    case png
+
+    public var id: String { rawValue }
+    public var fileExtension: String { self == .png ? "png" : "jpg" }
+    public var label: String { self == .png ? "PNG" : "JPEG" }
 }
 
 public enum AspectPreset: String, Codable, Sendable, CaseIterable, Identifiable, Hashable {

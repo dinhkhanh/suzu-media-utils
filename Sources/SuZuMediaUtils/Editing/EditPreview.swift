@@ -95,7 +95,13 @@ struct EditPreview: View {
     @Binding var recipe: EditRecipe
     let samples: [ToolItem]
     var filmstrip = true
+    /// When set, photos can be ticked off: the action then applies only to the ticked ones (this set holds the
+    /// unticked ones, so photos added later start ticked).
+    var excluded: Binding<Set<ToolItem>>? = nil
     @State private var index = 0
+    @State private var gridMode = false
+    /// Last photo ticked or unticked, for Shift-click ranges.
+    @State private var anchor: Int?
     @State private var rendered: PreviewCache.Rendered?
     @State private var showOriginal = false
     @State private var rendering = false
@@ -105,39 +111,45 @@ struct EditPreview: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ZStack {
-                Color(nsColor: NSColor(white: 0.13, alpha: 1))
-                if let rendered {
-                    Image(nsImage: rendered.image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .shadow(color: .black.opacity(0.5), radius: 8)
-                        .overlay { placementLayer }
-                        .padding(18)
-                } else if samples.isEmpty {
-                    VStack(spacing: 8) {
-                        Image(systemName: "photo.on.rectangle.angled").font(.system(size: 40))
-                        Text("Add photos or people to preview the edit").font(.callout)
-                    }
-                    .foregroundStyle(.white.opacity(0.45))
-                }
-                if rendering { ProgressView().controlSize(.small).tint(.white).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).padding(12) }
-            }
-            .overlay(alignment: .topTrailing) {
-                Picker("", selection: $showOriginal) {
-                    Text("Edited").tag(false)
-                    Text("Original").tag(true)
-                }
-                .pickerStyle(.segmented).labelsHidden().fixedSize().padding(10)
-                .help("Compare with the original photo")
-            }
-            .overlay(alignment: .bottom) { infoBar }
-            .clipped()
-            .environment(\.colorScheme, .dark)
-            if filmstrip && samples.count > 1 { strip }
+            if showGrid { grid } else { previewArea }
+            if excluded != nil && samples.count > 1 { selectionBar }
+            if filmstrip && samples.count > 1 && !showGrid { strip }
         }
         .onChange(of: samples.count) { if index >= samples.count { index = 0 } }
+        .onChange(of: samples.count > 1) { if samples.count > 1, ProcessInfo.processInfo.environment["SUZU_TOOL_SAMPLES"] == "grid" { gridMode = true } }
         .task(id: "\(recipe.hashValue)|\(current?.url.path ?? "")|\(showOriginal)") { await render() }
+    }
+
+    var previewArea: some View {
+        ZStack {
+            Color(nsColor: NSColor(white: 0.13, alpha: 1))
+            if let rendered {
+                Image(nsImage: rendered.image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .shadow(color: .black.opacity(0.5), radius: 8)
+                    .overlay { placementLayer }
+                    .padding(18)
+            } else if samples.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "photo.on.rectangle.angled").font(.system(size: 40))
+                    Text("Add photos or people to preview the edit").font(.callout)
+                }
+                .foregroundStyle(.white.opacity(0.45))
+            }
+            if rendering { ProgressView().controlSize(.small).tint(.white).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).padding(12) }
+        }
+        .overlay(alignment: .topTrailing) {
+            Picker("", selection: $showOriginal) {
+                Text("Edited").tag(false)
+                Text("Original").tag(true)
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize().padding(10)
+            .help("Compare with the original photo")
+        }
+        .overlay(alignment: .bottom) { infoBar }
+        .clipped()
+        .environment(\.colorScheme, .dark)
     }
 
     /// Thirds overlay while hovering with a watermark on; a click puts the watermark in that ninth.
@@ -176,7 +188,7 @@ struct EditPreview: View {
                 Button { index = (index + 1) % samples.count } label: { Image(systemName: "chevron.right") }
             }
             if let current { Text(current.url.lastPathComponent).lineLimit(1).truncationMode(.middle) }
-            if let s = rendered?.outputSize, !showOriginal { Text("→ \(Int(s.width)) × \(Int(s.height)) px").monospacedDigit() }
+            if let s = rendered?.outputSize, !showOriginal { Text("→ \(Int(s.width)) × \(Int(s.height)) px \(recipe.outputFormat.label)").monospacedDigit() }
             if let w = rendered?.warning { Label(w, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.yellow) }
         }
         .buttonStyle(.borderless)
@@ -194,9 +206,13 @@ struct EditPreview: View {
                 LazyHStack(spacing: 6) {
                     // Long lists only show their start; the arrows still step through all of them.
                     ForEach(Array(samples.prefix(300).enumerated()), id: \.offset) { i, item in
-                        StripThumb(url: item.url, selected: i == index)
+                        StripThumb(url: item.url, selected: i == index, checked: isChecked(item), onCheck: { tick(i) })
                             .id(i)
-                            .onTapGesture { index = i }
+                            .onTapGesture {
+                                // Click previews; ⌘-click ticks or unticks; ⇧-click ticks a range.
+                                let mods = NSEvent.modifierFlags
+                                if mods.contains(.shift) || mods.contains(.command) { tick(i) } else { index = i }
+                            }
                             .help(item.url.lastPathComponent)
                     }
                 }
@@ -207,6 +223,66 @@ struct EditPreview: View {
             .environment(\.colorScheme, .dark)
             .onChange(of: index) { withAnimation { proxy.scrollTo(index, anchor: .center) } }
         }
+    }
+
+    var showGrid: Bool { gridMode && excluded != nil && samples.count > 1 }
+
+    func isChecked(_ item: ToolItem) -> Bool? { excluded.map { !$0.wrappedValue.contains(item) } }
+
+    /// Ticks or unticks a photo; with Shift, every photo from the last one clicked gets the same state.
+    func tick(_ i: Int) {
+        guard let excluded, i < samples.count else { return }
+        let on = excluded.wrappedValue.contains(samples[i])
+        let range = NSEvent.modifierFlags.contains(.shift) && anchor != nil ? min(anchor!, i)...max(anchor!, i) : i...i
+        var set = excluded.wrappedValue
+        for k in range where k < samples.count { if on { set.remove(samples[k]) } else { set.insert(samples[k]) } }
+        excluded.wrappedValue = set
+        anchor = i
+    }
+
+    var selectionBar: some View {
+        let total = samples.count, off = excluded?.wrappedValue.count ?? 0
+        return HStack(spacing: 10) {
+            Picker("", selection: $gridMode) {
+                Image(systemName: "photo").tag(false).help("Large preview")
+                Image(systemName: "square.grid.3x3").tag(true).help("All photos as a grid, to tick many at once")
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            Text(off == 0 ? "All \(total) photos" : "\(total - off) of \(total) photos").monospacedDigit()
+            if let item = current, !showGrid {
+                Toggle("Include this one", isOn: Binding(get: { isChecked(item) ?? true }, set: { _ in tick(min(index, total - 1)) }))
+                    .toggleStyle(.checkbox)
+            }
+            Spacer()
+            Button("Select All") { excluded?.wrappedValue = [] }.disabled(off == 0)
+            Button("Select None") { excluded?.wrappedValue = Set(samples) }.disabled(off == total)
+        }
+        .controlSize(.small)
+        .font(.callout)
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(Color(nsColor: NSColor(white: 0.09, alpha: 1)))
+        .environment(\.colorScheme, .dark)
+    }
+
+    /// Every photo, bigger: click to tick or untick (⇧-click for a range), double-click to preview it large.
+    var grid: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], spacing: 8) {
+                    ForEach(Array(samples.enumerated()), id: \.offset) { i, item in
+                        StripThumb(url: item.url, selected: i == index, checked: isChecked(item), side: 150, onCheck: { tick(i) })
+                            .id(i)
+                            .onTapGesture(count: 2) { index = i; gridMode = false }
+                            .onTapGesture { tick(i) }
+                            .help("\(item.url.lastPathComponent)\(item.personName.map { " · \($0)" } ?? "")")
+                    }
+                }
+                .padding(12)
+            }
+            .background(Color(nsColor: NSColor(white: 0.13, alpha: 1)))
+            .onAppear { proxy.scrollTo(index, anchor: .center) }
+        }
+        .environment(\.colorScheme, .dark)
     }
 
     func render() async {
@@ -226,6 +302,10 @@ struct EditPreview: View {
 struct StripThumb: View {
     let url: URL
     let selected: Bool
+    /// nil = no tick box; false = left out (dimmed).
+    var checked: Bool? = nil
+    var side: CGFloat = 96
+    var onCheck: () -> Void = {}
     @State private var image: NSImage?
 
     var body: some View {
@@ -233,9 +313,24 @@ struct StripThumb: View {
             Rectangle().fill(.white.opacity(0.08))
             if let image { Image(nsImage: image).resizable().aspectRatio(contentMode: .fill) }
         }
-        .frame(width: 96, height: 96)
+        .frame(width: side, height: side)
         .clipShape(RoundedRectangle(cornerRadius: 5))
+        .opacity(checked == false ? 0.35 : 1)
         .overlay(RoundedRectangle(cornerRadius: 5).stroke(selected ? Color.accentColor : .clear, lineWidth: 3))
-        .task(id: url) { image = await Thumbnails.shared.media(url, time: nil, side: 96) }
+        .overlay(alignment: .topTrailing) {
+            if let checked {
+                Button(action: onCheck) {
+                    Image(systemName: checked ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: side > 120 ? 20 : 16))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, checked ? Color.accentColor : Color.black.opacity(0.35))
+                        .shadow(radius: 2)
+                }
+                .buttonStyle(.plain)
+                .padding(5)
+                .help(checked ? "Included — click to leave out" : "Left out — click to include")
+            }
+        }
+        .task(id: url) { image = await Thumbnails.shared.media(url, time: nil, side: side) }
     }
 }

@@ -114,8 +114,9 @@ public enum VideoTools {
     public static func still(_ url: URL, at time: Double, recipe: EditRecipe, focus: FocusHint?, people: [String], to dest: URL) throws {
         guard let frame = VideoSampler.frameSync(url, at: time, maxPixel: 4000) else { throw VideoSampler.Unsupported() }
         let image = try EditPipeline.apply(recipe, to: CIImage(cgImage: frame), focus: focus)
-        guard let cg = EditPipeline.context.createCGImage(image, from: image.extent) else { throw CocoaError(.fileWriteUnknown) }
-        try EditPipeline.writeJPEG(cg, to: dest, quality: recipe.jpegQuality, sourceProperties: nil, people: recipe.writePeopleNames ? people : [])
+        guard let cg = EditPipeline.pixels(image, format: recipe.outputFormat) else { throw CocoaError(.fileWriteUnknown) }
+        try EditPipeline.writeImage(cg, to: dest, format: recipe.outputFormat, quality: recipe.jpegQuality, sourceProperties: nil,
+                                    people: recipe.writePeopleNames ? people : [])
     }
 
     public static func timecode(_ t: Double) -> String {

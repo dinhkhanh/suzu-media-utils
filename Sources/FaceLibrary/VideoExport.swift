@@ -91,7 +91,7 @@ public struct VideoExport: Sendable {
         case .stills(let recipe):
             for (i, a) in apps.enumerated() {
                 progress(i, apps.count)
-                let dest = folder.appendingPathComponent("\(safe) – \(a.url.deletingPathExtension().lastPathComponent) \(VideoTools.timecode(a.bestTime).replacingOccurrences(of: ":", with: ".")).jpg")
+                let dest = folder.appendingPathComponent("\(safe) – \(a.url.deletingPathExtension().lastPathComponent) \(VideoTools.timecode(a.bestTime).replacingOccurrences(of: ":", with: ".")).\(recipe.fileExtension)")
                 try VideoTools.still(a.url, at: a.bestTime, recipe: recipe, focus: FocusHint(primary: a.bestBox), people: [name], to: dest)
                 out.append(dest)
             }

@@ -2,6 +2,7 @@ import AppKit
 import FaceLibrary
 import Foundation
 import GRDB
+import MediaKit
 
 /// Finds the ArcFace model: inside the app bundle, else models/compiled above the executable (development).
 func locateModel() -> URL? {
@@ -47,6 +48,22 @@ func runHeadless(_ args: [String]) -> Never {
         for p in [firstProject, nil] {
             time("people (project \(p.map(String.init) ?? "all"))") { try service.store.db.read { db in try FaceGroupingModel.fetchPeople(db, project: p).count } }
             time("stats (project \(p.map(String.init) ?? "all"))") { try service.store.db.read { db in _ = try FaceGroupingModel.fetchStats(db, project: p); return 1 } }
+        }
+        // Export cost per photo: JPEG vs PNG, full size and Instagram 4:5.
+        if let path = try! service.store.db.read({ db in try String.fetchOne(db, sql: "SELECT path FROM media WHERE kind = 'photo' AND status = 'done' ORDER BY id LIMIT 1") }) {
+            let out = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("bench-export")
+            try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+            for (label, crop) in [("full size", false), ("4:5 1350 px", true)] {
+                for format in OutputFormat.allCases {
+                    var r = EditRecipe(); r.format = format == .jpeg ? nil : format; r.autoTone = true
+                    if crop { r.aspect = .portrait; r.maxLongSide = 1350 }
+                    let dest = out.appendingPathComponent("b.\(r.fileExtension)")
+                    time("export \(label) \(format.label)") {
+                        try EditPipeline.render(URL(fileURLWithPath: path), recipe: r, focus: nil, to: dest)
+                        return ((try? FileManager.default.attributesOfItem(atPath: dest.path)[.size] as? Int) ?? 0) / 1024
+                    }
+                }
+            }
         }
         time("projects") { try service.store.db.read { db in try FaceGroupingModel.fetchProjects(db).count } }
         time("known people") { try service.store.db.read { db in try FaceGroupingModel.fetchKnownPeople(db).count } }

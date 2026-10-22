@@ -231,8 +231,8 @@ public struct Exporter: Sendable {
             func rect(_ r: Row) -> CGRect { CGRect(x: r["x"] as Double, y: r["y"] as Double, width: r["w"] as Double, height: r["h"] as Double) }
             let mine = fs.filter { ($0["name"] as String?) == plan.items[i].personName }.max { ($0["s"] as Double) < ($1["s"] as Double) }
             plan.items[i].focus = FocusHint(primary: mine.map(rect), others: fs.filter { ($0["name"] as String?) != nil && $0 != mine }.map(rect))
-            if options.recipe != nil, !MediaKindHint.isVideo(plan.items[i].from) {
-                plan.items[i].to = plan.items[i].to.deletingPathExtension().appendingPathExtension("jpg")
+            if let recipe = options.recipe, !MediaKindHint.isVideo(plan.items[i].from) {
+                plan.items[i].to = plan.items[i].to.deletingPathExtension().appendingPathExtension(recipe.fileExtension)
             }
         }
         plan.options = options

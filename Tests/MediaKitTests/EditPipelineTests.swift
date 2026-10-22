@@ -122,3 +122,38 @@ final class WatermarkTests: XCTestCase {
         XCTAssertFalse(r.watermark!.isText)
     }
 }
+
+final class PNGExportTests: XCTestCase {
+    func testPNGIsLosslessOpaqueAndTagged() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("png-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // 16-bit source: the PNG keeps 16 bits per channel.
+        let src = dir.appendingPathComponent("deep.tiff")
+        let ctx = CGContext(data: nil, width: 1200, height: 800, bitsPerComponent: 16, bytesPerRow: 0,
+                            space: CGColorSpace(name: CGColorSpace.displayP3)!,
+                            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder16Little.rawValue)!
+        ctx.setFillColor(CGColor(red: 0.8, green: 0.3, blue: 0.2, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: 1200, height: 800))
+        let d = CGImageDestinationCreateWithURL(src as CFURL, "public.tiff" as CFString, 1, nil)!
+        CGImageDestinationAddImage(d, ctx.makeImage()!, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(d))
+
+        var recipe = EditRecipe()
+        recipe.format = .png
+        recipe.aspect = .square
+        recipe.maxLongSide = 600
+        let out = dir.appendingPathComponent("out.\(recipe.fileExtension)")
+        try EditPipeline.render(src, recipe: recipe, focus: nil, people: ["Mỹ Tâm"], to: out)
+
+        let isrc = CGImageSourceCreateWithURL(out as CFURL, nil)!
+        XCTAssertEqual(CGImageSourceGetType(isrc) as String?, "public.png")
+        let img = CGImageSourceCreateImageAtIndex(isrc, 0, nil)!
+        XCTAssertEqual(img.width, 600)
+        XCTAssertEqual(img.height, 600)
+        XCTAssertEqual(img.bitsPerComponent, 16)
+        XCTAssertFalse([.first, .last, .premultipliedFirst, .premultipliedLast].contains(img.alphaInfo), "no alpha channel")
+        XCTAssertEqual(img.colorSpace?.name as String?, CGColorSpace.displayP3 as String, "keeps the photo's colour space")
+        XCTAssertEqual(Metadata.people(in: out), ["Mỹ Tâm"])
+    }
+}

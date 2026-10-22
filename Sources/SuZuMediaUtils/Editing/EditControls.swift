@@ -53,7 +53,16 @@ struct EditControls: View {
                         if let a = recipe.aspect { Text("\(a.suggestedLongSide) px (recommended)").tag(Int?.some(a.suggestedLongSide)) }
                         ForEach([3000, 2048, 1600, 1080], id: \.self) { Text("\($0) px").tag(Int?.some($0)) }
                     }
-                    PercentSlider(label: "JPEG quality", value: $recipe.jpegQuality, range: 0.6...1)
+                    Picker("Format", selection: Binding(get: { recipe.outputFormat }, set: { recipe.format = $0 == .jpeg ? nil : $0 })) {
+                        ForEach(OutputFormat.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    if recipe.outputFormat == .jpeg {
+                        PercentSlider(label: "JPEG quality", value: $recipe.jpegQuality, range: 0.6...1)
+                    } else {
+                        Text("Lossless, in the photo's own colours (16-bit when the original is). Files are several times larger than JPEG.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
         }

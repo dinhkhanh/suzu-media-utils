@@ -7,6 +7,8 @@ import SwiftUI
 /// result on the left, source, edits and output in an inspector on the right.
 struct BatchExportTool: View {
     @State private var items: [ToolItem] = []
+    /// Photos unticked in the preview; everything else is exported.
+    @State private var excluded: Set<ToolItem> = []
     @State private var recipe = EditRecipe()
     @State private var output: URL?
     @State private var suffix = ""
@@ -19,11 +21,13 @@ struct BatchExportTool: View {
     @State private var cancel = false
 
     var fromPeople: Bool { items.contains { $0.personName != nil } }
+    var chosen: [ToolItem] { excluded.isEmpty ? items : items.filter { !excluded.contains($0) } }
+    var chosenCount: Int { items.count - excluded.count }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                EditPreview(recipe: $recipe, samples: items)
+                EditPreview(recipe: $recipe, samples: items, excluded: $excluded)
                     .frame(minWidth: 260, maxWidth: .infinity)
                 Divider()
                 ScrollView {
@@ -53,14 +57,14 @@ struct BatchExportTool: View {
                         .foregroundStyle(.secondary)
                     if let f = failures.first { Text(f).font(.caption).foregroundStyle(.red).lineLimit(1).help(failures.prefix(10).joined(separator: "\n")) }
                 } else {
-                    Text(output == nil ? "Choose where to save" : "\(items.count) photos → \(output!.lastPathComponent)").foregroundStyle(.secondary)
+                    Text(output == nil ? "Choose where to save" : "\(chosenCount) photos → \(output!.lastPathComponent)").foregroundStyle(.secondary)
                 }
                 Spacer()
                 if running { Button("Stop") { cancel = true } }
                 if finished, let output { Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([output]) } }
-                Button("Export \(items.count) Photos") { run() }
+                Button("Export \(chosenCount) Photo\(chosenCount == 1 ? "" : "s")") { run() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(running || items.isEmpty || output == nil)
+                    .disabled(running || chosenCount == 0 || output == nil)
             }
             .padding(.horizontal, 16).padding(.vertical, 10)
             .background(.bar)
@@ -68,11 +72,14 @@ struct BatchExportTool: View {
         .navigationTitle("Batch Export")
         .navigationSubtitle("Auto tone · social crops · watermark · resize")
         .rememberEdits("batchExport", recipe: $recipe)
+        // Only photos still in the list can be left out.
+        .onChange(of: items) { if !excluded.isEmpty { excluded.formIntersection(items) } }
         .task {
             // SUZU_TOOL_SAMPLES=1 (testing): start with the project's best photos as input.
             if ProcessInfo.processInfo.environment["SUZU_TOOL_SAMPLES"] != nil, items.isEmpty, let faces = ToolWork.faces {
                 try? await Task.sleep(for: .seconds(2))
                 items = await faces.samples(limit: 40)
+                if ProcessInfo.processInfo.environment["SUZU_TOOL_SAMPLES"] == "grid" { excluded = Set(items.dropFirst(1).prefix(3)) }
             }
         }
     }
@@ -80,7 +87,7 @@ struct BatchExportTool: View {
     func run() {
         guard let output else { return }
         running = true; finished = false; done = 0; failures = []; cancel = false
-        let items = items, recipe = recipe, suffix = suffix, perPerson = folderPerPerson && fromPeople
+        let items = chosen, recipe = recipe, suffix = suffix, perPerson = folderPerPerson && fromPeople
         total = items.count
         let workers = ToolWork.parallelism
         ToolWork.begin()
@@ -94,7 +101,7 @@ struct BatchExportTool: View {
                         var dir = output
                         if perPerson, let name = item.personName { dir = dir.appendingPathComponent(Exporter.folderName(name)) }
                         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                        let dest = dir.appendingPathComponent(item.url.deletingPathExtension().lastPathComponent + suffix).appendingPathExtension("jpg")
+                        let dest = dir.appendingPathComponent(item.url.deletingPathExtension().lastPathComponent + suffix).appendingPathExtension(recipe.fileExtension)
                         do { try EditPipeline.render(item.url, recipe: recipe, focus: item.focus, people: item.people, to: dest); return nil }
                         catch { return "\(item.url.lastPathComponent): \(error.localizedDescription)" }
                     }

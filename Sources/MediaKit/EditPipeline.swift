@@ -32,12 +32,30 @@ public enum EditPipeline {
         }
         let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
         guard var image = decode(src, data: data, recipe: recipe, properties: props) else { throw Failure.unreadable(url.lastPathComponent) }
+        let sourceSpace = image.colorSpace
         image = try apply(recipe, to: image, focus: focus)
-        guard let cg = context.createCGImage(image, from: image.extent, format: .RGBA8,
-                                             colorSpace: CGColorSpace(name: CGColorSpace.sRGB)) else {
+        let deep = (props?[kCGImagePropertyDepth] as? Int ?? 8) > 8
+        guard let cg = pixels(image, format: recipe.outputFormat, sourceSpace: sourceSpace, deep: deep) else {
             throw Failure.write(dest.lastPathComponent)
         }
-        try writeJPEG(cg, to: dest, quality: recipe.jpegQuality, sourceProperties: props, people: recipe.writePeopleNames ? people : [])
+        try writeImage(cg, to: dest, format: recipe.outputFormat, quality: recipe.jpegQuality, sourceProperties: props,
+                       people: recipe.writePeopleNames ? people : [])
+    }
+
+    /// Final pixels. JPEG: 8-bit sRGB, as before. PNG: no alpha channel, the photo's own RGB colour space (Display P3
+    /// stays P3), and 16 bits per channel when the original has more than 8 (10-bit HEIC, 16-bit TIFF).
+    public static func pixels(_ image: CIImage, format: OutputFormat, sourceSpace: CGColorSpace? = nil, deep: Bool = false) -> CGImage? {
+        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard format == .png else { return context.createCGImage(image, from: image.extent, format: .RGBA8, colorSpace: srgb) }
+        let space = sourceSpace.flatMap { $0.model == .rgb && $0.name != nil ? $0 : nil } ?? srgb
+        let bits = deep ? 16 : 8
+        let w = Int(image.extent.width), h = Int(image.extent.height)
+        let info = CGImageAlphaInfo.noneSkipLast.rawValue | (deep ? CGBitmapInfo.byteOrder16Little.rawValue : 0)
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: bits, bytesPerRow: 0, space: space, bitmapInfo: info)
+        else { return nil }
+        context.render(image, toBitmap: ctx.data!, rowBytes: ctx.bytesPerRow, bounds: image.extent,
+                       format: deep ? .RGBA16 : .RGBA8, colorSpace: space)
+        return ctx.makeImage()
     }
 
     /// Upright image at the resolution the recipe needs (full size when it keeps the original size).
@@ -194,16 +212,18 @@ public enum EditPipeline {
 
     // MARK: - Encode
 
-    public static func writeJPEG(_ image: CGImage, to dest: URL, quality: Double, sourceProperties: [CFString: Any]?, people: [String]) throws {
+    public static func writeImage(_ image: CGImage, to dest: URL, format: OutputFormat = .jpeg, quality: Double,
+                                  sourceProperties: [CFString: Any]?, people: [String]) throws {
         let tmp = dest.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).tmp")
-        guard let d = CGImageDestinationCreateWithURL(tmp as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+        let type = format == .png ? UTType.png : UTType.jpeg
+        guard let d = CGImageDestinationCreateWithURL(tmp as CFURL, type.identifier as CFString, 1, nil) else {
             throw Failure.write(dest.lastPathComponent)
         }
         // Keep EXIF/GPS/IPTC from the original, but the pixels are already upright and resized.
         var props = sourceProperties ?? [:]
         for k in [kCGImagePropertyPixelWidth, kCGImagePropertyPixelHeight, kCGImagePropertyOrientation] { props[k] = nil }
         if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] { tiff[kCGImagePropertyTIFFOrientation] = nil; props[kCGImagePropertyTIFFDictionary] = tiff }
-        props[kCGImageDestinationLossyCompressionQuality] = quality
+        if format == .jpeg { props[kCGImageDestinationLossyCompressionQuality] = quality }
         props[kCGImagePropertyOrientation] = 1
         if !people.isEmpty {
             var iptc = props[kCGImagePropertyIPTCDictionary] as? [CFString: Any] ?? [:]
