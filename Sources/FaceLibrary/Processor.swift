@@ -17,6 +17,8 @@ public final class Processor: @unchecked Sendable {
     var backgroundQueued: Set<Int64> = []
     /// Set while a batch tool or export is running: no new extras are started.
     public var extrasPaused = false
+    /// Called (on a worker) after a Known-People photo named or extended a person, so teams hear of them at once.
+    public var onReferenceEnrolled: (@Sendable (Int64) -> Void)?
 
     /// Progress for the UI: files processed since launch and timestamps for the rate.
     public private(set) var processedCount = 0
@@ -91,6 +93,7 @@ public final class Processor: @unchecked Sendable {
             }
             if let pid = try enrollReference(media, faces: faces) {
                 engine.referenceChanged(pid)
+                onReferenceEnrolled?(pid)
             } else {
                 engine.mediaProcessed(mediaId)
             }

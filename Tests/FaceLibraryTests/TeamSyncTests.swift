@@ -169,6 +169,31 @@ final class TeamSyncTests: XCTestCase {
         XCTAssertNil(try b.faceOwner(other))
     }
 
+    func testKnownPeopleFolderNamesTeammatesGroups() throws {
+        // Mac A knows An only from a Known-People folder (no event photos yet); Mac B has already grouped An's
+        // faces as an unnamed person. Joining names that group at once.
+        try a.sync.create(name: "Gala", folder: shared, project: a.project)
+        var ref = SourceRecord(path: tmp.appendingPathComponent("A/Known").path, kind: .reference, projectId: nil)
+        try a.store.db.write { db in try ref.insert(db) }
+        let an = try a.person("An")
+        let v = vector(7)
+        var m = MediaRecord(sourceId: ref.id, path: tmp.appendingPathComponent("A/Known/An/1.jpg").path, kind: .photo, size: 10, mtime: 0, contentKey: "ref1")
+        m.status = .done; m.width = 1500; m.height = 1000
+        try a.store.db.write { db in try m.insert(db) }
+        var f = FaceRecord(id: nil, mediaId: m.id!, x: 0.4, y: 0.4, w: 0.1, h: 0.1, quality: 0.8, time: nil,
+                           embedding: Vector.encode(Vector.normalized(v)), track: nil, personId: an, assignment: .user, rejectedPersonId: nil)
+        try a.store.db.write { db in try f.insert(db) }
+        a.engine.peopleChanged([an]); a.settle()
+
+        try b.sync.join(folder: shared, project: b.project)
+        for i in 1...3 { try b.photo("b\(i).jpg", person: nil, vector: v) }
+        b.engine.reclusterNow(); b.settle()
+        XCTAssertEqual(try b.people().map(\.name), [nil], "grouped before any name arrived")
+        exchange()
+        XCTAssertEqual(try b.people().map(\.name), ["An"], "the group takes the name from A's Known-People folder")
+        XCTAssertEqual(try b.people().first?.faces, 3)
+    }
+
     func testNewestNameWinsOnEveryMac() throws {
         try a.sync.create(name: "Gala", folder: shared, project: a.project)
         try b.sync.join(folder: shared, project: b.project)

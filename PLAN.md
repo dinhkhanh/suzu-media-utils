@@ -328,3 +328,10 @@ and after every feature below; same 92 people.
   best shots, one per burst), the layout is per-person folders or flat, and rules can be edited. Older rules keep
   working (the person becomes a one-person query). `DeliveryService.pending` runs the query and subtracts the
   `delivery` ledger; flat rules use `delivery.personId = 0`. 3 tests (`RuleTests`).
+
+## v0.6.2 (2026-10-23): Known-People faces travel to teams
+- A person travels to a team when they have faces in the team's project or in any Known-People folder (those
+  are for every project). Before, a person enrolled only from Known People stayed private until they appeared in an
+  event photo, so a teammate's Mac grouped them unnamed; a Known-People enrolment now also publishes at once
+  (`Processor.onReferenceEnrolled` → `pushSoon`). Summaries are checked every pass by a per-person face count and
+  written when they changed (at most once a minute while faces keep arriving).

@@ -25,6 +25,7 @@ public final class LibraryService: @unchecked Sendable {
         engine = GroupingEngine(store: store)
         processor = try Processor(store: store, engine: engine, modelURL: modelURL)
         teamSync = TeamSync(store: store, engine: engine)
+        processor.onReferenceEnrolled = { [teamSync] _ in teamSync.pushSoon() }
     }
 
     public func start() {

@@ -269,13 +269,14 @@ public final class TeamSync: @unchecked Sendable {
         var n: Int
     }
 
-    /// Named people of the team's project, plus anyone its rules name.
+    /// Named people of the team's project or of a Known-People folder (those are for every project), plus anyone
+    /// its rules name.
     func relevantPeople(_ team: TeamRecord) throws -> [(id: Int64, uuid: String, name: String, nameAt: Double?)] {
         try store.db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT id, uuid, name, nameAt FROM person p WHERE name IS NOT NULL AND (
                     EXISTS (SELECT 1 FROM face f JOIN media m ON m.id = f.mediaId JOIN source s ON s.id = m.sourceId
-                            WHERE f.personId = p.id AND s.projectId = ?)
+                            WHERE f.personId = p.id AND (s.projectId = ? OR s.kind = 'reference'))
                     OR id IN (SELECT personId FROM deliveryRule WHERE projectId = ? AND personId IS NOT NULL))
                 ORDER BY id
                 """, arguments: [team.projectId, team.projectId]).map { ($0["id"], $0["uuid"], $0["name"], $0["nameAt"]) }
@@ -373,19 +374,24 @@ public final class TeamSync: @unchecked Sendable {
         try h.write(contentsOf: data)
     }
 
-    /// Rewrites `summaries/<device>.json` when a relevant person's faces changed (checked every minute, or at once
-    /// after the user changed something).
+    /// Rewrites `summaries/<device>.json` when a relevant person's faces changed. Checked every pass (a cheap
+    /// count per person); while faces keep arriving it is written at most once a minute, and at once after the
+    /// user changed something or a Known-People photo was enrolled.
     func publishSummaries(_ team: TeamRecord, people: [(id: Int64, uuid: String, name: String, nameAt: Double?)], state: [String: String], forced: Bool) throws -> Bool {
         let teamId = team.id!
-        let last = lock.withLock { summariesWritten[teamId] }
-        guard forced || last == nil || Date().timeIntervalSince(last!) >= Self.summaryInterval else { return false }
         guard !people.isEmpty else { return false }
-        lock.withLock { summariesWritten[teamId] = Date() }
         let ids = people.map { String($0.id) }.joined(separator: ",")
         let signatures = Dictionary(uniqueKeysWithValues: try store.db.read { db in
             try Row.fetchAll(db, sql: "SELECT personId, COUNT(*) AS n, MAX(id) AS last FROM face WHERE personId IN (\(ids)) GROUP BY personId")
                 .map { ($0["personId"] as Int64, "\($0["n"] as Int)|\($0["last"] as Int64)") }
         })
+        let idOf = Dictionary(people.map { ($0.uuid, $0.id) }, uniquingKeysWith: { a, _ in a })
+        // What the file would hold: skip the write when nothing changed since the last one.
+        let full = people.map(\.uuid).sorted().map { k in "\(k):\(idOf[k].flatMap { signatures[$0] } ?? "")" }.joined(separator: ",")
+        if state["pub:summaries"] == full { return false }
+        let last = lock.withLock { summariesWritten[teamId] }
+        guard forced || last == nil || Date().timeIntervalSince(last!) >= Self.summaryInterval else { return false }
+        lock.withLock { summariesWritten[teamId] = Date() }
         var out: [String: Summary] = [:]
         for p in people {
             guard let sig = signatures[p.id] else { continue }
@@ -398,10 +404,6 @@ public final class TeamSync: @unchecked Sendable {
             }
             out[p.uuid] = Summary(c: Vector.encode(entry.centroid).base64EncodedString(), n: entry.count)
         }
-        // What the file would hold: skip the write when nothing changed since the last one.
-        let idOf = Dictionary(people.map { ($0.uuid, $0.id) }, uniquingKeysWith: { a, _ in a })
-        let full = out.keys.sorted().map { k in "\(k):\(idOf[k].flatMap { signatures[$0] } ?? "")" }.joined(separator: ",")
-        if state["pub:summaries"] == full { return false }
         let summaries = Summaries(model: Self.model, device: deviceName, people: out)
         let url = Self.summariesURL(team.url).appendingPathComponent("\(deviceId).json")
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
