@@ -19,6 +19,7 @@ func locateModel() -> URL? {
 /// `SuZuMediaUtils --headless <folder> [--library <dir>] [--reference <folder>]`: runs the full pipeline without UI
 /// and prints the people found. Used for testing and timing.
 func runHeadless(_ args: [String]) -> Never {
+    setvbuf(stdout, nil, _IOLBF, 0)  // progress lines show up immediately when piped
     func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
     let folder = URL(fileURLWithPath: value("--headless")!)
     let lib = URL(fileURLWithPath: value("--library") ?? NSTemporaryDirectory() + "facegrouping-headless")

@@ -23,6 +23,8 @@ struct SourceSummary: Identifiable, Hashable {
     var failed: Int
     var online = true
     var network = false
+    var scanning = false
+    var found = 0
     var name: String { (path as NSString).lastPathComponent }
 }
 
@@ -58,7 +60,12 @@ final class FaceGroupingModel: ObservableObject {
     @Published var sources: [SourceSummary] = []
     @Published var stats = LibraryStats()
     @Published var rate: Double = 0
+    /// Folders being removed in the background; hidden from the sidebar right away.
+    @Published var removing: Set<Int64> = []
     private var cancellables: Set<AnyCancellable> = []
+    private var regionObserver: AnyDatabaseCancellable?
+    private var dirty = true
+    private var refreshing = false
     private var lastProcessed = 0
     private var lastTick = Date()
 
@@ -83,42 +90,61 @@ final class FaceGroupingModel: ObservableObject {
 
     var store: LibraryStore? { service?.store }
 
+    /// Commits only mark the data dirty (cheap, can happen dozens of times a second during ingest); a 1 s timer
+    /// re-reads people, folders and stats on a background reader when something changed.
     private func observe() {
         guard let db = store?.db else { return }
-        // Ingest writes after every file; throttling keeps the grid from re-rendering dozens of times a second.
-        ValueObservation.tracking(Self.fetchPeople).publisher(in: db, scheduling: .immediate)
-            .throttle(for: .milliseconds(700), scheduler: DispatchQueue.main, latest: true)
-            .sink(receiveCompletion: { _ in }, receiveValue: { [weak self] in self?.people = $0 })
-            .store(in: &cancellables)
-        ValueObservation.tracking(Self.fetchSources).publisher(in: db, scheduling: .immediate)
-            .throttle(for: .milliseconds(700), scheduler: DispatchQueue.main, latest: true)
-            .sink(receiveCompletion: { _ in }, receiveValue: { [weak self] in self?.applySources($0) })
-            .store(in: &cancellables)
-        ValueObservation.tracking(Self.fetchStats).publisher(in: db, scheduling: .immediate)
-            .throttle(for: .milliseconds(700), scheduler: DispatchQueue.main, latest: true)
-            .sink(receiveCompletion: { _ in }, receiveValue: { [weak self] in self?.stats = $0 })
-            .store(in: &cancellables)
-        Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+        regionObserver = DatabaseRegionObservation(tracking: Table("face"), Table("person"), Table("media"), Table("source"))
+            .start(in: db, onError: { _ in }, onChange: { [weak self] _ in
+                DispatchQueue.main.async { self?.dirty = true }
+            })
+        Timer.publish(every: 1, on: .main, in: .common).autoconnect()
             .sink { [weak self] _ in self?.tick() }
             .store(in: &cancellables)
+        refresh()
+    }
+
+    /// Re-reads everything now (after the user changed something).
+    func refresh() {
+        dirty = true
+        tick()
     }
 
     private func tick() {
         guard let service else { return }
         let n = service.processor.processedCount
         let now = Date()
-        rate = Double(n - lastProcessed) / now.timeIntervalSince(lastTick)
-        lastProcessed = n
-        lastTick = now
+        if now.timeIntervalSince(lastTick) >= 1 {
+            rate = Double(n - lastProcessed) / now.timeIntervalSince(lastTick)
+            lastProcessed = n
+            lastTick = now
+        }
         applySources(sources)
+        guard dirty, !refreshing, let db = store?.db else { return }
+        dirty = false
+        refreshing = true
+        Task.detached(priority: .userInitiated) {
+            let result = try? await db.read { db in (try Self.fetchPeople(db), try Self.fetchSources(db), try Self.fetchStats(db)) }
+            await MainActor.run {
+                if let (people, sources, stats) = result {
+                    if people != self.people { self.people = people }
+                    self.applySources(sources)
+                    if stats != self.stats { self.stats = stats }
+                }
+                self.refreshing = false
+            }
+        }
     }
 
     private func applySources(_ list: [SourceSummary]) {
-        sources = list.map { s in
+        let updated = list.filter { !removing.contains($0.id) }.map { s in
             var s = s
-            if let m = service?.monitor(s.id) { s.online = m.isOnline; s.network = m.isNetwork }
+            if let m = service?.monitor(s.id) {
+                s.online = m.isOnline; s.network = m.isNetwork; s.scanning = m.isScanning; s.found = m.foundCount
+            }
             return s
         }
+        if updated != sources { sources = updated }
     }
 
     nonisolated static func fetchPeople(_ db: Database) throws -> [PersonSummary] {
@@ -221,7 +247,20 @@ final class FaceGroupingModel: ObservableObject {
         for url in panel.urls { perform { try $0.addSource(url, kind: kind) } }
     }
 
-    func removeSource(_ id: Int64) { perform { try $0.removeSource(id) } }
+    /// Hides the folder at once and forgets its files in the background (can take a while for big folders).
+    func removeSource(_ id: Int64) {
+        guard let service else { return }
+        removing.insert(id)
+        applySources(sources)
+        Task.detached {
+            let error = Result { try service.removeSource(id) }.failure
+            await MainActor.run {
+                self.removing.remove(id)
+                if let error { self.actionError = error.localizedDescription }
+                self.refresh()
+            }
+        }
+    }
     func rescan(_ id: Int64) { service?.rescan(id) }
 
     @discardableResult
@@ -247,5 +286,10 @@ final class FaceGroupingModel: ObservableObject {
     private func perform(_ body: (LibraryService) throws -> Void) {
         guard let service else { return }
         do { try body(service) } catch { actionError = error.localizedDescription }
+        refresh()
     }
+}
+
+extension Result {
+    var failure: Failure? { if case .failure(let e) = self { e } else { nil } }
 }

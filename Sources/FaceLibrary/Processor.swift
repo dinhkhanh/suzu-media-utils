@@ -49,6 +49,8 @@ public final class Processor: @unchecked Sendable {
         guard let media = try? store.db.read({ db in try MediaRecord.fetchOne(db, key: mediaId) }),
               media.status == .pending else { return }
         do {
+            // Fingerprint for move/copy detection, deferred from the folder scan to here.
+            let key = media.contentKey ?? ContentKey.compute(media.url, size: media.size)
             let analyzed = try MediaAnalyzer.analyze(media.url)
             let crops = analyzed.faces.compactMap(\.aligned)
             let vectors = crops.isEmpty ? [] : batcher.embed(crops)
@@ -69,8 +71,9 @@ public final class Processor: @unchecked Sendable {
             try store.db.write { db in
                 try db.execute(sql: "DELETE FROM face WHERE mediaId = ?", arguments: [mediaId])
                 for i in faces.indices { try faces[i].insert(db) }
-                try db.execute(sql: "UPDATE media SET status = 'done', error = NULL, width = ?, height = ?, duration = ? WHERE id = ?",
-                               arguments: [analyzed.width, analyzed.height, analyzed.duration, mediaId])
+                try db.execute(sql: """
+                    UPDATE media SET status = 'done', error = NULL, width = ?, height = ?, duration = ?, contentKey = ? WHERE id = ?
+                    """, arguments: [analyzed.width, analyzed.height, analyzed.duration, key, mediaId])
             }
             for (f, p) in zip(faces, previews) {
                 if let p { ImageLoader.writeJPEG(p, to: store.faceCropURL(f.id!), quality: 0.8) }

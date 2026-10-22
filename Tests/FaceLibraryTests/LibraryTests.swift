@@ -46,8 +46,11 @@ final class LibraryTests: XCTestCase {
         var f = FaceRecord(id: nil, mediaId: mediaId, x: 0.4, y: 0.4, w: 0.1, h: 0.1, quality: 0.8, time: nil,
                            embedding: Vector.encode(Vector.normalized(vector)), track: nil, personId: personId,
                            assignment: personId == nil ? .none : .auto, rejectedPersonId: nil)
+        // Simulates the processor: marks the file done and stores its fingerprint.
         try store.db.write { db in
-            try db.execute(sql: "UPDATE media SET status = 'done', width = 1500, height = 1000 WHERE id = ?", arguments: [mediaId])
+            let m = try MediaRecord.fetchOne(db, key: mediaId)!
+            try db.execute(sql: "UPDATE media SET status = 'done', width = 1500, height = 1000, contentKey = COALESCE(contentKey, ?) WHERE id = ?",
+                           arguments: [ContentKey.compute(m.url, size: m.size), mediaId])
             try f.insert(db)
         }
         return f.id!
@@ -70,7 +73,7 @@ final class LibraryTests: XCTestCase {
         m.scan()
         var all = try media()
         XCTAssertEqual(all.map(\.url.lastPathComponent), ["a.jpg", "b.jpg"])
-        XCTAssertTrue(all.allSatisfy { $0.status == .pending && $0.contentKey != nil })
+        XCTAssertTrue(all.allSatisfy { $0.status == .pending && $0.contentKey == nil }, "fingerprints are deferred to processing")
 
         let pid = try newPerson("An")
         let faceA = try addFace(mediaId: all[0].id!, personId: pid)
@@ -120,6 +123,32 @@ final class LibraryTests: XCTestCase {
         m.candidates[url.path]!.seen = Date(timeIntervalSinceNow: -5)
         m.scan()
         XCTAssertEqual(try media().count, 1)
+    }
+
+    func testLargeFolderIsRegisteredInBatchesAndStopsWhenCancelled() throws {
+        for i in 0..<(SourceMonitor.batchSize * 2 + 10) { try makeFile("big/\(i).jpg", bytes: 64 + i, seed: UInt8(i % 250 + 1)) }
+        var batches = 0
+        let s = try store.db.read { db in try SourceRecord.fetchOne(db, key: sourceId)! }
+        let m = SourceMonitor(source: s, store: store) { newPending, _ in if newPending { batches += 1 } }
+        m.scan()
+        XCTAssertEqual(try media().count, SourceMonitor.batchSize * 2 + 10)
+        XCTAssertEqual(batches, 3, "processing is told after every batch, not once at the end")
+        XCTAssertEqual(m.foundCount, SourceMonitor.batchSize * 2 + 10)
+
+        try makeFile("big/late.jpg", bytes: 9999)
+        m.stop()
+        m.scan()
+        XCTAssertFalse(try media().contains { $0.path.hasSuffix("late.jpg") }, "a stopped monitor scans nothing")
+    }
+
+    func testRemoveSourceDeletesEverythingInBatches() throws {
+        for i in 0..<1200 { try makeFile("r/\(i).jpg", bytes: 64 + i) }
+        let service = LibraryServiceStub(store: store)
+        monitor().scan()
+        XCTAssertEqual(try media().count, 1200)
+        try service.removeSource(sourceId)
+        XCTAssertEqual(try media().count, 0)
+        XCTAssertEqual(try store.db.read { db in try SourceRecord.fetchCount(db) }, 0)
     }
 
     func testEmptyListingOfNonEmptySourceDeletesNothing() throws {
@@ -354,5 +383,13 @@ final class ReferenceTests: XCTestCase {
         let rows = try store.db.read { db in try MediaRecord.fetchAll(db) }
         XCTAssertEqual(rows.count, 2)
         XCTAssertTrue(rows.allSatisfy { $0.duplicateOf == nil && $0.status == .pending })
+    }
+}
+
+/// Removal logic without the model-dependent processor.
+struct LibraryServiceStub {
+    let store: LibraryStore
+    func removeSource(_ id: Int64) throws {
+        try LibraryService.deleteSourceContents(id, store: store)
     }
 }

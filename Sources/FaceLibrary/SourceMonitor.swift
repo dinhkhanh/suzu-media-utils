@@ -16,6 +16,11 @@ public final class SourceMonitor: @unchecked Sendable {
     let queue: DispatchQueue
     public private(set) var isOnline = true
     public private(set) var isNetwork = false
+    /// True while a scan is listing or registering files; `foundCount` is the files listed so far.
+    public private(set) var isScanning = false
+    public private(set) var foundCount = 0
+    /// Set by `stop()`; a running scan stops at the next folder or batch.
+    private(set) var cancelled = false
 
     struct FileInfo: Equatable { var size: Int64; var mtime: Double }
     struct DirEntry { var mtime: Double; var files: [String: FileInfo]; var subdirs: [String] }
@@ -53,12 +58,14 @@ public final class SourceMonitor: @unchecked Sendable {
     }
 
     public func stop() {
+        cancelled = true
         timer?.cancel()
         if let s = stream { FSEventStreamStop(s); FSEventStreamInvalidate(s); FSEventStreamRelease(s) }
         stream = nil
     }
 
     public func scanSoon(after delay: Double = 0) {
+        guard !cancelled else { return }
         queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.scan() }
     }
 
@@ -102,6 +109,7 @@ public final class SourceMonitor: @unchecked Sendable {
         var stack = [root.path]
         let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
         while let dir = stack.popLast() {
+            if cancelled { return [:] }
             seenDirs.insert(dir)
             let dirURL = URL(fileURLWithPath: dir, isDirectory: true)
             let mtime = (try? dirURL.resourceValues(forKeys: [.contentModificationDateKey]))?
@@ -125,6 +133,7 @@ public final class SourceMonitor: @unchecked Sendable {
                 dirCache[dir] = entry
             }
             out.merge(entry.files) { a, _ in a }
+            foundCount = out.count
             stack += entry.subdirs
         }
         dirCache = dirCache.filter { seenDirs.contains($0.key) }
@@ -141,14 +150,22 @@ public final class SourceMonitor: @unchecked Sendable {
 
     struct Known { var id: Int64; var info: FileInfo; var contentKey: String?; var duplicateOf: Int64? }
 
+    /// Files registered per transaction: keeps the database writer free for the UI and the processor, and lets
+    /// processing start while a big folder is still being registered.
+    static let batchSize = 500
+
     func scan() {
+        guard !cancelled else { return }
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDir), isDir.boolValue else {
             isOnline = false  // unmounted or offline: keep everything, look again on the next tick
             return
         }
         isOnline = true
+        isScanning = true
+        defer { isScanning = false }
         let files = list()
+        if cancelled { return }
         guard let known = try? store.db.read({ db in
             try Row.fetchAll(db, sql: "SELECT id, path, size, mtime, contentKey, duplicateOf FROM media WHERE sourceId = ?",
                              arguments: [sourceId])
@@ -178,59 +195,114 @@ public final class SourceMonitor: @unchecked Sendable {
         }
         candidates = candidates.filter { files[$0.key] != nil }
         var missing = known.filter { files[$0.key] == nil && !FileManager.default.fileExists(atPath: $0.key) }
+        settledNew.sort { $0.0 < $1.0 }
 
-        var newPending = false
         var affected: Set<Int64> = []
         do {
-            try store.db.write { db in
-                var missingByKey: [String: (String, Known)] = [:]
-                for (p, k) in missing { if let key = k.contentKey { missingByKey[key] = (p, k) } }
-
-                for (path, info) in settledNew {
-                    let key = ContentKey.compute(URL(fileURLWithPath: path), size: info.size)
-                    if let key, let (oldPath, k) = missingByKey[key] {
-                        // Moved or renamed outside the app: keep its faces and people.
+            // Moves: a new file can only be a moved one if its size matches a missing file's. Only those are
+            // fingerprinted here; everything else gets its fingerprint later, while it is processed anyway.
+            // (A missing file that was never processed has no fingerprint and is treated as deleted.)
+            var missingBySize: [Int64: [String]] = [:]
+            for (p, k) in missing { missingBySize[k.info.size, default: []].append(p) }
+            var remaining: [(String, FileInfo)] = []
+            var moves: [(path: String, info: FileInfo, id: Int64, oldPath: String)] = []
+            for (path, info) in settledNew {
+                if let olds = missingBySize[info.size], let key = ContentKey.compute(URL(fileURLWithPath: path), size: info.size),
+                   let oldPath = olds.first(where: { missing[$0]?.contentKey == key }) {
+                    moves.append((path, info, missing[oldPath]!.id, oldPath))
+                    missing[oldPath] = nil
+                    missingBySize[info.size]?.removeAll { $0 == oldPath }
+                } else {
+                    remaining.append((path, info))
+                }
+            }
+            if !moves.isEmpty {
+                try store.db.write { db in
+                    for m in moves {
                         try db.execute(sql: "UPDATE media SET path = ?, size = ?, mtime = ? WHERE id = ?",
-                                       arguments: [path, info.size, info.mtime, k.id])
-                        missing[oldPath] = nil
-                        missingByKey[key] = nil
-                        continue
+                                       arguments: [m.path, m.info.size, m.info.mtime, m.id])
                     }
-                    let kind: MediaKind = MediaAnalyzer.isVideo(URL(fileURLWithPath: path)) ? .video : .photo
-                    var m = MediaRecord(sourceId: sourceId, path: path, kind: kind, size: info.size, mtime: info.mtime, contentKey: key)
-                    // Duplicates are only matched among folders of the same kind: a reference photo copied from
-                    // an event folder must still be processed to teach the person's name.
-                    if let key, let original = try Int64.fetchOne(db, sql: """
-                        SELECT m.id FROM media m JOIN source s ON s.id = m.sourceId
-                        WHERE m.contentKey = ? AND m.duplicateOf IS NULL
-                          AND s.kind = (SELECT kind FROM source WHERE id = ?) LIMIT 1
-                        """, arguments: [key, sourceId]) {
+                }
+            }
+
+            // Copies: likewise only files whose size matches an existing original of the same kind of folder.
+            let sameKindSizes = Set(try store.db.read { db in
+                try Int64.fetchAll(db, sql: """
+                    SELECT DISTINCT m.size FROM media m JOIN source s ON s.id = m.sourceId
+                    WHERE m.duplicateOf IS NULL AND s.kind = (SELECT kind FROM source WHERE id = ?)
+                    """, arguments: [sourceId])
+            })
+            var start = 0
+            while start < remaining.count {
+                if cancelled { return }
+                let batch = remaining[start..<min(start + Self.batchSize, remaining.count)]
+                start += batch.count
+                var rows: [MediaRecord] = []
+                for (path, info) in batch {
+                    let url = URL(fileURLWithPath: path)
+                    var m = MediaRecord(sourceId: sourceId, path: path, kind: MediaAnalyzer.isVideo(url) ? .video : .photo,
+                                        size: info.size, mtime: info.mtime, contentKey: nil)
+                    if sameKindSizes.contains(info.size), let key = ContentKey.compute(url, size: info.size),
+                       let original = try originalWithKey(key, size: info.size) {
+                        m.contentKey = key
                         m.duplicateOf = original
                         m.status = .done
-                    } else {
-                        newPending = true
                     }
-                    try m.insert(db)
+                    rows.append(m)
                 }
-
-                for (path, info, id) in settledChanged {
-                    affected.formUnion(try Int64.fetchAll(db, sql: "SELECT DISTINCT personId FROM face WHERE mediaId = ? AND personId IS NOT NULL", arguments: [id]))
-                    try db.execute(sql: "DELETE FROM face WHERE mediaId = ?", arguments: [id])
-                    let key = ContentKey.compute(URL(fileURLWithPath: path), size: info.size)
-                    try db.execute(sql: "UPDATE media SET size = ?, mtime = ?, contentKey = ?, status = 'pending', duplicateOf = NULL WHERE id = ?",
-                                   arguments: [info.size, info.mtime, key, id])
-                    newPending = true
+                try store.db.write { db in
+                    for var m in rows { try m.insert(db, onConflict: .ignore) }
                 }
+                if rows.contains(where: { $0.status == .pending }) { onChange(true, []) }
+            }
 
-                for (_, k) in missing {
-                    affected.formUnion(try Self.remove(mediaId: k.id, db: db))
+            for chunk in stride(from: 0, to: settledChanged.count, by: Self.batchSize).map({ Array(settledChanged[$0..<min($0 + Self.batchSize, settledChanged.count)]) }) {
+                if cancelled { return }
+                try store.db.write { db in
+                    for (_, info, id) in chunk {
+                        affected.formUnion(try Int64.fetchAll(db, sql: "SELECT DISTINCT personId FROM face WHERE mediaId = ? AND personId IS NOT NULL", arguments: [id]))
+                        try db.execute(sql: "DELETE FROM face WHERE mediaId = ?", arguments: [id])
+                        try db.execute(sql: "UPDATE media SET size = ?, mtime = ?, contentKey = NULL, status = 'pending', duplicateOf = NULL WHERE id = ?",
+                                       arguments: [info.size, info.mtime, id])
+                    }
+                }
+                onChange(true, [])
+            }
+
+            let gone = Array(missing.values)
+            for chunk in stride(from: 0, to: gone.count, by: Self.batchSize).map({ Array(gone[$0..<min($0 + Self.batchSize, gone.count)]) }) {
+                if cancelled { return }
+                try store.db.write { db in
+                    for k in chunk { affected.formUnion(try Self.remove(mediaId: k.id, db: db)) }
                 }
             }
         } catch {
             NSLog("scan \(root.path) failed: \(error)")
         }
-        if newPending || !affected.isEmpty { onChange(newPending, affected) }
+        if !affected.isEmpty { onChange(false, affected) }
         if needFollowUp { scanSoon(after: settleInterval) }
+    }
+
+    /// An original (not a copy) in a folder of this source's kind with this fingerprint, fingerprinting same-size
+    /// candidates on demand.
+    func originalWithKey(_ key: String, size: Int64) throws -> Int64? {
+        let cands = try store.db.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT m.id, m.path, m.contentKey FROM media m JOIN source s ON s.id = m.sourceId
+                WHERE m.size = ? AND m.duplicateOf IS NULL AND s.kind = (SELECT kind FROM source WHERE id = ?)
+                """, arguments: [size, sourceId])
+        }
+        for c in cands {
+            var ck: String? = c["contentKey"]
+            if ck == nil, let computed = ContentKey.compute(URL(fileURLWithPath: c["path"]), size: size) {
+                ck = computed
+                try store.db.write { db in
+                    try db.execute(sql: "UPDATE media SET contentKey = ? WHERE id = ?", arguments: [computed, c["id"] as Int64])
+                }
+            }
+            if ck == key { return c["id"] }
+        }
+        return nil
     }
 
     /// Deletes a media whose file is gone. If a byte-identical copy still exists, that copy inherits the faces.

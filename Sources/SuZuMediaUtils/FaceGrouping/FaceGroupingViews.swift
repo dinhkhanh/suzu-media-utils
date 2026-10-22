@@ -102,8 +102,9 @@ struct SourceRow: View {
 
     var status: String {
         if !source.online { return "Offline" }
-        if source.pending > 0 { return "\(source.pending) of \(source.files) to process" }
-        return "\(source.files) files"
+        if source.scanning && source.found > source.files { return "Scanning… \(source.found.formatted()) files found" }
+        if source.pending > 0 { return "Processing \(source.pending.formatted()) of \(source.files.formatted())" }
+        return "\(source.files.formatted()) files"
     }
 }
 
@@ -112,7 +113,13 @@ struct FaceGroupingStatus: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if model.stats.pending > 0 {
+            if let scanning = model.sources.first(where: { $0.scanning && $0.found > $0.files }) {
+                ProgressView().progressViewStyle(.linear)
+                Text("Scanning \(scanning.name)… \(scanning.found.formatted()) files found").font(.caption).foregroundStyle(.secondary)
+            } else if !model.removing.isEmpty {
+                ProgressView().progressViewStyle(.linear)
+                Text("Removing folder from the library…").font(.caption).foregroundStyle(.secondary)
+            } else if model.stats.pending > 0 {
                 ProgressView(value: Double(model.stats.files - model.stats.pending), total: Double(max(1, model.stats.files)))
                 Text("Processing \(model.stats.pending) files" + (model.rate > 0.1 ? String(format: " · %.0f/s", model.rate) : ""))
                     .font(.caption).foregroundStyle(.secondary)

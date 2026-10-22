@@ -47,19 +47,32 @@ public final class LibraryService: @unchecked Sendable {
         return s
     }
 
-    /// Forgets a source and everything found in it. Files on disk are not touched.
+    /// Forgets a source and everything found in it. Files on disk are not touched. Deletes in small batches so the
+    /// database stays responsive; call it off the main thread for big folders.
     public func removeSource(_ id: Int64) throws {
         lock.withLock { monitors.removeValue(forKey: id) }?.stop()
-        let affected = try store.db.write { db -> Set<Int64> in
-            let p = Set(try Int64.fetchAll(db, sql: """
-                SELECT DISTINCT personId FROM face JOIN media ON media.id = face.mediaId
-                WHERE media.sourceId = ? AND personId IS NOT NULL
-                """, arguments: [id]))
-            try db.execute(sql: "DELETE FROM source WHERE id = ?", arguments: [id])
-            return p
-        }
+        let affected = try Self.deleteSourceContents(id, store: store)
         engine.peopleChanged(affected)
         deleteEmptyPeople()
+    }
+
+    /// Deletes a source's media 500 at a time, then the source. Returns the people who lost faces.
+    @discardableResult
+    static func deleteSourceContents(_ id: Int64, store: LibraryStore) throws -> Set<Int64> {
+        var affected: Set<Int64> = []
+        while true {
+            let n = try store.db.write { db -> Int in
+                let ids = try Int64.fetchAll(db, sql: "SELECT id FROM media WHERE sourceId = ? LIMIT 500", arguments: [id])
+                guard !ids.isEmpty else { return 0 }
+                let list = ids.map(String.init).joined(separator: ",")
+                affected.formUnion(try Int64.fetchAll(db, sql: "SELECT DISTINCT personId FROM face WHERE mediaId IN (\(list)) AND personId IS NOT NULL"))
+                try db.execute(sql: "DELETE FROM media WHERE id IN (\(list))")
+                return ids.count
+            }
+            if n == 0 { break }
+        }
+        try store.db.write { db in try db.execute(sql: "DELETE FROM source WHERE id = ?", arguments: [id]) }
+        return affected
     }
 
     public func rescan(_ sourceId: Int64) { monitor(sourceId)?.scanSoon() }
