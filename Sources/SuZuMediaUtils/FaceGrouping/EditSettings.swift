@@ -52,10 +52,7 @@ struct EditingSettings: View {
     }
 
     func chooseLogo() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic]
-        panel.prompt = "Use Logo"
-        if panel.runModal() == .OK, let url = panel.url { spec.logoPath = url.path }
+        Panels.choose(folders: false, files: true, types: [.png, .jpeg, .tiff, .heic], prompt: "Use Logo") { if let u = $0.first { spec.logoPath = u.path } }
     }
 }
 
@@ -98,24 +95,36 @@ struct EditOptionsView: View {
         // Photos going out with a social crop or the logo are auto-toned too (can still be switched off).
         .onChange(of: recipe.aspect) { old, new in if old == nil && new != nil { recipe.autoTone = true } }
         .onChange(of: recipe.watermark) { old, new in if old == nil && new != nil { recipe.autoTone = true } }
-        .task(id: recipe) { await renderPreview() }
+        .task(id: "\(recipe.hashValue)|\(previewSource?.path ?? "")") { await renderPreview() }
     }
+
+    static let context = CIContext(options: [.cacheIntermediates: false])
+    /// The decoded preview photo, reused while only the edit settings change.
+    @State private var decoded: (URL, CGImage)?
 
     func renderPreview() async {
         guard let url = previewSource else { preview = nil; return }
-        let recipe = recipe, focus = previewFocus
-        preview = await Task.detached(priority: .userInitiated) { () -> NSImage? in
+        // Wait for sliders to settle; a newer change cancels this one.
+        try? await Task.sleep(for: .milliseconds(150))
+        guard !Task.isCancelled else { return }
+        let recipe = recipe, focus = previewFocus, cached = decoded?.0 == url ? decoded?.1 : nil
+        let result = await Task.detached(priority: .userInitiated) { () -> (CGImage, NSImage)? in
             // Preview on a small decode: same composition, a fraction of the work.
-            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-                  let thumb = CGImageSourceCreateThumbnailAtIndex(src, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
-                                                                           kCGImageSourceThumbnailMaxPixelSize: 700,
-                                                                           kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary)
-            else { return nil }
+            var thumb = cached
+            if thumb == nil, let src = CGImageSourceCreateWithURL(url as CFURL, nil) {
+                thumb = CGImageSourceCreateThumbnailAtIndex(src, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                                                     kCGImageSourceThumbnailMaxPixelSize: 600,
+                                                                     kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary)
+            }
+            guard let thumb else { return nil }
             var r = recipe
             r.maxLongSide = nil
             guard let out = try? EditPipeline.apply(r, to: CIImage(cgImage: thumb), focus: focus),
-                  let cg = CIContext().createCGImage(out, from: out.extent) else { return nil }
-            return NSImage(cgImage: cg, size: .zero)
+                  let cg = Self.context.createCGImage(out, from: out.extent) else { return nil }
+            return (thumb, NSImage(cgImage: cg, size: .zero))
         }.value
+        guard !Task.isCancelled, let result else { return }
+        decoded = (url, result.0)
+        preview = result.1
     }
 }

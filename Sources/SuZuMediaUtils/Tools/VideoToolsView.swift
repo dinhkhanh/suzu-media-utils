@@ -1,9 +1,11 @@
+import FaceLibrary
 import MediaKit
 import SwiftUI
 
 /// Proxies (small 720p copies for review/editing) and contact sheets (one-page overviews) for many videos.
 struct VideoToolsView: View {
-    @State private var files: [URL] = []
+    @State private var items: [ToolItem] = []
+    var files: [URL] { var seen: Set<URL> = []; return items.map(\.url).filter { seen.insert($0).inserted } }
     @State private var output: URL?
     @State private var proxies = true
     @State private var sheets = true
@@ -17,7 +19,7 @@ struct VideoToolsView: View {
 
     var body: some View {
         Form {
-            Section("Videos") { FileInputList(files: $files, kinds: MediaTypes.videos, label: "videos") }
+            Section("Videos") { ToolInputView(items: $items, kinds: MediaTypes.videos, mediaKind: .video, label: "videos") }
             Section("Make") {
                 Toggle("Proxies — 720p H.264 copies for quick review and editing", isOn: $proxies)
                 Toggle("Contact sheets — a grid of frames with timestamps per video", isOn: $sheets)
@@ -46,6 +48,7 @@ struct VideoToolsView: View {
         guard let output else { return }
         running = true; finished = false; done = 0; failures = []
         let files = files, proxies = proxies, sheets = sheets, grid = grid
+        ToolWork.begin()
         Task.detached(priority: .utility) {
             for f in files {
                 let stem = f.deletingPathExtension().lastPathComponent
@@ -60,7 +63,7 @@ struct VideoToolsView: View {
                     await MainActor.run { done += 1 }
                 }
             }
-            await MainActor.run { running = false; finished = true }
+            await MainActor.run { running = false; finished = true; ToolWork.end() }
         }
     }
 }

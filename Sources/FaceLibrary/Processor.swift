@@ -9,8 +9,14 @@ public final class Processor: @unchecked Sendable {
     let batcher: EmbeddingBatcher
     let settings = GroupingSettings()
     let workQueue = OperationQueue()
+    /// Idle-time extras (score upgrades, burst fingerprints): their own small queue at background priority, so they
+    /// never take a worker from new files or make the app sluggish.
+    let backgroundQueue = OperationQueue()
     let lock = NSLock()
     var queued: Set<Int64> = []
+    var backgroundQueued: Set<Int64> = []
+    /// Set while a batch tool or export is running: no new extras are started.
+    public var extrasPaused = false
 
     /// Progress for the UI: files processed since launch and timestamps for the rate.
     public private(set) var processedCount = 0
@@ -21,9 +27,12 @@ public final class Processor: @unchecked Sendable {
         batcher = EmbeddingBatcher(embedder: try Embedder(name: "ArcFaceR50", compiledModel: modelURL))
         workQueue.maxConcurrentOperationCount = max(2, ProcessInfo.processInfo.activeProcessorCount - 2)
         workQueue.qualityOfService = .utility
+        backgroundQueue.maxConcurrentOperationCount = 2
+        backgroundQueue.qualityOfService = .background
     }
 
     public var queuedCount: Int { lock.withLock { queued.count } }
+    public var backgroundCount: Int { lock.withLock { backgroundQueued.count } }
 
     /// Queues every pending media in the library (call at launch and after scans).
     public func enqueuePending() {
@@ -111,7 +120,7 @@ public final class Processor: @unchecked Sendable {
 
     /// Queues done media analysed by an older version (no best-shot scores yet). Run when the queue is idle.
     public func enqueueUpgrades(limit: Int = 200) {
-        guard queuedCount == 0 else { return }
+        guard queuedCount == 0, backgroundCount == 0, !extrasPaused else { return }
         let ids = (try? store.db.read { db in
             try Int64.fetchAll(db, sql: """
                 SELECT id FROM media WHERE status = 'done' AND duplicateOf IS NULL AND analysisVersion < ? ORDER BY id LIMIT ?
@@ -123,20 +132,18 @@ public final class Processor: @unchecked Sendable {
     /// Idle-time extras that must never delay new files: lowest priority, a handful at a time, and only when no
     /// new file is waiting.
     func addBackground(_ id: Int64, _ work: @escaping () -> Void) {
-        let isNew = lock.withLock { queued.insert(id).inserted }
+        let isNew = lock.withLock { backgroundQueued.insert(id).inserted }
         guard isNew else { return }
-        let op = BlockOperation { [self] in
-            autoreleasepool(invoking: work)
-            lock.withLock { queued.remove(id) }
+        backgroundQueue.addOperation { [self] in
+            // A new file or a batch job arrived meanwhile: leave the rest for the next idle moment.
+            if queuedCount == 0 && !extrasPaused { autoreleasepool(invoking: work) }
+            lock.withLock { _ = backgroundQueued.remove(id) }
         }
-        op.queuePriority = .veryLow
-        op.qualityOfService = .background
-        workQueue.addOperation(op)
     }
 
     /// Photos without a feature print (for burst detection), done when the queue is idle.
     public func enqueueFeaturePrints(limit: Int = 100) {
-        guard queuedCount == 0 else { return }
+        guard queuedCount == 0, backgroundCount == 0, !extrasPaused else { return }
         let rows = (try? store.db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT id, path FROM media WHERE status = 'done' AND duplicateOf IS NULL AND kind = 'photo'
@@ -147,7 +154,7 @@ public final class Processor: @unchecked Sendable {
             let id: Int64 = r["id"], path: String = r["path"]
             addBackground(id) { [self] in
                 // Empty blob = tried and unreadable, so it isn't retried forever.
-                let fp = MediaAnalyzer.quickFeaturePrint(URL(fileURLWithPath: path)).map(Vector.encode) ?? Data()
+                let fp = MediaAnalyzer.quickFeaturePrint(URL(fileURLWithPath: path, isDirectory: false)).map(Vector.encode) ?? Data()
                 try? store.db.write { db in try db.execute(sql: "UPDATE media SET featurePrint = ? WHERE id = ?", arguments: [fp, id]) }
             }
         }

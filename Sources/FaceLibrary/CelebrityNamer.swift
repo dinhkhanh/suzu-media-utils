@@ -88,7 +88,7 @@ public final class CelebrityNamer: @unchecked Sendable {
             let results = await withTaskGroup(of: (Candidate, Result<Celebrity?, Error>).self) { group in
                 for c in chunk {
                     group.addTask { [client] in
-                        guard let jpeg = MediaAnalyzer.faceContextJPEG(URL(fileURLWithPath: c.path), box: c.box, time: c.time) else {
+                        guard let jpeg = MediaAnalyzer.faceContextJPEG(URL(fileURLWithPath: c.path, isDirectory: false), box: c.box, time: c.time) else {
                             return (c, .success(nil))
                         }
                         do { return (c, .success(Self.centralFace(try await client.recognizeCelebrities(jpeg: jpeg)))) }

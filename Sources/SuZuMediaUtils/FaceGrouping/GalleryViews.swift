@@ -90,11 +90,7 @@ struct GalleryExportSheet: View {
     }
 
     func choose() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        if panel.runModal() == .OK { folder = panel.url }
+        Panels.chooseFolder { folder = $0 }
     }
 
     func run() {

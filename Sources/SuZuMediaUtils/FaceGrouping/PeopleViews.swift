@@ -190,7 +190,7 @@ struct PersonDetail: View {
         }
         .navigationTitle(person?.displayName ?? "Person")
         .toolbar { toolbar }
-        .task(id: reloadKey) { reload() }
+        .task(id: reloadKey) { await reload() }
         .onAppear { name = person?.name ?? "" }
         .sheet(isPresented: $notifyRule) { NewRuleSheet(presetPerson: personId, notifyOnly: true) }
         .sheet(isPresented: $videoExport) { VideoExportSheet(personId: personId, name: person?.name ?? "Person") }
@@ -202,9 +202,13 @@ struct PersonDetail: View {
     /// Reload when the person's contents change (new files assigned, edits) or the filter changes.
     var reloadKey: String { "\(person?.faces ?? 0)-\(person?.name ?? "")-\(alsoWith.sorted())" }
 
-    func reload() {
-        media = model.media(of: personId, alsoWith: alsoWith)
-        faces = model.faces(of: personId)
+    func reload() async {
+        async let m = model.media(of: personId, alsoWith: alsoWith)
+        async let f = model.faces(of: personId)
+        let (newMedia, newFaces) = await (m, f)
+        guard !Task.isCancelled else { return }
+        media = newMedia
+        faces = newFaces
         selectedFaces = selectedFaces.intersection(faces.map(\.id))
     }
 
@@ -294,7 +298,7 @@ struct PersonDetail: View {
     }
 
     var viewControls: some View {
-        HStack(spacing: 10) {
+        FlowLayout(spacing: 10) {
             Picker("", selection: $sort) { ForEach(MediaSort.allCases) { Text($0.rawValue).tag($0) } }
                 .fixedSize()
             Picker("", selection: $topN) {
@@ -313,10 +317,11 @@ struct PersonDetail: View {
             }
             Toggle("Hide similar shots", isOn: $collapseBursts)
                 .toggleStyle(.checkbox)
+                .fixedSize()
                 .help("Show only the best photo of each burst of near-identical shots")
-            Spacer()
         }
         .padding(.horizontal, 16).padding(.top, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     func tabTitle(_ t: DetailTab) -> String {
@@ -417,9 +422,9 @@ struct FaceGrid<Menu: View>: View {
                     .onTapGesture {
                         if selection.contains(f.id) { selection.remove(f.id) } else { selection.insert(f.id) }
                     }
-                    .onTapGesture(count: 2) { NSWorkspace.shared.open(URL(fileURLWithPath: f.path)) }
+                    .onTapGesture(count: 2) { NSWorkspace.shared.open(URL(fileURLWithPath: f.path, isDirectory: false)) }
                     .contextMenu { menu(f.id) }
-                    .help("\(URL(fileURLWithPath: f.path).lastPathComponent)\(f.time.map { " at " + MediaThumbnail.timecode($0) } ?? "")")
+                    .help("\(URL(fileURLWithPath: f.path, isDirectory: false).lastPathComponent)\(f.time.map { " at " + MediaThumbnail.timecode($0) } ?? "")")
             }
         }
         .padding(16)
@@ -483,7 +488,7 @@ struct UnassignedView: View {
             }
         }
         .task(id: model.stats.unassignedFaces) {
-            faces = model.faces(of: nil)
+            faces = await model.faces(of: nil)
             selection = selection.intersection(faces.map(\.id))
         }
     }

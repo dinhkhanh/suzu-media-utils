@@ -32,6 +32,7 @@ struct ExportSheet: View {
     @State private var topN: Int?
     @State private var bestOfBurst = false
     @State private var plan: Exporter.Plan?
+    @State private var planning = false
     @State private var running = false
     @State private var progress = 0
     @State private var result: Exporter.Result?
@@ -60,7 +61,7 @@ struct ExportSheet: View {
         .frame(maxHeight: 780)
         .frame(width: 620)
         .onAppear { chosen = Set(named.map(\.id)) }
-        .task(id: "\(name)|\(base?.path ?? "")|\(chosen.sorted())|\(editPhotos)|\(recipe.hashValue)|\(writeNames)|\(topN ?? 0)|\(bestOfBurst)") { replan() }
+        .task(id: "\(name)|\(base?.path ?? "")|\(chosen.sorted())|\(editPhotos)|\(recipe.hashValue)|\(writeNames)|\(topN ?? 0)|\(bestOfBurst)") { await replan() }
     }
 
     @ViewBuilder
@@ -92,6 +93,7 @@ struct ExportSheet: View {
             .labelsHidden()
         }
         extras
+        if planning && plan == nil { HStack { ProgressView().controlSize(.small); Text("Counting files…").foregroundStyle(.secondary) } }
         if let plan { summary(plan) }
         if running {
             ProgressView(value: Double(progress), total: Double(max(1, plan?.items.count ?? 1)))
@@ -217,27 +219,31 @@ struct ExportSheet: View {
     }
 
     func choose() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "Choose"
-        if panel.runModal() == .OK { base = panel.url }
+        Panels.chooseFolder { base = $0 }
     }
 
-    func replan() {
-        guard let service = model.service else { plan = nil; return }
-        switch scope {
-        case .all:
-            let people = named.filter { chosen.contains($0.id) }.map { (id: $0.id, name: $0.name!) }
-            plan = try? service.exporter.planAll(people: people, base: base, mode: mode, options: options)
-        case .person(let id):
-            plan = folder.isEmpty ? nil : try? service.exporter.plan(personId: id, name: name, base: base, mode: mode, options: options)
-        case .media(let ids, _):
-            // Search results have no source folder of their own: default to Pictures/SuZu Exports.
-            let root = base ?? FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0].appendingPathComponent("SuZu Exports")
-            plan = folder.isEmpty ? nil : try? service.exporter.planMedia(ids, folder: name, base: root, options: options)
-        }
+    /// Plans in the background after options settle: planning thousands of files must never freeze the dialog.
+    func replan() async {
+        try? await Task.sleep(for: .milliseconds(200))
+        guard !Task.isCancelled, let service = model.service else { return }
+        let exporter = service.exporter, options = options, base = base, mode = mode, name = name, folder = folder
+        let scope = scope
+        let people = named.filter { chosen.contains($0.id) }.map { (id: $0.id, name: $0.name!) }
+        planning = true
+        let result = await Task.detached(priority: .userInitiated) { () -> Exporter.Plan? in
+            switch scope {
+            case .all:
+                return try? exporter.planAll(people: people, base: base, mode: mode, options: options)
+            case .person(let id):
+                return folder.isEmpty ? nil : try? exporter.plan(personId: id, name: name, base: base, mode: mode, options: options)
+            case .media(let ids, _):
+                let root = base ?? FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0].appendingPathComponent("SuZu Exports")
+                return folder.isEmpty ? nil : try? exporter.planMedia(ids, folder: name, base: root, options: options)
+            }
+        }.value
+        guard !Task.isCancelled else { return }
+        plan = result
+        planning = false
     }
 
     func run() {
@@ -250,11 +256,13 @@ struct ExportSheet: View {
         running = true
         let exporter = service.exporter
         let policy = policy
-        Task.detached {
-            let r = exporter.run(plan, policy: policy) { n in Task { @MainActor in progress = n } }
+        ToolWork.begin()
+        Task.detached(priority: .utility) {
+            let r = exporter.run(plan, policy: policy) { n in if n % 5 == 0 || n == plan.items.count { Task { @MainActor in progress = n } } }
             await MainActor.run {
                 result = r
                 running = false
+                ToolWork.end()
             }
         }
     }

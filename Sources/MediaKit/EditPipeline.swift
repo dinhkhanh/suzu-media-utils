@@ -23,17 +23,41 @@ public enum EditPipeline {
 
     /// Writes the edited photo as JPEG to `dest`. `focus` nil: faces are detected on the fly when cropping.
     public static func render(_ url: URL, recipe: EditRecipe, focus: FocusHint?, people: [String] = [], to dest: URL) throws {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              var image = CIImage(contentsOf: url, options: [.applyOrientationProperty: true]) else {
+        // One read per file (a network share would otherwise send it twice), then decode only as many pixels as the
+        // output needs: a 1350 px Instagram crop doesn't need all 33 megapixels.
+        guard let data = try? Data(contentsOf: url, options: .uncached),
+              let src = CGImageSourceCreateWithData(data as CFData, nil) else {
             throw Failure.unreadable(url.lastPathComponent)
         }
+        let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+        guard var image = decode(src, data: data, recipe: recipe, properties: props) else { throw Failure.unreadable(url.lastPathComponent) }
         image = try apply(recipe, to: image, focus: focus)
         guard let cg = context.createCGImage(image, from: image.extent, format: .RGBA8,
                                              colorSpace: CGColorSpace(name: CGColorSpace.sRGB)) else {
             throw Failure.write(dest.lastPathComponent)
         }
-        try writeJPEG(cg, to: dest, quality: recipe.jpegQuality, sourceProperties: CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
-                      people: recipe.writePeopleNames ? people : [])
+        try writeJPEG(cg, to: dest, quality: recipe.jpegQuality, sourceProperties: props, people: recipe.writePeopleNames ? people : [])
+    }
+
+    /// Upright image at the resolution the recipe needs (full size when it keeps the original size).
+    static func decode(_ src: CGImageSource, data: Data, recipe: EditRecipe, properties p: [CFString: Any]?) -> CIImage? {
+        var w = Double(p?[kCGImagePropertyPixelWidth] as? Int ?? 0), h = Double(p?[kCGImagePropertyPixelHeight] as? Int ?? 0)
+        if let o = p?[kCGImagePropertyOrientation] as? Int, o >= 5 { swap(&w, &h) }
+        if let target = recipe.maxLongSide, w > 0, h > 0 {
+            // Share of the long side the crop keeps (crops never upscale, so this is how much detail is needed).
+            var keep = 1.0
+            if let a = recipe.aspect {
+                let cw = min(w, h * a.ratio), ch = min(h, w / a.ratio)
+                keep = max(cw, ch) / max(w, h)
+            }
+            let needed = Int((Double(target) / keep * 1.05).rounded(.up))
+            if Double(needed) < max(w, h) * 0.9 {
+                let opts: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: needed,
+                                             kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceShouldCacheImmediately: true]
+                if let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) { return CIImage(cgImage: cg) }
+            }
+        }
+        return CIImage(data: data, options: [.applyOrientationProperty: true])
     }
 
     /// The recipe applied to an image in memory (also used for video frames and previews).
@@ -120,7 +144,7 @@ public enum EditPipeline {
         let key = spec.logoPath as NSString
         var logo = logoCache.object(forKey: key)
         if logo == nil {
-            guard let l = CIImage(contentsOf: URL(fileURLWithPath: spec.logoPath)) else { throw Failure.logo(spec.logoPath) }
+            guard let l = CIImage(contentsOf: URL(fileURLWithPath: spec.logoPath, isDirectory: false)) else { throw Failure.logo(spec.logoPath) }
             logoCache.setObject(l, forKey: key)
             logo = l
         }

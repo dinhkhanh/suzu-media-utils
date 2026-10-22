@@ -11,8 +11,20 @@ enum AppRoute: Hashable {
 /// To add a tool: add an `AppRoute` case, a sidebar section view whose rows are tagged with that case, and a branch
 /// in `detail`. Keep tool logic in its own library target (like FaceLibrary) so it stays testable without UI.
 struct AppShell: View {
-    @State private var route: AppRoute? = .faces(.people)
+    @State private var route: AppRoute? = AppShell.startRoute
     @State private var path = NavigationPath()
+
+    /// SUZU_START_ROUTE=search | rules | tool.<name> (testing): open the app on that screen.
+    static var startRoute: AppRoute {
+        let r = ProcessInfo.processInfo.environment["SUZU_START_ROUTE"] ?? ""
+        if r.hasPrefix("tool."), let t = ToolRoute(rawValue: String(r.dropFirst(5))) { return .tool(t) }
+        switch r {
+        case "search": return .faces(.search)
+        case "rules": return .faces(.rules)
+        case "unassigned": return .faces(.unassigned)
+        default: return .faces(.people)
+        }
+    }
 
     var body: some View {
         NavigationSplitView {

@@ -41,6 +41,7 @@ public final class LibraryService: @unchecked Sendable {
     @discardableResult
     public func maintain() -> Bool {
         guard processor.queuedCount == 0, (try? pendingCount()) == 0 else { return false }
+        if processor.backgroundCount > 0 { return false }
         // Deliveries first: they're what people are waiting for. Grouping settles ~30 s after a batch, so files
         // are only delivered once their faces are named.
         engine.waitUntilIdle()
@@ -53,8 +54,9 @@ public final class LibraryService: @unchecked Sendable {
                               arguments: [BestShot.analysisVersion]) ?? 0,
              try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'done' AND duplicateOf IS NULL AND kind = 'photo' AND featurePrint IS NULL") ?? 0)
         }) ?? (0, 0)
-        if old > 0 { processor.enqueueUpgrades(limit: 100); burstsDirty = true; return false }
-        if noPrint > 0 { processor.enqueueFeaturePrints(limit: 200); burstsDirty = true; return false }
+        if processor.extrasPaused { return false }
+        if old > 0 { processor.enqueueUpgrades(limit: 40); burstsDirty = true; return false }
+        if noPrint > 0 { processor.enqueueFeaturePrints(limit: 100); burstsDirty = true; return false }
         if burstsDirty {
             burstsDirty = false
             _ = try? BurstGrouper(store: store).regroup()

@@ -25,6 +25,25 @@ func runHeadless(_ args: [String]) -> Never {
     let lib = URL(fileURLWithPath: value("--library") ?? NSTemporaryDirectory() + "facegrouping-headless")
     guard let model = locateModel() else { print("model not found"); exit(1) }
     let service = try! LibraryService(modelURL: model, directory: lib)
+    if args.contains("--bench-ui") {  // runs at once, without processing the folder
+        // Timings of what the batch tools and export dialogs run on each interaction.
+        func time(_ label: String, _ body: () throws -> Int) {
+            let t = Date(); let n = (try? body()) ?? -1
+            print(String(format: "  %@: %d items in %.0f ms", label, n, Date().timeIntervalSince(t) * 1000))
+        }
+        let people = try! service.store.db.read { db in try Row.fetchAll(db, sql: "SELECT id, name FROM person WHERE name IS NOT NULL") }
+            .map { (id: $0["id"] as Int64, name: $0["name"] as String) }
+        print("bench-ui with \(people.count) named people")
+        time("people as source (all photos)") { try Selection.files(service.store, personIds: people.map(\.id), kind: .photo, topN: nil, bestOfBurst: true).count }
+        time("people as source (best 20)") { try Selection.files(service.store, personIds: people.map(\.id), kind: .photo, topN: 20, bestOfBurst: true).count }
+        var opts = Exporter.Options(); opts.bestOfBurst = true
+        time("Export All plan") { try service.exporter.planAll(people: people, base: nil, mode: .move, options: opts).items.count }
+        if let first = people.first { time("single person plan") { try service.exporter.plan(personId: first.id, name: first.name, base: nil, options: opts).items.count } }
+        var q = MediaQuery(); q.people = Array(people.prefix(3).map(\.id)); q.match = .any
+        time("search 3 people") { try q.run(service.store).count }
+        time("search everything") { try MediaQuery().run(service.store).count }
+        exit(0)
+    }
     let t0 = Date()
     let existing = try! service.store.db.read { db in try String.fetchAll(db, sql: "SELECT path FROM source") }
     if let ref = value("--reference"), !existing.contains(canonicalPath(URL(fileURLWithPath: ref))) {
@@ -136,9 +155,29 @@ func suggestNamesHeadless(_ service: LibraryService, apply: Bool) {
     service.engine.waitUntilIdle()
 }
 
+/// SUZU_HANG_LOG=1 (testing): logs to stderr whenever the main thread is blocked for more than 250 ms.
+func startHangWatchdog() {
+    guard ProcessInfo.processInfo.environment["SUZU_HANG_LOG"] != nil else { return }
+    let launch = Date()
+    Thread.detachNewThread {
+        while true {
+            let sem = DispatchSemaphore(value: 0)
+            let t = Date()
+            DispatchQueue.main.async { sem.signal() }
+            if sem.wait(timeout: .now() + 0.25) == .timedOut {
+                sem.wait()
+                FileHandle.standardError.write(Data(String(format: "HANG main thread blocked %.0f ms at %.1f s\n",
+                                                           Date().timeIntervalSince(t) * 1000, t.timeIntervalSince(launch)).utf8))
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+    }
+}
+
 if CommandLine.arguments.contains("--headless") {
     runHeadless(CommandLine.arguments)
 } else {
     NSApplication.shared.setActivationPolicy(.regular)
+    startHangWatchdog()
     SuZuMediaUtilsApp.main()
 }

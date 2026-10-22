@@ -53,7 +53,7 @@ public struct MediaRecord: Codable, FetchableRecord, MutablePersistableRecord, I
         self.contentKey = contentKey; status = .pending
     }
     public mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
-    public var url: URL { URL(fileURLWithPath: path) }
+    public var url: URL { URL(fileURLWithPath: path, isDirectory: false) }
 }
 
 public enum Assignment: String, Codable, Sendable {

@@ -44,7 +44,7 @@ public struct VideoExport: Sendable {
             for seg in VideoTools.segments(times: faces.map { $0["time"] as Double }, duration: duration) {
                 let inside = faces.filter { let t: Double = $0["time"]; return t >= seg.start && t <= seg.end }
                 guard let best = inside.max(by: { ($0["s"] as Double) < ($1["s"] as Double) }) else { continue }
-                out.append(Appearance(mediaId: faces[0]["id"], url: URL(fileURLWithPath: faces[0]["path"]), segment: seg,
+                out.append(Appearance(mediaId: faces[0]["id"], url: URL(fileURLWithPath: faces[0]["path"], isDirectory: false), segment: seg,
                                       score: best["s"], bestTime: best["time"],
                                       bestBox: CGRect(x: best["x"] as Double, y: best["y"] as Double, width: best["w"] as Double, height: best["h"] as Double)))
             }

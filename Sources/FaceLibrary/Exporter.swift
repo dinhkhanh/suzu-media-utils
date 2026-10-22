@@ -86,7 +86,7 @@ public struct Exporter: Sendable {
         var plan = Plan()
         let folder = Self.folderName(name)
         for r in rows {
-            let from = URL(fileURLWithPath: r["path"])
+            let from = URL(fileURLWithPath: r["path"], isDirectory: false)
             let root = base ?? (r["sourcePath"] as String?).map { URL(fileURLWithPath: $0, isDirectory: true) }
                 ?? from.deletingLastPathComponent()
             let dir = root.appendingPathComponent(folder, isDirectory: true)
@@ -119,7 +119,7 @@ public struct Exporter: Sendable {
         var plan = Plan()
         for (_, group) in Dictionary(grouping: rows, by: { $0["id"] as Int64 }).sorted(by: { $0.key < $1.key }) {
             let ordered = group.sorted { ($0["area"] as Double) > ($1["area"] as Double) }  // main subject first
-            let from = URL(fileURLWithPath: ordered[0]["path"])
+            let from = URL(fileURLWithPath: ordered[0]["path"], isDirectory: false)
             var moveUsed = false
             for (k, r) in ordered.enumerated() {
                 let name = names[r["personId"]]!
@@ -158,7 +158,7 @@ public struct Exporter: Sendable {
         let dir = base.appendingPathComponent(Self.folderName(folder), isDirectory: true)
         var plan = Plan()
         for r in rows {
-            let from = URL(fileURLWithPath: r["path"])
+            let from = URL(fileURLWithPath: r["path"], isDirectory: false)
             plan.items.append(Item(mediaId: r["id"], from: from, to: dir.appendingPathComponent(from.lastPathComponent),
                                    alsoHasOtherNamedPeople: false, operation: .copy, personName: folder))
         }
@@ -174,7 +174,7 @@ public struct Exporter: Sendable {
         var plan = Plan()
         for p in pairs {
             guard let path = paths[p.mediaId] else { continue }
-            let from = URL(fileURLWithPath: path)
+            let from = URL(fileURLWithPath: path, isDirectory: false)
             let dir = base.appendingPathComponent(Self.folderName(p.name), isDirectory: true)
             plan.items.append(Item(mediaId: p.mediaId, from: from, to: dir.appendingPathComponent(from.lastPathComponent),
                                    alsoHasOtherNamedPeople: false, operation: .copy, personName: p.name))

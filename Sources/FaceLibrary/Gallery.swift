@@ -86,7 +86,7 @@ public struct GalleryExporter: Sendable {
             var tiles: [GalleryHTML.Tile] = []
             for f in files {
                 defer { done += 1; progress(done, total) }
-                let src = URL(fileURLWithPath: f.path)
+                let src = URL(fileURLWithPath: f.path, isDirectory: false)
                 let base = "\(f.mediaId)"
                 if f.isVideo {
                     let name = base + "." + src.pathExtension.lowercased()
@@ -244,7 +244,7 @@ public final class GalleryServer: @unchecked Sendable {
         let key = "\(id)-\(side)" as NSString
         if let d = thumbCache.object(forKey: key) { return d as Data }
         let (path, isVideo) = try mediaPath(id)
-        let url = URL(fileURLWithPath: path)
+        let url = URL(fileURLWithPath: path, isDirectory: false)
         var cg: CGImage?
         if isVideo { cg = VideoSampler.frameSync(url, at: time ?? 0, maxPixel: side) }
         else if let src = CGImageSourceCreateWithURL(url as CFURL, nil) { cg = ImageLoader.decode(src, maxPixel: side) }
@@ -260,7 +260,7 @@ public final class GalleryServer: @unchecked Sendable {
     /// Originals, with byte ranges so videos stream and seek in the browser.
     func sendFile(_ c: NWConnection, mediaId: Int64, request r: Request) throws {
         let (path, isVideo) = try mediaPath(mediaId)
-        let url = URL(fileURLWithPath: path)
+        let url = URL(fileURLWithPath: path, isDirectory: false)
         let size = (try FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0
         let type = isVideo ? (url.pathExtension.lowercased() == "mov" ? "video/quicktime" : "video/mp4") : "image/jpeg"
         var extra = ["Accept-Ranges": "bytes"]

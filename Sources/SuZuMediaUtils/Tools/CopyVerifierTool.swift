@@ -60,7 +60,9 @@ struct CopyVerifierTool: View {
         guard let source, let destination else { return }
         running = true; report = nil; repairMessage = nil
         let checksums = checksums
+        ToolWork.begin()
         Task.detached(priority: .utility) {
+            defer { Task { @MainActor in ToolWork.end() } }
             let r = FolderVerifier.verify(source: source, destination: destination, checksums: checksums) { d, t in
                 if d % 20 == 0 || d == t { Task { @MainActor in progress = (d, t) } }
             }

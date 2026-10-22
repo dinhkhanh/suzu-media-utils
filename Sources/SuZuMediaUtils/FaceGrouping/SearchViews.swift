@@ -16,6 +16,7 @@ struct SearchView: View {
     @State private var saving = false
     @State private var albumName = ""
     @State private var exporting = false
+    @State private var shown = 600
 
     var album: SmartAlbum? { albumId.flatMap { id in model.albums.first { $0.id == id } } }
     var named: [PersonSummary] { model.people.filter { $0.name != nil } }
@@ -29,17 +30,20 @@ struct SearchView: View {
                     ContentUnavailableView("No matching files", systemImage: "magnifyingglass").padding(.top, 60)
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 8)], spacing: 8) {
-                    ForEach(hits) { h in
+                    ForEach(hits.prefix(shown)) { h in
                         MediaThumbnail(item: PersonMedia(id: h.id, path: h.path, kind: h.kind, faceId: h.faceId ?? 0, time: h.time,
                                                          score: h.score, takenAt: h.takenAt, burstId: h.burstId), side: 170)
-                            .onTapGesture(count: 2) { NSWorkspace.shared.open(URL(fileURLWithPath: h.path)) }
+                            .onTapGesture(count: 2) { NSWorkspace.shared.open(URL(fileURLWithPath: h.path, isDirectory: false)) }
                             .contextMenu {
-                                Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: h.path)) }
-                                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: h.path)]) }
+                                Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: h.path, isDirectory: false)) }
+                                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: h.path, isDirectory: false)]) }
                             }
                     }
                 }
                 .padding(16)
+                if hits.count > shown {
+                    Button("Show \(min(600, hits.count - shown)) More") { shown += 600 }.padding(.bottom, 20)
+                }
             }
         }
         .navigationTitle(album?.name ?? "Search")
@@ -66,7 +70,19 @@ struct SearchView: View {
         }
         .onAppear(perform: load)
         .onChange(of: albumId) { load() }
-        .task(id: "\(currentQuery.hashValue)|\(model.stats.files)|\(model.people.count)") { search() }
+        // Re-run when the filters change (after typing pauses), and every 15 s for newly processed files.
+        .task(id: currentQuery.hashValue) {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            shown = 600
+            search()
+        }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                search()
+            }
+        }
     }
 
     var currentQuery: MediaQuery {
@@ -94,57 +110,54 @@ struct SearchView: View {
     }
 
     var filters: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Menu("Add Person") {
-                    ForEach(named.filter { !query.people.contains($0.id) }) { p in Button(p.displayName) { query.people.append(p.id) } }
-                }
-                .fixedSize()
-                ForEach(query.people, id: \.self) { id in
-                    Button { query.people.removeAll { $0 == id } } label: {
-                        Label(model.people.first { $0.id == id }?.displayName ?? "?", systemImage: "xmark.circle.fill")
-                    }
-                    .buttonStyle(.bordered).controlSize(.small)
-                }
-                if query.people.count > 1 {
-                    Picker("", selection: $query.match) {
-                        Text("All of them together").tag(MediaQuery.PeopleMatch.all)
-                        Text("Any of them").tag(MediaQuery.PeopleMatch.any)
-                    }
-                    .fixedSize()
-                }
-                Spacer()
+        FlowLayout(spacing: 10, lineSpacing: 8) {
+            Menu("Add Person") {
+                ForEach(named.filter { !query.people.contains($0.id) }) { p in Button(p.displayName) { query.people.append(p.id) } }
             }
-            HStack(spacing: 12) {
-                Picker("", selection: $query.kind) {
-                    Text("Photos & videos").tag(MediaKind?.none)
-                    Text("Photos").tag(MediaKind?.some(.photo))
-                    Text("Videos").tag(MediaKind?.some(.video))
+            .fixedSize()
+            ForEach(query.people, id: \.self) { id in
+                Button { query.people.removeAll { $0 == id } } label: {
+                    Label(model.people.first { $0.id == id }?.displayName ?? "?", systemImage: "xmark.circle.fill")
+                }
+                .buttonStyle(.bordered).controlSize(.small).fixedSize()
+            }
+            if query.people.count > 1 {
+                Picker("", selection: $query.match) {
+                    Text("All of them together").tag(MediaQuery.PeopleMatch.all)
+                    Text("Any of them").tag(MediaQuery.PeopleMatch.any)
                 }
                 .fixedSize()
-                Picker("", selection: $query.crowd) {
-                    Text("Any number of people").tag(MediaQuery.Crowd.any)
-                    Text("Solo shots").tag(MediaQuery.Crowd.solo)
-                    Text("Group shots").tag(MediaQuery.Crowd.group)
-                }
-                .fixedSize()
-                Picker("", selection: $query.sourceId) {
-                    Text("All folders").tag(Int64?.none)
-                    ForEach(model.sources.filter { $0.kind == .media }) { Text($0.name).tag(Int64?.some($0.id)) }
-                }
-                .fixedSize()
+            }
+            Picker("", selection: $query.kind) {
+                Text("Photos & videos").tag(MediaKind?.none)
+                Text("Photos").tag(MediaKind?.some(.photo))
+                Text("Videos").tag(MediaKind?.some(.video))
+            }
+            .fixedSize()
+            Picker("", selection: $query.crowd) {
+                Text("Any number of people").tag(MediaQuery.Crowd.any)
+                Text("Solo shots").tag(MediaQuery.Crowd.solo)
+                Text("Group shots").tag(MediaQuery.Crowd.group)
+            }
+            .fixedSize()
+            Picker("", selection: $query.sourceId) {
+                Text("All folders").tag(Int64?.none)
+                ForEach(model.sources.filter { $0.kind == .media }) { Text($0.name).tag(Int64?.some($0.id)) }
+            }
+            .fixedSize()
+            HStack(spacing: 6) {
                 Toggle("Dates", isOn: $useDates).toggleStyle(.checkbox)
                 if useDates {
-                    DatePicker("", selection: $from, displayedComponents: .date).labelsHidden()
+                    DatePicker("", selection: $from, displayedComponents: .date).labelsHidden().fixedSize()
                     Text("–")
-                    DatePicker("", selection: $to, displayedComponents: .date).labelsHidden()
+                    DatePicker("", selection: $to, displayedComponents: .date).labelsHidden().fixedSize()
                 }
-                Toggle("Best shots only", isOn: $query.bestOnly).toggleStyle(.checkbox)
-                Toggle("Hide similar shots", isOn: $query.collapseBursts).toggleStyle(.checkbox)
-                Spacer()
             }
+            Toggle("Best shots only", isOn: $query.bestOnly).toggleStyle(.checkbox).fixedSize()
+            Toggle("Hide similar shots", isOn: $query.collapseBursts).toggleStyle(.checkbox).fixedSize()
         }
         .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -248,12 +261,7 @@ struct NewRuleSheet: View {
     }
 
     func chooseFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "Choose"
-        if panel.runModal() == .OK { folder = panel.url }
+        Panels.chooseFolder { folder = $0 }
     }
 }
 

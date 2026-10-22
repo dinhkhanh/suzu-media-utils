@@ -133,7 +133,10 @@ struct FaceGroupingStatus: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if let scanning = model.sources.first(where: { $0.scanning && $0.found > $0.files }) {
+            if model.service == nil && model.startupError == nil {
+                ProgressView().progressViewStyle(.linear)
+                Text("Opening library…").font(.caption).foregroundStyle(.secondary)
+            } else if let scanning = model.sources.first(where: { $0.scanning && $0.found > $0.files }) {
                 ProgressView().progressViewStyle(.linear)
                 Text("Scanning \(scanning.name)… \(scanning.found.formatted()) files found").font(.caption).foregroundStyle(.secondary)
             } else if !model.removing.isEmpty {

@@ -46,7 +46,7 @@ struct PersonMedia: Identifiable, Hashable {
     var burstId: Int64?
     /// Other shots of the same burst hidden behind this one when bursts are collapsed.
     var hiddenInBurst = 0
-    var url: URL { URL(fileURLWithPath: path) }
+    var url: URL { URL(fileURLWithPath: path, isDirectory: false) }
 }
 
 struct FaceItem: Identifiable, Hashable {
@@ -59,7 +59,7 @@ struct FaceItem: Identifiable, Hashable {
 
 @MainActor
 final class FaceGroupingModel: ObservableObject {
-    let service: LibraryService?
+    private(set) var service: LibraryService?
     @Published var startupError: String?
     @Published var people: [PersonSummary] = []
     @Published var sources: [SourceSummary] = []
@@ -80,23 +80,28 @@ final class FaceGroupingModel: ObservableObject {
 
     init() {
         guard let model = locateModel() else {
-            service = nil
             startupError = "The face model (ArcFaceR50.mlmodelc) was not found. Rebuild the app with scripts/build-app.sh (see README)."
             return
         }
-        do {
-            // SUZU_FACE_LIBRARY points the app at another library (testing); default is Application Support.
-            let dir = ProcessInfo.processInfo.environment["SUZU_FACE_LIBRARY"].map { URL(fileURLWithPath: $0) }
-            service = try LibraryService(modelURL: model, directory: dir ?? LibraryStore.defaultDirectory)
-        } catch {
-            service = nil
-            startupError = "Could not open the library: \(error.localizedDescription)"
-            return
+        // Opening the database (migrations) and loading the Core ML model take a few seconds: never on the main
+        // thread, or the window would freeze at launch.
+        let dir = ProcessInfo.processInfo.environment["SUZU_FACE_LIBRARY"].map { URL(fileURLWithPath: $0) }
+        Task.detached(priority: .userInitiated) {
+            do {
+                let service = try LibraryService(modelURL: model, directory: dir ?? LibraryStore.defaultDirectory)
+                await MainActor.run { self.attach(service) }
+            } catch {
+                await MainActor.run { self.startupError = "Could not open the library: \(error.localizedDescription)" }
+            }
         }
-        service!.onDelivered = { report in Notifier.post(report) }
-        service!.start()
+    }
+
+    private func attach(_ service: LibraryService) {
+        self.service = service
+        service.onDelivered = { report in Notifier.post(report) }
+        ToolWork.faces = self
+        service.start()
         observe()
-        if !rules.isEmpty { Notifier.requestPermission() }
         if UserDefaults.standard.bool(forKey: "sharingEnabled") { setSharing(true) }
     }
 
@@ -147,7 +152,10 @@ final class FaceGroupingModel: ObservableObject {
                     self.applySources(sources)
                     if stats != self.stats { self.stats = stats }
                     if albums != self.albums { self.albums = albums }
-                    if rules != self.rules { self.rules = rules }
+                    if rules != self.rules {
+                        if self.rules.isEmpty && !rules.isEmpty { Notifier.requestPermission() }
+                        self.rules = rules
+                    }
                 }
                 self.refreshing = false
             }
@@ -211,8 +219,18 @@ final class FaceGroupingModel: ObservableObject {
 
     // MARK: - Queries for detail views
 
-    func media(of personId: Int64, alsoWith others: Set<Int64>) -> [PersonMedia] {
-        guard let db = store?.db else { return [] }
+    func media(of personId: Int64, alsoWith others: Set<Int64>) async -> [PersonMedia] {
+        guard let store else { return [] }
+        return await Task.detached(priority: .userInitiated) { Self.loadMedia(store, personId, others) }.value
+    }
+
+    func faces(of personId: Int64?) async -> [FaceItem] {
+        guard let store else { return [] }
+        return await Task.detached(priority: .userInitiated) { Self.loadFaces(store, personId) }.value
+    }
+
+    nonisolated static func loadMedia(_ store: LibraryStore, _ personId: Int64, _ others: Set<Int64>) -> [PersonMedia] {
+        let db = store.db
         let rows = (try? db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT m.id, m.path, m.kind, m.takenAt, m.burstId, f.id AS faceId, f.time,
@@ -239,8 +257,8 @@ final class FaceGroupingModel: ObservableObject {
         }
     }
 
-    func faces(of personId: Int64?) -> [FaceItem] {
-        guard let db = store?.db else { return [] }
+    nonisolated static func loadFaces(_ store: LibraryStore, _ personId: Int64?) -> [FaceItem] {
+        let db = store.db
         let filter = personId == nil
             ? "f.personId IS NULL AND f.quality >= 0.3 AND COALESCE(s.kind, 'media') = 'media'"
             : "f.personId = \(personId!)"
@@ -256,16 +274,13 @@ final class FaceGroupingModel: ObservableObject {
     // MARK: - Actions
 
     func addFolder(kind: SourceKind) {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = true
-        panel.prompt = "Add"
-        panel.message = kind == .media
+        let message = kind == .media
             ? "Choose folders with photos and videos (local, external drive or NAS)."
             : "Choose a folder with one subfolder per person, named after them, each holding a few clear photos of that person."
-        guard panel.runModal() == .OK else { return }
-        for url in panel.urls { perform { try $0.addSource(url, kind: kind) } }
+        Panels.choose(folders: true, files: false, multiple: true, prompt: "Add", message: message,
+                      start: FileManager.default.homeDirectoryForCurrentUser) { [weak self] urls in
+            for url in urls { self?.perform { try $0.addSource(url, kind: kind) } }
+        }
     }
 
     /// Hides the folder at once and forgets its files in the background (can take a while for big folders).

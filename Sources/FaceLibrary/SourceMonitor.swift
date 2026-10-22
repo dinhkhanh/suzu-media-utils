@@ -139,7 +139,7 @@ public final class SourceMonitor: @unchecked Sendable {
         dirCache = dirCache.filter { seenDirs.contains($0.key) }
         // A file still being written grows without touching its folder's mtime: re-stat unsettled ones.
         for path in candidates.keys where out[path] != nil {
-            if let v = try? URL(fileURLWithPath: path).resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) {
+            if let v = try? URL(fileURLWithPath: path, isDirectory: false).resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) {
                 out[path] = FileInfo(size: Int64(v.fileSize ?? 0), mtime: v.contentModificationDate?.timeIntervalSince1970 ?? 0)
             }
         }
@@ -207,7 +207,7 @@ public final class SourceMonitor: @unchecked Sendable {
             var remaining: [(String, FileInfo)] = []
             var moves: [(path: String, info: FileInfo, id: Int64, oldPath: String)] = []
             for (path, info) in settledNew {
-                if let olds = missingBySize[info.size], let key = ContentKey.compute(URL(fileURLWithPath: path), size: info.size),
+                if let olds = missingBySize[info.size], let key = ContentKey.compute(URL(fileURLWithPath: path, isDirectory: false), size: info.size),
                    let oldPath = olds.first(where: { missing[$0]?.contentKey == key }) {
                     moves.append((path, info, missing[oldPath]!.id, oldPath))
                     missing[oldPath] = nil
@@ -239,7 +239,7 @@ public final class SourceMonitor: @unchecked Sendable {
                 start += batch.count
                 var rows: [MediaRecord] = []
                 for (path, info) in batch {
-                    let url = URL(fileURLWithPath: path)
+                    let url = URL(fileURLWithPath: path, isDirectory: false)
                     var m = MediaRecord(sourceId: sourceId, path: path, kind: MediaAnalyzer.isVideo(url) ? .video : .photo,
                                         size: info.size, mtime: info.mtime, contentKey: nil)
                     if sameKindSizes.contains(info.size), let key = ContentKey.compute(url, size: info.size),
@@ -294,7 +294,7 @@ public final class SourceMonitor: @unchecked Sendable {
         }
         for c in cands {
             var ck: String? = c["contentKey"]
-            if ck == nil, let computed = ContentKey.compute(URL(fileURLWithPath: c["path"]), size: size) {
+            if ck == nil, let computed = ContentKey.compute(URL(fileURLWithPath: c["path"], isDirectory: false), size: size) {
                 ck = computed
                 try store.db.write { db in
                     try db.execute(sql: "UPDATE media SET contentKey = ? WHERE id = ?", arguments: [computed, c["id"] as Int64])
