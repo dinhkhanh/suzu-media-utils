@@ -16,6 +16,10 @@ public struct DetectedFace: Codable, Sendable {
     public var points: [Point2]?
     public var quality: Float?
     public var yaw, roll, pitch: Float?
+    /// 0 = eyes closed, 1 = clearly open (eye-contour aspect ratio).
+    public var eyesOpen: Float?
+    /// 0 = neutral mouth, 1 = broad smile (mouth width relative to eye distance).
+    public var smile: Float?
 
     public var rect: CGRect { CGRect(x: x, y: y, width: w, height: h) }
 }
@@ -41,8 +45,41 @@ public enum FaceDetector {
                 x: b.minX, y: size.height - b.maxY, w: b.width, h: b.height,
                 points: fivePoints(o, size: size)?.map(Point2.init),
                 quality: qualityByID[o.uuid],
-                yaw: o.yaw?.floatValue, roll: o.roll?.floatValue, pitch: o.pitch?.floatValue)
+                yaw: o.yaw?.floatValue, roll: o.roll?.floatValue, pitch: o.pitch?.floatValue,
+                eyesOpen: eyesOpen(o, size: size), smile: smile(o, size: size))
         }
+    }
+
+    static func points(_ r: VNFaceLandmarkRegion2D?, _ size: CGSize) -> [CGPoint] {
+        r.map { $0.pointsInImage(imageSize: size) } ?? []
+    }
+
+    /// Height / width of each eye contour, mapped so ~0.10 (closed) -> 0 and ~0.25 (open) -> 1.
+    static func eyesOpen(_ o: VNFaceObservation, size: CGSize) -> Float? {
+        func ratio(_ p: [CGPoint]) -> Double? {
+            guard p.count >= 4 else { return nil }
+            let xs = p.map(\.x), ys = p.map(\.y)
+            let w = xs.max()! - xs.min()!
+            return w > 0 ? (ys.max()! - ys.min()!) / w : nil
+        }
+        let rs = [ratio(points(o.landmarks?.leftEye, size)), ratio(points(o.landmarks?.rightEye, size))].compactMap { $0 }
+        guard !rs.isEmpty else { return nil }
+        let r = rs.reduce(0, +) / Double(rs.count)
+        return Float(min(1, max(0, (r - 0.10) / 0.15)))
+    }
+
+    /// Mouth width over eye distance: ~0.8 neutral -> 0, ~1.05 broad smile -> 1.
+    static func smile(_ o: VNFaceObservation, size: CGSize) -> Float? {
+        let lips = points(o.landmarks?.outerLips, size)
+        let le = points(o.landmarks?.leftPupil ?? o.landmarks?.leftEye, size)
+        let re = points(o.landmarks?.rightPupil ?? o.landmarks?.rightEye, size)
+        guard lips.count >= 4, !le.isEmpty, !re.isEmpty else { return nil }
+        func mean(_ p: [CGPoint]) -> CGPoint { CGPoint(x: p.map(\.x).reduce(0, +) / Double(p.count), y: p.map(\.y).reduce(0, +) / Double(p.count)) }
+        let a = mean(le), b = mean(re)
+        let eyeDist = hypot(a.x - b.x, a.y - b.y)
+        guard eyeDist > 0 else { return nil }
+        let mouth = (lips.map(\.x).max()! - lips.map(\.x).min()!) / eyeDist
+        return Float(min(1, max(0, (mouth - 0.8) / 0.25)))
     }
 
     /// Derives the 5 ArcFace alignment points from Vision's 76-point landmarks.

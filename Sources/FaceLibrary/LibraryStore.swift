@@ -92,6 +92,30 @@ public final class LibraryStore: @unchecked Sendable {
                 t.column("lookedUpAt", .datetime).notNull()
             }
         }
+        m.registerMigration("v3-bestshot") { db in
+            try db.alter(table: "face") { t in
+                t.add(column: "eyesOpen", .double)
+                t.add(column: "smile", .double)
+                t.add(column: "sharpness", .double)
+                t.add(column: "yaw", .double)
+                /// Best-shot score 0-1 (see BestShot); higher is better.
+                t.add(column: "score", .double)
+            }
+            try db.create(index: "face_person_score", on: "face", columns: ["personId", "score"])
+            try db.alter(table: "media") { t in
+                t.add(column: "takenAt", .double)  // seconds since 1970
+                t.add(column: "featurePrint", .blob)
+                /// Id of the first photo of a burst of near-identical shots; nil when not part of a burst.
+                t.add(column: "burstId", .integer)
+                /// 1 = Phase 1 analysis; 2 = adds best-shot scores, capture time and feature print.
+                t.add(column: "analysisVersion", .integer).notNull().defaults(to: 1)
+            }
+            try db.create(index: "media_takenAt", on: "media", columns: ["takenAt"])
+            try db.alter(table: "person") { t in
+                /// The face the user picked as this person's picture; nil = best shot automatically.
+                t.add(column: "coverFaceId", .integer).references("face", onDelete: .setNull)
+            }
+        }
         return m
     }
 }

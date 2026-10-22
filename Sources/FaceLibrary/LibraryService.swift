@@ -10,6 +10,9 @@ public final class LibraryService: @unchecked Sendable {
     public var exporter: Exporter { Exporter(store: store) }
     let lock = NSLock()
     var monitors: [Int64: SourceMonitor] = [:]
+    var maintenance: DispatchSourceTimer?
+    let maintenanceQueue = DispatchQueue(label: "maintenance", qos: .background)
+    var burstsDirty = true
 
     public init(modelURL: URL, directory: URL = LibraryStore.defaultDirectory) throws {
         store = try LibraryStore(directory: directory)
@@ -22,6 +25,35 @@ public final class LibraryService: @unchecked Sendable {
         engine.start()
         processor.enqueuePending()
         for s in (try? store.db.read { db in try SourceRecord.fetchAll(db) }) ?? [] { startMonitor(s) }
+        let t = DispatchSource.makeTimerSource(queue: maintenanceQueue)
+        t.schedule(deadline: .now() + 15, repeating: 15)
+        t.setEventHandler { [weak self] in self?.maintain() }
+        t.resume()
+        maintenance = t
+    }
+
+    /// Background extras (best-shot upgrades of older analyses, burst fingerprints, burst grouping). Each step only
+    /// runs while no new file is waiting, so face recognition and grouping are never delayed.
+    /// Returns true when there is nothing left to do.
+    @discardableResult
+    public func maintain() -> Bool {
+        guard processor.queuedCount == 0, (try? pendingCount()) == 0 else { return false }
+        let (old, noPrint) = (try? store.db.read { db in
+            (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'done' AND duplicateOf IS NULL AND analysisVersion < ?",
+                              arguments: [BestShot.analysisVersion]) ?? 0,
+             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'done' AND duplicateOf IS NULL AND kind = 'photo' AND featurePrint IS NULL") ?? 0)
+        }) ?? (0, 0)
+        if old > 0 { processor.enqueueUpgrades(limit: 100); burstsDirty = true; return false }
+        if noPrint > 0 { processor.enqueueFeaturePrints(limit: 200); burstsDirty = true; return false }
+        if burstsDirty {
+            burstsDirty = false
+            _ = try? BurstGrouper(store: store).regroup()
+        }
+        return true
+    }
+
+    func pendingCount() throws -> Int {
+        try store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'pending'") ?? 0 }
     }
 
     func startMonitor(_ s: SourceRecord) {

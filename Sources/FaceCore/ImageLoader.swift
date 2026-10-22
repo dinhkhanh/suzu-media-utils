@@ -46,6 +46,19 @@ public enum ImageLoader {
         return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
     }
 
+    /// EXIF capture time (DateTimeOriginal + sub-seconds), if present.
+    public static func captureDate(_ src: CGImageSource) -> Date? {
+        let p = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+        let exif = p?[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        guard let s = (exif?[kCGImagePropertyExifDateTimeOriginal] ?? exif?[kCGImagePropertyExifDateTimeDigitized]) as? String else { return nil }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        var date = f.date(from: s)
+        if let sub = exif?[kCGImagePropertyExifSubsecTimeOriginal] as? String, let frac = Double("0." + sub) { date = date?.addingTimeInterval(frac) }
+        return date
+    }
+
     public static func writeJPEG(_ image: CGImage, to url: URL, quality: Double = 0.85) {
         guard let dst = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else { return }
         CGImageDestinationAddImage(dst, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)

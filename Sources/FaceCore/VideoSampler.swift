@@ -55,6 +55,19 @@ public enum VideoSampler {
         return try result.get()
     }
 
+    /// Recording date from the file's metadata, else its modification date.
+    public static func recordingDate(_ url: URL) -> Date? {
+        let sem = DispatchSemaphore(value: 0)
+        var date: Date?
+        Task {
+            let asset = AVURLAsset(url: url)
+            if let item = try? await asset.load(.creationDate) { date = try? await item.load(.dateValue) }
+            sem.signal()
+        }
+        sem.wait()
+        return date ?? (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+    }
+
     /// One upright frame near `time`, via AVFoundation or ffmpeg.
     public static func frameSync(_ url: URL, at time: Double, maxPixel: Int) -> CGImage? {
         let sem = DispatchSemaphore(value: 0)

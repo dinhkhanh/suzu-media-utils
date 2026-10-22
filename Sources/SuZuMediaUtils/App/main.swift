@@ -46,6 +46,13 @@ func runHeadless(_ args: [String]) -> Never {
     let tProcess = Date().timeIntervalSince(t0)
     service.engine.reclusterNow()
     service.engine.waitUntilIdle()
+    if args.contains("--extras") {
+        // Run the idle-time extras (score upgrades, burst fingerprints, bursts) to completion.
+        let t1 = Date()
+        while !service.maintain() { Thread.sleep(forTimeInterval: 0.5) }
+        print(String(format: "extras done in %.1f s; %d photos in bursts", Date().timeIntervalSince(t1),
+                     count("SELECT COUNT(*) FROM media WHERE burstId IS NOT NULL")))
+    }
     let rows = try! service.store.db.read { db in
         try Row.fetchAll(db, sql: """
             SELECT p.name, COUNT(f.id) AS faces, COUNT(DISTINCT f.mediaId) AS media FROM person p

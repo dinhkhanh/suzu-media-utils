@@ -43,6 +43,10 @@ public struct MediaRecord: Codable, FetchableRecord, MutablePersistableRecord, I
     public var width: Int?
     public var height: Int?
     public var duration: Double?
+    public var takenAt: Double?
+    public var featurePrint: Data?
+    public var burstId: Int64?
+    public var analysisVersion: Int = BestShot.analysisVersion
 
     public init(sourceId: Int64?, path: String, kind: MediaKind, size: Int64, mtime: Double, contentKey: String?) {
         self.sourceId = sourceId; self.path = path; self.kind = kind; self.size = size; self.mtime = mtime
@@ -77,6 +81,11 @@ public struct FaceRecord: Codable, FetchableRecord, MutablePersistableRecord, Id
     public var assignment: Assignment
     /// The person the user said this is not; never auto-assigned back.
     public var rejectedPersonId: Int64?
+    public var eyesOpen: Double?
+    public var smile: Double?
+    public var sharpness: Double?
+    public var yaw: Double?
+    public var score: Double?
 
     public mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
 
@@ -88,6 +97,7 @@ public struct PersonRecord: Codable, FetchableRecord, MutablePersistableRecord, 
     public var id: Int64?
     public var name: String?
     public var createdAt: Date
+    public var coverFaceId: Int64?
 
     public init(name: String? = nil) { self.name = name; createdAt = Date() }
     public mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
