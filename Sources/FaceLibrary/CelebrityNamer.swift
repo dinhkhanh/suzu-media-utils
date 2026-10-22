@@ -60,11 +60,12 @@ public final class CelebrityNamer: @unchecked Sendable {
     }
 
     /// Unnamed people, largest first, and how many paid lookups naming them would take.
-    public func plan(minFaces: Int = 3) throws -> (personIds: [Int64], newLookups: Int) {
+    public func plan(minFaces: Int = 3, project: Int64? = nil) throws -> (personIds: [Int64], newLookups: Int) {
         let pids = try store.db.read { db in
             try Int64.fetchAll(db, sql: """
                 SELECT p.id FROM person p JOIN face f ON f.personId = p.id
-                WHERE p.name IS NULL GROUP BY p.id HAVING COUNT(*) >= ? ORDER BY COUNT(*) DESC
+                JOIN media m ON m.id = f.mediaId LEFT JOIN source s ON s.id = m.sourceId
+                WHERE p.name IS NULL AND \(ProjectScope.sql(project)) GROUP BY p.id HAVING COUNT(*) >= ? ORDER BY COUNT(*) DESC
                 """, arguments: [minFaces])
         }
         let cands = try candidates(personIds: pids)

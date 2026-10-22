@@ -28,13 +28,14 @@ public struct VideoExport: Sendable {
     public init(store: LibraryStore) { self.store = store }
 
     /// Every on-screen appearance of a person across their videos, in time order per file.
-    public func appearances(personId: Int64) throws -> [Appearance] {
+    public func appearances(personId: Int64, project: Int64? = nil) throws -> [Appearance] {
         let rows = try store.db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT m.id, m.path, COALESCE(m.duration, 0) AS duration, f.time, COALESCE(f.score, f.quality, 0) AS s,
                        f.x, f.y, f.w, f.h
-                FROM face f JOIN media m ON m.id = f.mediaId
+                FROM face f JOIN media m ON m.id = f.mediaId LEFT JOIN source s ON s.id = m.sourceId
                 WHERE f.personId = ? AND m.kind = 'video' AND f.time IS NOT NULL AND m.duplicateOf IS NULL
+                  AND \(ProjectScope.sql(project))
                 ORDER BY m.path, f.time
                 """, arguments: [personId])
         }
@@ -65,9 +66,9 @@ public struct VideoExport: Sendable {
     }
 
     /// Writes into `folder`; returns the files created.
-    public func export(personId: Int64, name: String, kind: Kind, to folder: URL,
+    public func export(personId: Int64, name: String, kind: Kind, project: Int64? = nil, to folder: URL,
                        progress: @escaping @Sendable (Int, Int) -> Void = { _, _ in }) async throws -> [URL] {
-        let apps = try appearances(personId: personId)
+        let apps = try appearances(personId: personId, project: project)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let safe = Exporter.folderName(name)
         var out: [URL] = []

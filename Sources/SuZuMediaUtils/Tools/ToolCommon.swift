@@ -109,18 +109,21 @@ struct ToolInputView: View {
         }
         .onChange(of: files) { if mode == 0 { items = files.map { ToolItem(url: $0) } } }
         .onChange(of: mode) { mode == 0 ? (items = files.map { ToolItem(url: $0) }) : resolve() }
-        .task(id: "\(chosen.sorted())|\(topN ?? 0)|\(bestOfBurst)") { if mode == 1 { resolve() } }
+        .task(id: "\(chosen.sorted())|\(topN ?? 0)|\(bestOfBurst)|\(faces.currentProject ?? 0)") { if mode == 1 { resolve() } }
+        // People of another project aren't in this one.
+        .onChange(of: faces.currentProject) { chosen = [] }
     }
 
     var peoplePicker: some View {
         VStack(alignment: .leading, spacing: 6) {
+            TextField("Search people", text: $search).textFieldStyle(.roundedBorder)
             HStack {
-                TextField("Search people", text: $search).textFieldStyle(.roundedBorder).frame(maxWidth: 220)
                 Button("All") { chosen = Set(faces.people.filter { $0.name != nil }.map(\.id)) }
                 Button("None") { chosen = [] }
                 Spacer()
-                Text(resolving ? "Finding files…" : "\(chosen.count) people · \(items.count) \(label)").foregroundStyle(.secondary)
+                Text(resolving ? "Finding files…" : "\(chosen.count) people · \(items.count) \(label)").foregroundStyle(.secondary).lineLimit(1)
             }
+            .controlSize(.small)
             if faces.people.allSatisfy({ $0.name == nil }) {
                 Text("Name people in Face Grouping first.").foregroundStyle(.secondary)
             }
@@ -151,10 +154,10 @@ struct ToolInputView: View {
 
     func resolve() {
         guard let store = faces.store else { return }
-        let ids = Array(chosen), kind = mediaKind, topN = topN, burst = bestOfBurst
+        let ids = Array(chosen), kind = mediaKind, topN = topN, burst = bestOfBurst, project = faces.currentProject
         resolving = true
         Task.detached(priority: .userInitiated) {
-            let files = (try? Selection.files(store, personIds: ids, kind: kind, topN: topN, bestOfBurst: burst)) ?? []
+            let files = (try? Selection.files(store, personIds: ids, kind: kind, topN: topN, bestOfBurst: burst, project: project)) ?? []
             let items = files.map { ToolItem(url: $0.url, personName: $0.personName, people: $0.people, takenAt: $0.takenAt, focus: $0.focus) }
             await MainActor.run { self.items = items; resolving = false }
         }
@@ -170,12 +173,13 @@ struct FileInputList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            FlowLayout(spacing: 8) {
                 Button("Add Files or Folders…") { pick() }
                 if !files.isEmpty { Button("Clear") { files = [] } }
-                if scanning { ProgressView().controlSize(.small) }
-                Text(scanning ? "Looking for \(label)…" : files.isEmpty ? "or drop \(label) here" : "\(files.count) \(label)").foregroundStyle(.secondary)
-                Spacer()
+                HStack(spacing: 6) {
+                    if scanning { ProgressView().controlSize(.small) }
+                    Text(scanning ? "Looking for \(label)…" : files.isEmpty ? "or drop \(label) here" : "\(files.count) \(label)").foregroundStyle(.secondary)
+                }
             }
             if !files.isEmpty {
                 // Long lists only show their start: thousands of rows would make every redraw slow.

@@ -257,3 +257,22 @@ and after every feature below; same 92 people.
 - Web gallery: static export (11 s for 3 people/150 photos) and LAN server (token URL, Bonjour, Range streaming,
   chunked downloads, rename by POST).
 - Tools: Batch Export, Batch Rename (updates library paths), Copy Verifier (+repair), Video Tools.
+
+## v0.4.2 (2026-10-22): freezes
+- Search froze: video thumbnails called a synchronous frame grab that waited on a Swift Task from inside the
+  cooperative pool; with enough videos on screen every pool thread waited and nothing else (search, person pages,
+  video ingest) could run. Synchronous video helpers now use AVFoundation callbacks; thumbnails are async, 4 at a
+  time. A task-executor wrapper was tried first and still deadlocked (continuations resume through the pool).
+- Person search: 24.6 s → 0.08 s on a library where one person has 12,778 faces; SQLite used the person index for the
+  per-file best-face subquery (`+bf.personId` keeps it on the media index). Smart albums hit the same query.
+
+## v0.5 (2026-10-22): projects, watermark presets, edit layout
+- Projects (table `project`, `source.projectId`; `smartAlbum`/`deliveryRule.projectId`, nil = all). Existing folders
+  became "First Project". Every query takes a project scope (`ProjectScope.sql`); ingest is unchanged.
+- People stay global. New groups are clustered per project (newest faces first, pool capped per project), then
+  leftovers are matched against every person, so the same artist at two events is one person and a name given once
+  carries over. This also fixed a latent loop: a capped pool that formed no groups was reclustered forever.
+- A folder can be in one project only; nested/overlapping folders are refused (their files would be listed twice).
+- Watermarks: presets (logo or text with shadow) in Settings; each screen keeps its own copy and remembers its edits.
+- Edit layout: large preview (1600 px decode cache, before/after, output size, click-to-place watermark), film strip
+  of 96 pt thumbnails, inspector with crop shapes and a 3×3 alignment grid.

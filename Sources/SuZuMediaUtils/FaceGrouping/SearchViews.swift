@@ -109,6 +109,8 @@ struct SearchView: View {
 
     var currentQuery: MediaQuery {
         var q = query
+        // An album searches its own project; otherwise the open one.
+        q.project = album?.projectId ?? model.currentProject
         q.from = useDates ? Calendar.current.startOfDay(for: from) : nil
         q.to = useDates ? Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: to) : nil
         return q
@@ -174,7 +176,7 @@ struct SearchView: View {
             .fixedSize()
             Picker("", selection: $query.sourceId) {
                 Text("All folders").tag(Int64?.none)
-                ForEach(model.sources.filter { $0.kind == .media }) { Text($0.name).tag(Int64?.some($0.id)) }
+                ForEach(model.projectSources) { Text($0.name).tag(Int64?.some($0.id)) }
             }
             .fixedSize()
             HStack(spacing: 6) {
@@ -198,17 +200,20 @@ struct DeliveryRulesView: View {
     @EnvironmentObject var model: FaceGroupingModel
     @State private var adding = false
 
+    /// Rules of the open project and rules for every project.
+    var rules: [DeliveryRule] { model.rules.filter { model.currentProject == nil || $0.projectId == nil || $0.projectId == model.currentProject } }
+
     var body: some View {
         List {
-            if model.rules.isEmpty {
+            if rules.isEmpty {
                 ContentUnavailableView("No delivery rules", systemImage: "paperplane",
                                        description: Text("Send new photos of a person to a folder — a Google Drive or Dropbox folder, a NAS share — and get notified, automatically as they arrive."))
             }
-            ForEach(model.rules) { rule in
+            ForEach(rules) { rule in
                 HStack {
                     Toggle("", isOn: Binding(get: { rule.enabled }, set: { model.setRule(rule, enabled: $0) })).labelsHidden()
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(rule.personId.flatMap { id in model.people.first { $0.id == id }?.displayName } ?? "Everyone with a name")
+                        Text(rule.personId.flatMap { id in model.knownPeople.first { $0.id == id }?.displayName } ?? "Everyone with a name")
                             .font(.headline)
                         Text(describe(rule)).font(.caption).foregroundStyle(.secondary)
                     }
@@ -224,7 +229,7 @@ struct DeliveryRulesView: View {
     }
 
     func describe(_ r: DeliveryRule) -> String {
-        var parts: [String] = []
+        var parts: [String] = [r.projectId.flatMap { id in model.projects.first { $0.id == id }?.name } ?? "All projects"]
         if let f = r.folder { parts.append("Copy to \(f)/<Name>/") } else { parts.append("Notify only") }
         if let e = r.editRecipe {
             var edits: [String] = []
@@ -252,14 +257,21 @@ struct NewRuleSheet: View {
     @State private var recipe = EditRecipe()
     @State private var writeNames = true
     @State private var includeExisting = false
+    @State private var allProjects = false
+    @State private var samples: [ToolItem] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("New Delivery Rule").font(.title2.bold())
             Picker("When new photos of", selection: $personId) {
                 Text("anyone with a name").tag(Int64?.none)
-                ForEach(model.people.filter { $0.name != nil }) { Text($0.displayName).tag(Int64?.some($0.id)) }
+                ForEach(model.knownPeople) { Text($0.displayName).tag(Int64?.some($0.id)) }
             }
+            Picker("arrive in", selection: $allProjects) {
+                Text(model.currentProject == nil ? "Any project" : "This project (\(model.projectName))").tag(false)
+                Text("Any project, now and later").tag(true)
+            }
+            .disabled(model.currentProject == nil)
             Toggle("Copy them into a folder per person", isOn: $copy)
             if copy {
                 HStack {
@@ -271,7 +283,7 @@ struct NewRuleSheet: View {
                 Text("Tip: choose a folder inside Google Drive or Dropbox to share automatically.").font(.caption).foregroundStyle(.secondary).padding(.leading, 20)
                 Toggle("Write names into the files", isOn: $writeNames).padding(.leading, 20)
                 Toggle("Edit photos (auto tone, crop, watermark, resize)", isOn: $edit).padding(.leading, 20)
-                if edit { EditOptionsView(recipe: $recipe, previewSource: nil, previewFocus: nil).padding(.leading, 40) }
+                if edit { EditOptionsView(recipe: $recipe, samples: samples, remember: "deliveryRule") }
             }
             Toggle("Also handle files already in the library", isOn: $includeExisting)
             Text("You'll get a notification on this Mac each time new files arrive.").font(.caption).foregroundStyle(.secondary)
@@ -280,7 +292,8 @@ struct NewRuleSheet: View {
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Add Rule") {
                     model.addRule(DeliveryRule(personId: personId, folder: copy ? folder?.path : nil, recipe: copy && edit ? recipe : nil,
-                                               writeNames: writeNames), includeExisting: includeExisting)
+                                               writeNames: writeNames, projectId: allProjects ? nil : model.currentProject),
+                                  includeExisting: includeExisting)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -288,8 +301,9 @@ struct NewRuleSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 560)
+        .frame(width: copy && edit ? 960 : 560)
         .onAppear { personId = presetPerson; copy = !notifyOnly }
+        .task(id: personId) { samples = await model.samples(personId: personId) }
     }
 
     func chooseFolder() {

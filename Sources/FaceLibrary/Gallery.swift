@@ -8,6 +8,8 @@ import Network
 /// People and their files for the gallery (best shots first).
 struct GalleryData {
     let store: LibraryStore
+    /// Only this project's files (nil = every project).
+    var project: Int64?
 
     struct Person { var id: Int64; var name: String; var photos: Int; var videos: Int; var cover: Int64? }
     struct File { var mediaId: Int64; var path: String; var isVideo: Bool; var faceId: Int64; var time: Double?; var score: Double; var burstId: Int64?; var box: CGRect }
@@ -19,9 +21,9 @@ struct GalleryData {
                   COUNT(DISTINCT CASE WHEN m.kind = 'photo' THEN m.id END) AS photos,
                   COUNT(DISTINCT CASE WHEN m.kind = 'video' THEN m.id END) AS videos,
                   COALESCE((SELECT c.id FROM face c WHERE c.id = p.coverFaceId AND c.personId = p.id),
-                           (SELECT f.id FROM face f WHERE f.personId = p.id ORDER BY \(BestShot.coverOrderSQL) DESC LIMIT 1)) AS cover
+                           \(BestShot.coverSubquery(project: project))) AS cover
                 FROM person p JOIN face f ON f.personId = p.id JOIN media m ON m.id = f.mediaId LEFT JOIN source s ON s.id = m.sourceId
-                WHERE p.name IS NOT NULL AND COALESCE(s.kind, 'media') = 'media' AND m.duplicateOf IS NULL
+                WHERE p.name IS NOT NULL AND \(ProjectScope.sql(project)) AND m.duplicateOf IS NULL
                   \(ids.map { "AND p.id IN (\($0.map(String.init).joined(separator: ",")))" } ?? "")
                 GROUP BY p.id ORDER BY p.name COLLATE NOCASE
                 """).map { Person(id: $0["id"], name: $0["name"], photos: $0["photos"], videos: $0["videos"], cover: $0["cover"]) }
@@ -33,7 +35,7 @@ struct GalleryData {
             try Row.fetchAll(db, sql: """
                 SELECT m.id, m.path, m.kind, m.burstId, f.id AS faceId, f.time, f.x, f.y, f.w, f.h, COALESCE(f.score, f.quality * 0.6, 0) AS s
                 FROM face f JOIN media m ON m.id = f.mediaId LEFT JOIN source s ON s.id = m.sourceId
-                WHERE f.personId = ? AND m.duplicateOf IS NULL AND COALESCE(s.kind, 'media') = 'media'
+                WHERE f.personId = ? AND m.duplicateOf IS NULL AND \(ProjectScope.sql(project))
                 ORDER BY s DESC
                 """, arguments: [personId]).map {
                 File(mediaId: $0["id"], path: $0["path"], isVideo: ($0["kind"] as String) == "video", faceId: $0["faceId"], time: $0["time"],
@@ -68,9 +70,9 @@ public struct GalleryExporter: Sendable {
     }
 
     /// Returns the index.html it wrote.
-    public func export(title: String, personIds: [Int64]?, options: Options, to folder: URL,
+    public func export(title: String, personIds: [Int64]?, project: Int64? = nil, options: Options, to folder: URL,
                        progress: @escaping @Sendable (Int, Int) -> Void = { _, _ in }) throws -> URL {
-        let data = GalleryData(store: store)
+        let data = GalleryData(store: store, project: project)
         let people = try data.people(personIds)
         let fm = FileManager.default
         try fm.createDirectory(at: folder.appendingPathComponent("faces"), withIntermediateDirectories: true)
@@ -123,6 +125,11 @@ public final class GalleryServer: @unchecked Sendable {
     let queue = DispatchQueue(label: "gallery-server", qos: .utility, attributes: .concurrent)
     let thumbCache = NSCache<NSString, NSData>()
     public private(set) var port: UInt16 = 0
+    let lock = NSLock()
+    var scope: (project: Int64?, title: String) = (nil, "SuZu Media")
+
+    /// What the gallery shows: one project (follows the project open in the app) or everything.
+    public func show(project: Int64?, title: String) { lock.withLock { scope = (project, title) } }
 
     public init(store: LibraryStore, token: String, rename: @escaping (Int64, String) throws -> Void) {
         self.store = store
@@ -196,14 +203,15 @@ public final class GalleryServer: @unchecked Sendable {
         let parts = r.path.split(separator: "/").map(String.init)
         guard parts.first == token else { send(c, status: "404 Not Found", type: "text/plain", body: Data("Not found".utf8)); return }
         let route = Array(parts.dropFirst())
-        let data = GalleryData(store: store)
+        let (project, title) = lock.withLock { scope }
+        let data = GalleryData(store: store, project: project)
         do {
             switch (r.method, route.first, route.count) {
             case ("GET", nil, _):
                 let cards = try data.people().map {
                     GalleryHTML.PersonCard(name: $0.name, photos: $0.photos, videos: $0.videos, cover: "face/\($0.cover ?? 0).jpg", link: "person/\($0.id)")
                 }
-                send(c, type: "text/html; charset=utf-8", body: Data(GalleryHTML.people("SuZu Media", cards).utf8))
+                send(c, type: "text/html; charset=utf-8", body: Data(GalleryHTML.people(title, cards).utf8))
             case ("GET", "person", 2):
                 guard let pid = Int64(route[1]), let p = try data.people([pid]).first else { throw CocoaError(.fileNoSuchFile) }
                 let files = try data.files(personId: pid, topN: r.query["all"] == nil ? 300 : nil, bestOfBurst: true)

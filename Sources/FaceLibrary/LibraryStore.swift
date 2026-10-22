@@ -142,7 +142,43 @@ public final class LibraryStore: @unchecked Sendable {
                 t.primaryKey(["ruleId", "mediaId", "personId"])
             }
         }
+        m.registerMigration("v5-projects") { db in
+            // A project is one event: a set of folders. People (and their names) are shared by every project.
+            try db.create(table: "project") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("name", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.alter(table: "source") { t in
+                t.add(column: "projectId", .integer).references("project", onDelete: .setNull)  // nil for known-people folders
+            }
+            try db.create(index: "source_projectId", on: "source", columns: ["projectId"])
+            try db.alter(table: "smartAlbum") { t in t.add(column: "projectId", .integer).references("project", onDelete: .cascade) }
+            /// nil = the rule covers every project.
+            try db.alter(table: "deliveryRule") { t in t.add(column: "projectId", .integer).references("project", onDelete: .cascade) }
+            // Folders added before projects existed become the first project; existing delivery rules keep covering
+            // everything.
+            let folders = try String.fetchAll(db, sql: "SELECT path FROM source WHERE kind = 'media' ORDER BY id")
+            if !folders.isEmpty {
+                let name = folders.count == 1 ? (folders[0] as NSString).lastPathComponent : "First Project"
+                try db.execute(sql: "INSERT INTO project (name, createdAt) VALUES (?, ?)", arguments: [name, Date()])
+                let pid = db.lastInsertedRowID
+                try db.execute(sql: "UPDATE source SET projectId = ? WHERE kind = 'media'", arguments: [pid])
+                try db.execute(sql: "UPDATE smartAlbum SET projectId = ?", arguments: [pid])
+            }
+        }
         return m
+    }
+}
+
+/// Which files a view covers: one project's photo & video folders, or every project's (nil). Known-people folders
+/// never count as event files.
+public enum ProjectScope {
+    /// SQL condition on a joined `source` row (alias `s` by default). Media without a source count only for "all".
+    public static func sql(_ project: Int64?, source s: String = "s") -> String {
+        let media = "COALESCE(\(s).kind, 'media') = 'media'"
+        guard let project else { return media }
+        return "\(media) AND \(s).projectId = \(project)"
     }
 }
 

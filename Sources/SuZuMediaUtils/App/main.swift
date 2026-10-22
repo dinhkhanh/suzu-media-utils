@@ -16,7 +16,7 @@ func locateModel() -> URL? {
     return nil
 }
 
-/// `SuZuMediaUtils --headless <folder> [--library <dir>] [--reference <folder>]`: runs the full pipeline without UI
+/// `SuZuMediaUtils --headless <folder> [--library <dir>] [--project <name>] [--reference <folder>]`: runs the full pipeline without UI
 /// and prints the people found. Used for testing and timing.
 func runHeadless(_ args: [String]) -> Never {
     setvbuf(stdout, nil, _IOLBF, 0)  // progress lines show up immediately when piped
@@ -42,6 +42,14 @@ func runHeadless(_ args: [String]) -> Never {
         var q = MediaQuery(); q.people = Array(people.prefix(3).map(\.id)); q.match = .any
         time("search 3 people") { try q.run(service.store).count }
         time("search everything") { try MediaQuery().run(service.store).count }
+        // What the sidebar and People view re-read after changes, per project and for all projects.
+        let firstProject = try! service.store.db.read { db in try Int64.fetchOne(db, sql: "SELECT id FROM project ORDER BY id LIMIT 1") }
+        for p in [firstProject, nil] {
+            time("people (project \(p.map(String.init) ?? "all"))") { try service.store.db.read { db in try FaceGroupingModel.fetchPeople(db, project: p).count } }
+            time("stats (project \(p.map(String.init) ?? "all"))") { try service.store.db.read { db in _ = try FaceGroupingModel.fetchStats(db, project: p); return 1 } }
+        }
+        time("projects") { try service.store.db.read { db in try FaceGroupingModel.fetchProjects(db).count } }
+        time("known people") { try service.store.db.read { db in try FaceGroupingModel.fetchKnownPeople(db).count } }
         // The person with the most faces is the slow case for per-person queries.
         if let top = try! service.store.db.read({ db in
             try Int64.fetchOne(db, sql: "SELECT personId FROM face WHERE personId IS NOT NULL GROUP BY personId ORDER BY COUNT(*) DESC LIMIT 1")
@@ -61,7 +69,13 @@ func runHeadless(_ args: [String]) -> Never {
     if let ref = value("--reference"), !existing.contains(canonicalPath(URL(fileURLWithPath: ref))) {
         try! service.addSource(URL(fileURLWithPath: ref), kind: .reference)
     }
-    if !existing.contains(canonicalPath(folder)) { try! service.addSource(folder) }
+    if !existing.contains(canonicalPath(folder)) {
+        // --project <name>: put the folder in that project (created if needed); default "Headless".
+        let name = value("--project") ?? "Headless"
+        let pid = try! service.store.db.read { db in try Int64.fetchOne(db, sql: "SELECT id FROM project WHERE name = ?", arguments: [name]) }
+            ?? service.createProject(name).id!
+        try! service.addSource(folder, project: pid)
+    }
     service.start()
 
     func count(_ sql: String) -> Int { (try? service.store.db.read { db in try Int.fetchOne(db, sql: sql) }) ?? 0 }

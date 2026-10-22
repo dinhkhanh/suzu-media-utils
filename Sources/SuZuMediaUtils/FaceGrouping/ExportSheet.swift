@@ -58,8 +58,8 @@ struct ExportSheet: View {
         }
         .padding(20)
         }
-        .frame(maxHeight: 780)
-        .frame(width: 620)
+        .frame(maxHeight: 860)
+        .frame(width: editPhotos ? 960 : 620)
         .onAppear { chosen = Set(named.map(\.id)) }
         .task(id: "\(name)|\(base?.path ?? "")|\(chosen.sorted())|\(editPhotos)|\(recipe.hashValue)|\(writeNames)|\(topN ?? 0)|\(bestOfBurst)") { await replan() }
     }
@@ -114,6 +114,7 @@ struct ExportSheet: View {
         o.writeNames = writeNames
         o.topN = topN
         o.bestOfBurst = bestOfBurst
+        o.project = model.currentProject
         return o
     }
 
@@ -136,14 +137,19 @@ struct ExportSheet: View {
             Toggle("Edit photos: auto tone, social crop, watermark, resize", isOn: $editPhotos.animation())
                 .toggleStyle(.checkbox)
             if editPhotos {
-                EditOptionsView(recipe: $recipe, previewSource: plan?.items.first { !["mp4", "mov", "m4v"].contains($0.from.pathExtension.lowercased()) }?.from,
-                                previewFocus: plan?.items.first?.focus)
-                    .padding(.leading, 20)
+                EditOptionsView(recipe: $recipe, samples: previewSamples, remember: "export")
                 if mode == .move {
                     Text("Edited versions are saved as new JPEGs; originals stay where they are.").font(.caption).foregroundStyle(.orange)
                 }
             }
         }
+    }
+
+    /// The plan's photos (who's in them and where) to preview the edit on.
+    var previewSamples: [ToolItem] {
+        let items: [Exporter.Item] = plan?.items ?? []
+        return items.filter { !MediaTypes.videos.contains($0.from.pathExtension.lowercased()) }.prefix(200)
+            .map { ToolItem(url: $0.from, personName: $0.personName, people: $0.people, focus: $0.focus) }
     }
 
     var peopleList: some View {

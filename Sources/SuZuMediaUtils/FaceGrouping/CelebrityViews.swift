@@ -120,7 +120,8 @@ struct CelebritySheet: View {
         .frame(width: 560)
         .task {
             guard let namer else { return }
-            plan = try? namer.plan()
+            let project = model.currentProject
+            plan = await Task.detached { try? namer.plan(project: project) }.value
         }
     }
 

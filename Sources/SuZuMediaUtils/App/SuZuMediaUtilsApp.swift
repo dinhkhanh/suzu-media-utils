@@ -13,6 +13,14 @@ struct SuZuMediaUtilsApp: App {
         }
         .commands {
             CommandGroup(replacing: .newItem) {
+                Button("New Project…") { faces.askNewProject = true }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                Menu("Open Project") {
+                    ForEach(faces.projects) { p in Button(p.name) { faces.currentProject = p.id } }
+                    Divider()
+                    Button("All Projects") { faces.currentProject = nil }
+                }
+                Divider()
                 Button("Add Photo & Video Folder…") { faces.addFolder(kind: .media) }
                     .keyboardShortcut("o")
                 Button("Add Known-People Folder…") { faces.addFolder(kind: .reference) }
@@ -22,8 +30,8 @@ struct SuZuMediaUtilsApp: App {
             TabView {
                 FaceGroupingSettings()
                     .tabItem { Label("Face Grouping", systemImage: "person.2.crop.square.stack") }
-                EditingSettings()
-                    .tabItem { Label("Editing", systemImage: "wand.and.stars") }
+                WatermarkSettings()
+                    .tabItem { Label("Watermarks", systemImage: "seal") }
                 SharingSettings()
                     .tabItem { Label("Sharing", systemImage: "network") }
             }

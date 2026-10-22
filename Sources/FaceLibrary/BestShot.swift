@@ -42,6 +42,18 @@ public enum BestShot {
           * (CASE WHEN f.sharpness IS NULL OR f.sharpness >= 120 THEN 1.0 ELSE 0.6 END)
           * (CASE WHEN f.time IS NULL THEN 1.0 ELSE 0.85 END)
         """
+
+    /// Subquery for the automatic picture of person `p.id`: their best face, from this project's files when a
+    /// project is given (a person recognised in a later event shows a face from that event).
+    public static func coverSubquery(project: Int64?) -> String {
+        guard project != nil else {
+            return "(SELECT f.id FROM face f WHERE f.personId = p.id ORDER BY \(coverOrderSQL) DESC LIMIT 1)"
+        }
+        return """
+            (SELECT f.id FROM face f JOIN media cm ON cm.id = f.mediaId LEFT JOIN source cs ON cs.id = cm.sourceId
+             WHERE f.personId = p.id AND \(ProjectScope.sql(project, source: "cs")) ORDER BY \(coverOrderSQL) DESC LIMIT 1)
+            """
+    }
 }
 
 /// Splits a timeline into shooting sessions wherever there is a long gap (opening, matches, awards…).

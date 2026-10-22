@@ -37,7 +37,9 @@ struct GalleryExportSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var title = "SuZu Media"
     @State private var options = GalleryExporter.Options()
-    @State private var watermark = false
+    /// Look and watermark for the gallery's photos (size and quality are the gallery's own).
+    @State private var look = EditRecipe()
+    @State private var samples: [ToolItem] = []
     @State private var folder: URL?
     @State private var running = false
     @State private var progress = (0, 0)
@@ -64,8 +66,7 @@ struct GalleryExportSheet: View {
                 .fixedSize()
                 Toggle("Skip similar shots (best of each burst)", isOn: $options.bestOfBurst)
                 Toggle("Include videos (copied as they are)", isOn: $options.includeVideos)
-                Toggle("Watermark photos with the logo", isOn: $watermark).disabled(EditSettings.watermark == nil)
-                Toggle("Auto tone", isOn: $options.recipe.autoTone)
+                EditOptionsView(recipe: $look, samples: samples, sections: [.tone, .watermark], remember: "gallery")
                 HStack {
                     Text("Save to: \(destination.path)").font(.caption).lineLimit(1).truncationMode(.middle)
                     Spacer()
@@ -81,7 +82,11 @@ struct GalleryExportSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 540)
+        .frame(width: 900)
+        .task {
+            if title == "SuZu Media", model.currentProject != nil { title = model.projectName }
+            samples = await model.samples()
+        }
     }
 
     var destination: URL {
@@ -96,13 +101,14 @@ struct GalleryExportSheet: View {
     func run() {
         guard let store = model.store else { return }
         var opts = options
-        opts.recipe.watermark = watermark ? EditSettings.watermark : nil
-        opts.recipe.autoToneStrength = EditSettings.autoToneStrength
+        opts.recipe.autoTone = look.autoTone
+        opts.recipe.autoToneStrength = look.autoToneStrength
+        opts.recipe.watermark = look.watermark
         running = true
-        let dest = destination, title = title
+        let dest = destination, title = title, project = model.currentProject
         Task.detached {
             do {
-                let index = try GalleryExporter(store: store).export(title: title, personIds: nil, options: opts, to: dest) { d, t in
+                let index = try GalleryExporter(store: store).export(title: title, personIds: nil, project: project, options: opts, to: dest) { d, t in
                     Task { @MainActor in progress = (d, t) }
                 }
                 await MainActor.run { result = index; running = false }

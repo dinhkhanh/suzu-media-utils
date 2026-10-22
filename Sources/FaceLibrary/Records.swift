@@ -15,10 +15,26 @@ public struct SourceRecord: Codable, FetchableRecord, MutablePersistableRecord, 
     public var path: String
     public var kind: SourceKind
     public var addedAt: Date
+    /// The event this folder belongs to; nil for known-people folders, which every project shares.
+    public var projectId: Int64?
 
-    public init(path: String, kind: SourceKind = .media) { self.path = path; self.kind = kind; addedAt = Date() }
+    public init(path: String, kind: SourceKind = .media, projectId: Int64? = nil) {
+        self.path = path; self.kind = kind; addedAt = Date(); self.projectId = projectId
+    }
     public mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
     public var url: URL { URL(fileURLWithPath: path, isDirectory: true) }
+}
+
+/// One event (a wedding, a show, a match): a set of folders. People are shared across projects, so a name given in
+/// one project is recognised in every later one.
+public struct ProjectRecord: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Hashable, Sendable {
+    public static let databaseTableName = "project"
+    public var id: Int64?
+    public var name: String
+    public var createdAt: Date
+
+    public init(name: String) { self.name = name; createdAt = Date() }
+    public mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
 }
 
 public enum MediaKind: String, Codable, Sendable { case photo, video }

@@ -19,6 +19,8 @@ public struct MediaQuery: Codable, Hashable, Sendable {
     public var collapseBursts = false
     /// Solo = exactly one clear face; group = two or more.
     public var crowd = Crowd.any
+    /// Only this project's files (nil = every project).
+    public var project: Int64?
 
     public init() {}
 }
@@ -37,7 +39,7 @@ public struct MediaHit: Identifiable, Hashable, Sendable {
 
 extension MediaQuery {
     public func run(_ store: LibraryStore, limit: Int = 5000) throws -> [MediaHit] {
-        var conds = ["m.duplicateOf IS NULL", "m.status = 'done'", "COALESCE(s.kind, 'media') = 'media'"]
+        var conds = ["m.duplicateOf IS NULL", "m.status = 'done'", ProjectScope.sql(project)]
         var args: [DatabaseValueConvertible?] = []
         if let kind { conds.append("m.kind = ?"); args.append(kind.rawValue) }
         if let from { conds.append("m.takenAt >= ?"); args.append(from.timeIntervalSince1970) }
@@ -90,9 +92,11 @@ public struct SmartAlbum: Codable, FetchableRecord, MutablePersistableRecord, Id
     public var name: String
     public var query: String  // JSON MediaQuery
     public var createdAt: Date
+    public var projectId: Int64?
 
     public init(name: String, query: MediaQuery) {
         self.name = name
+        projectId = query.project
         self.query = String(decoding: (try? JSONEncoder().encode(query)) ?? Data(), as: UTF8.self)
         createdAt = Date()
     }

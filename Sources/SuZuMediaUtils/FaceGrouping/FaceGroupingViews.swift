@@ -50,6 +50,9 @@ struct FaceGroupingDetail: View {
 struct FaceGroupingSidebar: View {
     @EnvironmentObject var model: FaceGroupingModel
 
+    /// The open project's albums (all of them in "All Projects").
+    var albums: [SmartAlbum] { model.albums.filter { model.currentProject == nil || $0.projectId == model.currentProject } }
+
     var body: some View {
         Section("Face Grouping") {
             Label("People", systemImage: "person.2")
@@ -64,17 +67,21 @@ struct FaceGroupingSidebar: View {
                 .badge(model.rules.filter(\.enabled).count)
                 .tag(AppRoute.faces(.rules))
         }
-        if !model.albums.isEmpty {
+        if !albums.isEmpty {
             Section("Smart Albums") {
-                ForEach(model.albums) { a in
+                ForEach(albums) { a in
                     Label(a.name, systemImage: "rectangle.stack.badge.person.crop")
                         .tag(AppRoute.faces(.album(a.id!)))
                         .contextMenu { Button("Delete Album", role: .destructive) { model.deleteAlbum(a.id!) } }
                 }
             }
         }
-        Section("Folders") {
-            ForEach(model.sources.filter { $0.kind == .media }) { SourceRow(source: $0).tag(AppRoute.faces(.source($0.id))) }
+        Section(model.currentProject == nil ? "Folders (all projects)" : "Folders") {
+            ForEach(model.projectSources) { SourceRow(source: $0).tag(AppRoute.faces(.source($0.id))) }
+            if model.projectSources.isEmpty && model.service != nil {
+                Button { model.addFolder(kind: .media) } label: { Label("Add Folder…", systemImage: "plus") }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+            }
         }
         if model.sources.contains(where: { $0.kind == .reference }) {
             Section("Known People") {
@@ -90,7 +97,9 @@ struct FaceGroupingSidebarToolbar: ToolbarContent {
     var body: some ToolbarContent {
         ToolbarItem {
             Menu {
-                Button("Add Photo & Video Folder…") { model.addFolder(kind: .media) }
+                Button("New Project…") { model.askNewProject = true }
+                Divider()
+                Button("Add Photo & Video Folder to Project…") { model.addFolder(kind: .media) }
                 Button("Add Known-People Folder…") { model.addFolder(kind: .reference) }
             } label: {
                 Label("Add Folder", systemImage: "folder.badge.plus")
@@ -108,6 +117,9 @@ struct SourceRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(source.name).lineLimit(1)
                 Text(status).font(.caption).foregroundStyle(.secondary)
+                if model.currentProject == nil, let p = model.projects.first(where: { $0.id == source.projectId }) {
+                    Text(p.name).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                }
             }
         } icon: {
             Image(systemName: !source.online ? "externaldrive.badge.xmark" : source.network ? "server.rack" : "folder")
@@ -115,6 +127,13 @@ struct SourceRow: View {
         .contextMenu {
             Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: source.path) }
             Button("Rescan") { model.rescan(source.id) }
+            if source.kind == .media && model.projects.count > 1 {
+                Menu("Move to Project") {
+                    ForEach(model.projects.filter { $0.id != source.projectId }) { p in
+                        Button(p.name) { model.moveSource(source.id, to: p.id) }
+                    }
+                }
+            }
             Divider()
             Button("Remove from Library", role: .destructive) { model.removeSource(source.id) }
         }
@@ -146,8 +165,10 @@ struct FaceGroupingStatus: View {
                 ProgressView(value: Double(model.stats.files - model.stats.pending), total: Double(max(1, model.stats.files)))
                 Text("Processing \(model.stats.pending) files" + (model.rate > 0.1 ? String(format: " · %.0f/s", model.rate) : ""))
                     .font(.caption).foregroundStyle(.secondary)
-            } else if model.sources.isEmpty {
-                Text("Add a folder to start.").font(.caption).foregroundStyle(.secondary)
+            } else if model.projects.isEmpty {
+                Text("Create a project to start.").font(.caption).foregroundStyle(.secondary)
+            } else if model.projectSources.isEmpty {
+                Text("Add this event's folders to start.").font(.caption).foregroundStyle(.secondary)
             } else {
                 Text("\(model.stats.files) files · up to date").font(.caption).foregroundStyle(.secondary)
             }

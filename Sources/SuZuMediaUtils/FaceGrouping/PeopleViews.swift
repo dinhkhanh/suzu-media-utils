@@ -50,6 +50,7 @@ struct PeopleGrid: View {
                             if selected.count > 1 && selected.contains(p.id) {
                                 Button("Merge \(selected.count) People") { model.merge(selected); selected = [] }
                             }
+                            ThisIsMenu(person: p)
                         }
                 }
             }
@@ -123,6 +124,7 @@ struct PersonCell: View {
                     .multilineTextAlignment(.center)
                     .font(.headline)
                     .focused(editing, equals: person.id)
+                    .knownNameSuggestions(for: name)
                     .onSubmit { onRename(name) }
                     .onExitCommand { name = person.name ?? ""; editing.wrappedValue = nil }
                     .onAppear { name = person.name ?? "" }
@@ -173,6 +175,7 @@ struct PersonDetail: View {
     @State private var session: Int?
     @State private var notifyRule = false
     @State private var videoExport = false
+    @State private var otherProjects: [String] = []
 
     var person: PersonSummary? { model.people.first { $0.id == personId } }
 
@@ -205,8 +208,10 @@ struct PersonDetail: View {
     func reload() async {
         async let m = model.media(of: personId, alsoWith: alsoWith)
         async let f = model.faces(of: personId)
-        let (newMedia, newFaces) = await (m, f)
+        async let o = model.otherProjects(of: personId)
+        let (newMedia, newFaces, others) = await (m, f, o)
         guard !Task.isCancelled else { return }
+        otherProjects = others
         media = newMedia
         faces = newFaces
         selectedFaces = selectedFaces.intersection(faces.map(\.id))
@@ -223,7 +228,14 @@ struct PersonDetail: View {
                 TextField("Add a name", text: $name)
                     .textFieldStyle(.plain)
                     .font(.title.bold())
+                    .knownNameSuggestions(for: name)
                     .onSubmit(commitName)
+                if !otherProjects.isEmpty {
+                    Label("Also in \(otherProjects.prefix(3).joined(separator: ", "))\(otherProjects.count > 3 ? " and \(otherProjects.count - 3) more" : "")",
+                          systemImage: "calendar.badge.checkmark")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .help("Recognised in these projects too: a name given here applies to all of them")
+                }
                 HStack(spacing: 12) {
                     if let p = person { Text(PersonCell(person: p, selected: false).counts).foregroundStyle(.secondary) }
                     filterMenu
@@ -450,7 +462,8 @@ struct MoveFacesMenu: View {
         Menu("Move to…") {
             Button("New Person…") { askName = true }
             Divider()
-            ForEach(model.people.filter { $0.name != nil && $0.id != excluding }) { p in
+            // Anyone named in any project.
+            ForEach(model.knownPeople.filter { $0.id != excluding }) { p in
                 Button(p.displayName) { model.assign(faces, to: p.id); done() }
             }
         }
@@ -490,6 +503,47 @@ struct UnassignedView: View {
         .task(id: model.stats.unassignedFaces) {
             faces = await model.faces(of: nil)
             selection = selection.intersection(faces.map(\.id))
+        }
+    }
+}
+
+/// "This Is ▸ <name>": the group is someone already named (in this or an earlier project); merges into them.
+struct ThisIsMenu: View {
+    @EnvironmentObject var model: FaceGroupingModel
+    let person: PersonSummary
+
+    var body: some View {
+        let others = model.knownPeople.filter { $0.id != person.id }
+        if !others.isEmpty {
+            Menu("This Is…") {
+                ForEach(others) { k in
+                    Button(k.displayName) { model.mergeInto(person.id, k.id) }
+                }
+            }
+        }
+    }
+}
+
+extension View {
+    /// While typing a name, suggests people already named in any project, so a name is given once and reused.
+    func knownNameSuggestions(for text: String) -> some View {
+        modifier(KnownNameSuggestions(text: text))
+    }
+}
+
+struct KnownNameSuggestions: ViewModifier {
+    @EnvironmentObject var model: FaceGroupingModel
+    let text: String
+
+    func body(content: Content) -> some View {
+        let typed = text.trimmingCharacters(in: .whitespaces)
+        let matches = typed.isEmpty ? [] : model.knownPeople.compactMap(\.name)
+            .filter { $0.localizedCaseInsensitiveContains(typed) && $0.compare(typed, options: .caseInsensitive) != .orderedSame }
+            .prefix(8)
+        content.textInputSuggestions {
+            ForEach(Array(matches), id: \.self) { name in
+                Text(name).textInputCompletion(name)
+            }
         }
     }
 }

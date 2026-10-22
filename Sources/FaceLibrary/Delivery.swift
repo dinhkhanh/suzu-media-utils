@@ -15,9 +15,12 @@ public struct DeliveryRule: Codable, FetchableRecord, MutablePersistableRecord, 
     public var writeNames = true
     public var enabled = true
     public var createdAt = Date()
+    /// Only files of this project; nil = every project.
+    public var projectId: Int64?
 
-    public init(personId: Int64?, folder: String?, recipe: EditRecipe?, writeNames: Bool) {
+    public init(personId: Int64?, folder: String?, recipe: EditRecipe?, writeNames: Bool, projectId: Int64? = nil) {
         self.personId = personId
+        self.projectId = projectId
         self.folder = folder
         self.recipe = recipe.flatMap { try? JSONEncoder().encode($0) }.map { String(decoding: $0, as: UTF8.self) }
         self.writeNames = writeNames
@@ -66,7 +69,7 @@ public struct DeliveryService: Sendable {
                 SELECT f.mediaId, f.personId, p.name FROM face f
                 JOIN person p ON p.id = f.personId JOIN media m ON m.id = f.mediaId LEFT JOIN source s ON s.id = m.sourceId
                 WHERE p.name IS NOT NULL AND (? IS NULL OR f.personId = ?) AND m.status = 'done' AND m.duplicateOf IS NULL
-                  AND COALESCE(s.kind, 'media') = 'media'
+                  AND \(ProjectScope.sql(rule.projectId))
                   AND NOT EXISTS (SELECT 1 FROM delivery d WHERE d.ruleId = ? AND d.mediaId = f.mediaId AND d.personId = f.personId)
                 GROUP BY f.mediaId, f.personId
                 ORDER BY f.mediaId

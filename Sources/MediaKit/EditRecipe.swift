@@ -70,16 +70,35 @@ public struct WatermarkSpec: Codable, Sendable, Equatable, Hashable {
         }
     }
 
+    public enum TextColor: String, Codable, Sendable, CaseIterable { case white, black }
+
     /// PNG (with transparency) or any image file.
     public var logoPath: String
     public var position: Position = .bottomRight
-    /// Logo width as a fraction of the shorter image side, so it looks the same in portrait and landscape.
+    /// Mark width as a fraction of the shorter image side, so it looks the same in portrait and landscape.
     public var size = 0.22
     public var opacity = 0.9
     /// Gap from the edges as a fraction of the shorter side.
     public var margin = 0.035
+    /// When not empty, the mark is this text (e.g. "© SuZu Media") instead of the logo.
+    public var text: String?
+    public var textColor: TextColor?
+    /// The saved preset this came from (for the editor; rendering ignores it).
+    public var presetId: String?
 
     public init(logoPath: String) { self.logoPath = logoPath }
+    public init(text: String) { logoPath = ""; self.text = text; size = 0.3 }
+
+    public var isText: Bool { !(text ?? "").trimmingCharacters(in: .whitespaces).isEmpty }
+    /// Nothing to draw: no logo chosen and no text.
+    public var isEmpty: Bool { !isText && logoPath.isEmpty }
+
+    /// Same look, ignoring which preset it came from.
+    public func sameLook(as other: WatermarkSpec) -> Bool {
+        var a = self, b = other
+        a.presetId = nil; b.presetId = nil
+        return a == b
+    }
 }
 
 /// Where the people are, so crops keep them in frame. Rects are normalized, top-left origin.

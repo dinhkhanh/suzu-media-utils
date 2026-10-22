@@ -21,6 +21,7 @@ struct VideoExportSheet: View {
     @State private var progress = (0, 0)
     @State private var result: [URL]?
     @State private var error: String?
+    @State private var samples: [ToolItem] = []
 
     var defaultFolder: URL {
         FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0]
@@ -56,7 +57,7 @@ struct VideoExportSheet: View {
                     Text("Takes the best moments (sharpest, facing the camera) and joins them in time order as HEVC.")
                         .font(.caption).foregroundStyle(.secondary)
                 case .stills:
-                    EditOptionsView(recipe: $recipe, previewSource: nil, previewFocus: nil)
+                    EditOptionsView(recipe: $recipe, samples: samples, remember: "videoStills")
                 }
                 HStack {
                     Text("Save to: \((folder ?? defaultFolder).path)").font(.caption).lineLimit(1).truncationMode(.middle)
@@ -75,10 +76,12 @@ struct VideoExportSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 560)
+        .frame(width: choice == .stills ? 960 : 560)
         .task {
             guard let store = model.store else { return }
-            appearances = (try? VideoExport(store: store).appearances(personId: personId)) ?? []
+            let project = model.currentProject, personId = personId
+            samples = await model.samples(personId: personId)
+            appearances = await Task.detached { (try? VideoExport(store: store).appearances(personId: personId, project: project)) ?? [] }.value
         }
     }
 
@@ -94,10 +97,10 @@ struct VideoExportSheet: View {
         case .reel: .reel(maxSeconds: maxSeconds)
         case .stills: .stills(recipe)
         }
-        let dest = folder ?? defaultFolder
+        let dest = folder ?? defaultFolder, project = model.currentProject
         Task {
             do {
-                result = try await VideoExport(store: store).export(personId: personId, name: name, kind: kind, to: dest) { d, t in
+                result = try await VideoExport(store: store).export(personId: personId, name: name, kind: kind, project: project, to: dest) { d, t in
                     Task { @MainActor in progress = (d, t) }
                 }
             } catch {

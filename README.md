@@ -11,6 +11,10 @@ locally; nothing leaves the Mac unless you opt into celebrity naming.
 Point it at any folders — NAS share, external drive or local disk — and it finds every face in the photos and videos,
 groups them by person, keeps up as new files arrive, and files each person's media into a folder named after them.
 
+- **Projects:** one project per event, each with its own folders. Switch at the top of the sidebar (or File → Open
+  Project); people, search, albums, delivery rules, exports, the gallery and the batch tools follow the open project.
+  People are shared: name someone once and they are recognised in every later project (typing a name suggests
+  people named before; "This Is…" merges a group into them).
 - Photos (JPEG, HEIC, PNG, TIFF) and videos (MP4/MOV natively; AV1, WebM, MKV, AVI… via ffmpeg). Videos are sampled
   at 1 frame per second; a person counts once per video.
 - Groups form automatically; known people are recognised as soon as a file finishes copying.
@@ -21,7 +25,7 @@ groups them by person, keeps up as new files arrive, and files each person's med
 - **Search & smart albums:** people (all together / any), solo or group shots, photos/videos, dates, folder, best
   shots only; save as a smart album that keeps updating.
 - **Export:** Copy/Move to Folder per person or Export All (`<folder>/<Person Name>/`, never overwriting). Optional
-  edits (auto tone, face-aware social crop 1:1 · 4:5 · 9:16 · 16:9 · 1.91:1, logo watermark, resize — auto tone
+  edits (auto tone, face-aware social crop 1:1 · 4:5 · 9:16 · 16:9 · 1.91:1, logo or text watermark, resize — auto tone
   turns on with crops and watermarks), Top N, best of each burst, and people's names written into the files
   (IPTC/XMP, read by Lightroom, Photo Mechanic, Bridge and Photos).
 - **Delivery rules:** new photos of a person (or anyone named) are copied — optionally edited — into a folder (put
@@ -36,7 +40,13 @@ groups them by person, keeps up as new files arrive, and files each person's med
 - Files are tracked by content, so moving/renaming in Finder or copying never loses names or duplicates work.
 
 ### Batch Export
-Auto tone, face-aware social crops, logo watermark and resize for any photos, no library needed.
+Auto tone, face-aware social crops, watermark and resize for any photos or people's photos: a large preview of the
+result (film strip, before/after, click the photo to place the watermark) with the settings beside it.
+
+### Watermarks
+Save any number of watermark presets — logos or text credits — in Settings → Watermarks. Every editing screen (Batch
+Export, Copy/Move, delivery rules, web gallery, video stills) picks its own preset and position, edits it in place,
+and remembers its choices; edits can be saved back to the preset or as a new one.
 
 ### Batch Rename
 Patterns like `{event}_{date}_{person}_{seq:3}` with a live preview; people come from Face Grouping, and renamed

@@ -240,13 +240,38 @@ public final class GroupingEngine: @unchecked Sendable {
         queue.asyncAfter(deadline: .now() + (pending >= settings.maxReclusterUnits ? 0 : 30), execute: work)
     }
 
+    /// Clusters waiting faces into new people, one project at a time (most recently active first): new groups form
+    /// within an event, while names carry across projects through assignment and autoName. Per project also keeps
+    /// the n^2 pool small, and a backlog of old leftovers can't crowd out a new event's faces.
     func recluster() throws {
-        let rows = try loadRows("face.assignment = 'none' AND face.embedding IS NOT NULL ORDER BY face.id")
+        let projects = try store.db.read { db in
+            try Int64.fetchAll(db, sql: """
+                SELECT COALESCE(s.projectId, 0) FROM face JOIN media ON media.id = face.mediaId LEFT JOIN source s ON s.id = media.sourceId
+                WHERE face.assignment = 'none' AND face.embedding IS NOT NULL
+                GROUP BY 1 ORDER BY MAX(face.id) DESC
+                """)
+        }
+        var more = false
+        for p in projects { more = try recluster(project: p) || more }
+        // Leftovers in one project may match a group just formed in another (the same artist at two events).
+        if !projects.isEmpty { try assignAllPending() }
+        try autoName()
+        if more { scheduleRecluster() }
+    }
+
+    /// Returns true when the pool was capped and produced groups, so another pass may find more.
+    func recluster(project: Int64) throws -> Bool {
+        let rows = try loadRows("""
+            face.assignment = 'none' AND face.embedding IS NOT NULL
+              AND COALESCE((SELECT projectId FROM source WHERE source.id = media.sourceId), 0) = ?
+            ORDER BY face.id DESC
+            """, [project])
+        // Newest first, so a fresh event is clustered even when older leftovers fill the pool.
         let pool = Array(units(rows).prefix(settings.maxReclusterUnits))
+        var updates: [(Int64, [Int64])] = []
         if pool.count >= 2 {
             let sim = Clustering.similarityMatrix(pool.map(\.vector))
             let labels = Clustering.averageLinkage(similarity: sim, count: pool.count, threshold: settings.clusterThreshold)
-            var updates: [(Int64, [Int64])] = []
             for (_, members) in Dictionary(grouping: pool.indices, by: { labels[$0] }) {
                 let faceIds = members.flatMap { pool[$0].faceIds }
                 guard faceIds.count >= settings.minGroupFaces else { continue }
@@ -259,7 +284,6 @@ public final class GroupingEngine: @unchecked Sendable {
         }
         // Low-quality faces can join people created above.
         try write(lowQualityMatches(rows.filter { !qualifies($0) }))
-        try autoName()
-        if pool.count == settings.maxReclusterUnits { scheduleRecluster() }
+        return pool.count == settings.maxReclusterUnits && !updates.isEmpty
     }
 }

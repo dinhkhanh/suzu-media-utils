@@ -3,7 +3,8 @@ import FaceLibrary
 import MediaKit
 import SwiftUI
 
-/// Auto tone, face-aware social crop, logo and resize for files or people's photos.
+/// Auto tone, face-aware social crop, watermark and resize for files or people's photos: a large preview of the
+/// result on the left, source, edits and output in an inspector on the right.
 struct BatchExportTool: View {
     @State private var items: [ToolItem] = []
     @State private var recipe = EditRecipe()
@@ -20,42 +21,60 @@ struct BatchExportTool: View {
     var fromPeople: Bool { items.contains { $0.personName != nil } }
 
     var body: some View {
-        Form {
-            Section("Photos") {
-                ToolInputView(items: $items, kinds: MediaTypes.photos, mediaKind: .photo, label: "photos")
-            }
-            Section("Edits") {
-                EditOptionsView(recipe: $recipe, previewSource: items.first?.url, previewFocus: items.first?.focus)
-                Text(fromPeople ? "Crops keep each person's face in frame; names are written into the files."
-                                : "Crops find the faces in each photo (or the most eye-catching area) and keep them in frame.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Section("Output") {
-                FolderField(title: "Save to", url: $output)
-                if fromPeople { Toggle("A folder per person", isOn: $folderPerPerson) }
-                TextField("Add to file names (optional)", text: $suffix, prompt: Text("e.g. _ig"))
-            }
-            Section {
-                HStack {
-                    if running || finished {
-                        ProgressView(value: Double(done), total: Double(max(1, total))).frame(maxWidth: 260)
-                        Text(finished ? "Done: \(done - failures.count) saved\(failures.isEmpty ? "" : ", \(failures.count) failed")" : "\(done) of \(total)")
-                            .foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                EditPreview(recipe: $recipe, samples: items)
+                    .frame(minWidth: 260, maxWidth: .infinity)
+                Divider()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
+                        InspectorSection(title: "Photos") {
+                            ToolInputView(items: $items, kinds: MediaTypes.photos, mediaKind: .photo, label: "photos")
+                        }
+                        EditControls(recipe: $recipe)
+                        Text(fromPeople ? "Crops keep each person's face in frame; names are written into the files."
+                                        : "Crops find the faces in each photo (or the most eye-catching area) and keep them in frame.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        InspectorSection(title: "Output") {
+                            FolderField(title: "Save to", url: $output)
+                            if fromPeople { Toggle("A folder per person", isOn: $folderPerPerson) }
+                            TextField("Add to file names", text: $suffix, prompt: Text("e.g. _ig")).textFieldStyle(.roundedBorder)
+                        }
                     }
-                    Spacer()
-                    if running { Button("Stop") { cancel = true } }
-                    if finished, let output { Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([output]) } }
-                    Button("Export \(items.count) Photos") { run() }
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(running || items.isEmpty || output == nil)
+                    .padding(16)
                 }
-                ForEach(failures.prefix(5), id: \.self) { Text($0).font(.caption).foregroundStyle(.red) }
+                .frame(width: 320)
             }
+            Divider()
+            HStack(spacing: 12) {
+                if running || finished {
+                    ProgressView(value: Double(done), total: Double(max(1, total))).frame(maxWidth: 220)
+                    Text(finished ? "Done: \(done - failures.count) saved\(failures.isEmpty ? "" : ", \(failures.count) failed")" : "\(done) of \(total)")
+                        .foregroundStyle(.secondary)
+                    if let f = failures.first { Text(f).font(.caption).foregroundStyle(.red).lineLimit(1).help(failures.prefix(10).joined(separator: "\n")) }
+                } else {
+                    Text(output == nil ? "Choose where to save" : "\(items.count) photos → \(output!.lastPathComponent)").foregroundStyle(.secondary)
+                }
+                Spacer()
+                if running { Button("Stop") { cancel = true } }
+                if finished, let output { Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([output]) } }
+                Button("Export \(items.count) Photos") { run() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(running || items.isEmpty || output == nil)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .background(.bar)
         }
-        .formStyle(.grouped)
         .navigationTitle("Batch Export")
         .navigationSubtitle("Auto tone · social crops · watermark · resize")
-        .onAppear { recipe.autoToneStrength = EditSettings.autoToneStrength }
+        .rememberEdits("batchExport", recipe: $recipe)
+        .task {
+            // SUZU_TOOL_SAMPLES=1 (testing): start with the project's best photos as input.
+            if ProcessInfo.processInfo.environment["SUZU_TOOL_SAMPLES"] != nil, items.isEmpty, let faces = ToolWork.faces {
+                try? await Task.sleep(for: .seconds(2))
+                items = await faces.samples(limit: 40)
+            }
+        }
     }
 
     func run() {

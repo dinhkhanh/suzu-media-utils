@@ -90,3 +90,35 @@ final class EditPipelineTests: XCTestCase {
         XCTAssertEqual(size(photo), before)
     }
 }
+
+final class WatermarkTests: XCTestCase {
+    func testTextWatermarkIsDrawnWhereAsked() throws {
+        let canvas = CIImage(color: CIColor(red: 0.2, green: 0.2, blue: 0.2)).cropped(to: CGRect(x: 0, y: 0, width: 1200, height: 800))
+        var spec = WatermarkSpec(text: "© SuZu Media")
+        spec.position = .topLeft
+        spec.opacity = 1
+        let out = try EditPipeline.watermark(canvas, spec: spec)
+        // Brightest pixel of each half: the white text sits in the top-left, the bottom-right stays dark.
+        func peak(_ r: CGRect) -> Double {
+            let ctx = CIContext()
+            let f = out.cropped(to: r).applyingFilter("CIAreaMaximum", parameters: [kCIInputExtentKey: CIVector(cgRect: r)])
+            var px = [UInt8](repeating: 0, count: 4)
+            ctx.render(f, toBitmap: &px, rowBytes: 4, bounds: CGRect(x: 0, y: 0, width: 1, height: 1), format: .RGBA8, colorSpace: nil)
+            return Double(px[0]) / 255
+        }
+        XCTAssertGreaterThan(peak(CGRect(x: 0, y: 400, width: 600, height: 400)), 0.9)  // Core Image: y up, so top = high y
+        XCTAssertLessThan(peak(CGRect(x: 600, y: 0, width: 600, height: 400)), 0.3)
+    }
+
+    func testEmptyWatermarkLeavesThePhotoAlone() throws {
+        let canvas = CIImage(color: .gray).cropped(to: CGRect(x: 0, y: 0, width: 100, height: 100))
+        XCTAssertEqual(try EditPipeline.watermark(canvas, spec: WatermarkSpec(logoPath: "")).extent, canvas.extent)
+    }
+
+    func testOldSavedRecipesStillDecode() throws {
+        let json = #"{"autoTone":true,"autoToneStrength":0.8,"jpegQuality":0.9,"writePeopleNames":true,"watermark":{"logoPath":"/a.png","position":"bottomRight","size":0.22,"opacity":0.9,"margin":0.035}}"#
+        let r = try JSONDecoder().decode(EditRecipe.self, from: Data(json.utf8))
+        XCTAssertEqual(r.watermark?.logoPath, "/a.png")
+        XCTAssertFalse(r.watermark!.isText)
+    }
+}

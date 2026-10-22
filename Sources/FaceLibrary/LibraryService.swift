@@ -83,12 +83,76 @@ public final class LibraryService: @unchecked Sendable {
 
     public func monitor(_ sourceId: Int64) -> SourceMonitor? { lock.withLock { monitors[sourceId] } }
 
+    public enum ProjectError: LocalizedError {
+        case alreadyAdded(folder: String, project: String?)
+        case overlaps(folder: String, other: String, project: String?)
+        case noProject
+        public var errorDescription: String? {
+            switch self {
+            case .alreadyAdded(let f, let p): "“\(f)” is already in \(p.map { "the project “\($0)”" } ?? "the library")."
+            case .overlaps(let f, let o, let p):
+                "“\(f)” overlaps “\(o)”\(p.map { " in the project “\($0)”" } ?? ""): a file can only belong to one folder. Add a different folder, or move that one."
+            case .noProject: "Choose or create a project first."
+            }
+        }
+    }
+
+    /// Adds a folder. Photo & video folders belong to a project; known-people folders are shared by all projects.
     @discardableResult
-    public func addSource(_ url: URL, kind: SourceKind = .media) throws -> SourceRecord {
-        var s = SourceRecord(path: canonicalPath(url), kind: kind)
+    public func addSource(_ url: URL, kind: SourceKind = .media, project: Int64? = nil) throws -> SourceRecord {
+        let path = canonicalPath(url)
+        if kind == .media && project == nil { throw ProjectError.noProject }
+        try Self.checkNewFolder(path, store: store)
+        var s = SourceRecord(path: path, kind: kind, projectId: kind == .media ? project : nil)
         try store.db.write { db in try s.insert(db) }
         startMonitor(s)
         return s
+    }
+
+    /// Throws when the folder is already in the library, or inside / around one that is (its files would be listed
+    /// twice).
+    static func checkNewFolder(_ path: String, store: LibraryStore) throws {
+        let existing = try store.db.read { db in
+            try Row.fetchAll(db, sql: "SELECT s.path, p.name FROM source s LEFT JOIN project p ON p.id = s.projectId")
+        }
+        let name = (path as NSString).lastPathComponent
+        for r in existing {
+            let other: String = r["path"]
+            if other == path { throw ProjectError.alreadyAdded(folder: name, project: r["name"]) }
+            if path.hasPrefix(other + "/") || other.hasPrefix(path + "/") {
+                throw ProjectError.overlaps(folder: name, other: (other as NSString).lastPathComponent, project: r["name"])
+            }
+        }
+    }
+
+    // MARK: - Projects
+
+    @discardableResult
+    public func createProject(_ name: String) throws -> ProjectRecord {
+        var p = ProjectRecord(name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled Project" : name)
+        try store.db.write { db in try p.insert(db) }
+        return p
+    }
+
+    public func renameProject(_ id: Int64, to name: String) throws {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        try store.db.write { db in try db.execute(sql: "UPDATE project SET name = ? WHERE id = ?", arguments: [trimmed, id]) }
+    }
+
+    /// Moves a folder (and everything found in it) to another project; nothing is re-scanned.
+    public func moveSource(_ sourceId: Int64, to project: Int64) throws {
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE source SET projectId = ? WHERE id = ? AND kind = 'media'", arguments: [project, sourceId])
+        }
+    }
+
+    /// Forgets a project and its folders (files on disk are untouched). People keep their names, so they are still
+    /// recognised in other projects. Slow for big projects: call it off the main thread.
+    public func deleteProject(_ id: Int64) throws {
+        let sources = try store.db.read { db in try Int64.fetchAll(db, sql: "SELECT id FROM source WHERE projectId = ?", arguments: [id]) }
+        for s in sources { try removeSource(s) }
+        try store.db.write { db in _ = try ProjectRecord.deleteOne(db, key: id) }
     }
 
     /// Forgets a source and everything found in it. Files on disk are not touched. Deletes in small batches so the

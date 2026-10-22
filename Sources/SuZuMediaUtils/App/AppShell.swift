@@ -13,6 +13,7 @@ enum AppRoute: Hashable {
 struct AppShell: View {
     @State private var route: AppRoute? = AppShell.startRoute
     @State private var path = NavigationPath()
+    @EnvironmentObject var faces: FaceGroupingModel
 
     /// SUZU_START_ROUTE=search | rules | album.<id> | tool.<name> (testing): open the app on that screen.
     static var startRoute: AppRoute {
@@ -34,6 +35,7 @@ struct AppShell: View {
                 ToolsSidebar()
             }
             .navigationSplitViewColumnWidth(min: 220, ideal: 250)
+            .safeAreaInset(edge: .top) { ProjectSwitcher() }
             .safeAreaInset(edge: .bottom) { FaceGroupingStatus() }
             .toolbar { FaceGroupingSidebarToolbar() }
         } detail: {
@@ -45,5 +47,11 @@ struct AppShell: View {
             }
         }
         .onChange(of: route) { path = NavigationPath() }
+        // Another project: a person, album or folder page from the old one would show the wrong files.
+        .onChange(of: faces.currentProject) {
+            path = NavigationPath()
+            if case .faces(let r) = route, r != .people, r != .unassigned, r != .search, r != .rules { route = .faces(.people) }
+        }
+        .sheet(isPresented: $faces.askNewProject) { NewProjectSheet() }
     }
 }

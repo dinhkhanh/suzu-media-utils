@@ -1,5 +1,6 @@
 import CoreGraphics
 import CoreImage
+import CoreText
 import FaceCore
 import Foundation
 import ImageIO
@@ -145,10 +146,13 @@ public enum EditPipeline {
     static let logoCache = NSCache<NSString, CIImage>()
 
     public static func watermark(_ image: CIImage, spec: WatermarkSpec) throws -> CIImage {
-        let key = spec.logoPath as NSString
+        guard !spec.isEmpty else { return image }
+        let key = (spec.isText ? "text|\(spec.textColor?.rawValue ?? "")|\(spec.text!)" : spec.logoPath) as NSString
         var logo = logoCache.object(forKey: key)
         if logo == nil {
-            guard let l = CIImage(contentsOf: URL(fileURLWithPath: spec.logoPath, isDirectory: false)) else { throw Failure.logo(spec.logoPath) }
+            let made = spec.isText ? textMark(spec.text!, color: spec.textColor ?? .white)
+                : CIImage(contentsOf: URL(fileURLWithPath: spec.logoPath, isDirectory: false))
+            guard let l = made else { throw Failure.logo(spec.logoPath) }
             logoCache.setObject(l, forKey: key)
             logo = l
         }
@@ -164,6 +168,28 @@ public enum EditPipeline {
         let pos = CGPoint(x: xs[idx % 3], y: ys[idx / 3])
         mark = mark.transformed(by: CGAffineTransform(translationX: ext.minX + pos.x - mark.extent.minX, y: ext.minY + pos.y - mark.extent.minY))
         return mark.composited(over: image).cropped(to: ext)
+    }
+
+    /// Text drawn large with a soft shadow (legible on light and dark areas), then scaled like a logo.
+    static func textMark(_ text: String, color: WatermarkSpec.TextColor) -> CIImage? {
+        let fontSize: CGFloat = 160
+        let font = CTFontCreateWithName("HelveticaNeue-Medium" as CFString, fontSize, nil)
+        let white = color == .white
+        let attr = NSAttributedString(string: text, attributes: [
+            .init(kCTFontAttributeName as String): font,
+            .init(kCTForegroundColorAttributeName as String): CGColor(gray: white ? 1 : 0, alpha: 1),
+        ])
+        let line = CTLineCreateWithAttributedString(attr)
+        var ascent: CGFloat = 0, descent: CGFloat = 0, leading: CGFloat = 0
+        let width = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, &leading))
+        let pad = fontSize * 0.25
+        guard width > 0, let ctx = CGContext(data: nil, width: Int((width + 2 * pad).rounded(.up)), height: Int((ascent + descent + 2 * pad).rounded(.up)),
+                                             bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.setShadow(offset: CGSize(width: 0, height: -fontSize * 0.03), blur: fontSize * 0.12, color: CGColor(gray: white ? 0 : 1, alpha: 0.45))
+        ctx.textPosition = CGPoint(x: pad, y: pad + descent)
+        CTLineDraw(line, ctx)
+        return ctx.makeImage().map { CIImage(cgImage: $0) }
     }
 
     // MARK: - Encode
