@@ -12,9 +12,19 @@ struct ProjectSwitcher: View {
 
     var body: some View {
         Menu {
-            ForEach(model.projects) { p in
-                Toggle(isOn: Binding(get: { model.currentProject == p.id }, set: { if $0 { model.currentProject = p.id } })) {
-                    Text("\(p.name)  ·  \(p.files.formatted()) files")
+            // Grouped by team, so it is clear which events are shared and with whom.
+            ForEach(model.teams) { team in
+                let shared = model.projects(in: team)
+                if !shared.isEmpty {
+                    Section("Team \(team.name)") {
+                        ForEach(shared) { p in projectToggle(p) }
+                    }
+                }
+            }
+            let local = model.localProjects
+            if !local.isEmpty {
+                Section(model.teams.isEmpty ? "Projects" : "Only on this Mac") {
+                    ForEach(local) { p in projectToggle(p) }
                 }
             }
             if model.projects.count > 1 {
@@ -26,17 +36,20 @@ struct ProjectSwitcher: View {
             if current != nil {
                 Button("Rename Project…") { newName = current?.name ?? ""; renaming = true }
                 Button("Delete Project…", role: .destructive) { confirmDelete = true }
+                Divider()
+                if let team = model.currentTeam {
+                    Button("Stop Sharing with Team “\(team.name)”") { model.stopSharingProject() }
+                } else {
+                    ForEach(model.teams) { team in Button("Share with Team “\(team.name)”") { model.shareProject(with: team) } }
+                    Button(model.teams.isEmpty ? "Share with a Team…" : "Share with a New Team…") { model.askShareTeam = true }
+                }
             }
-            Divider()
-            if current != nil {
-                Button(model.currentTeam == nil ? "Share Project with Team…" : "Team “\(model.currentTeam!.name)”…") { model.askShareTeam = true }
-            }
-            Button("Join a Team…") { model.askJoinTeam = true }
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: model.currentProject == nil ? "square.stack.3d.up" : "calendar")
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 0) {
+                    Text("PROJECT").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
                     Text(model.currentProject == nil ? "All Projects" : current?.name ?? "No project")
                         .font(.headline).lineLimit(1)
                     Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -52,7 +65,7 @@ struct ProjectSwitcher: View {
         .menuIndicator(.hidden)
         .padding(.horizontal, 10).padding(.vertical, 8)
         .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.6)))
-        .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 4)
+        .padding(.horizontal, 10).padding(.top, 4).padding(.bottom, 6)
         .help("Each event is a project. Names you give people carry over to every project.")
         .alert("Rename Project", isPresented: $renaming) {
             TextField("Name", text: $newName)
@@ -63,6 +76,12 @@ struct ProjectSwitcher: View {
             Button("Delete Project", role: .destructive) { if let id = current?.id { model.deleteProject(id) } }
         } message: {
             Text("The project and its \(current?.folders ?? 0) folders are removed from the library. Files on disk are not touched, and people keep their names for your other projects.")
+        }
+    }
+
+    func projectToggle(_ p: ProjectSummary) -> some View {
+        Toggle(isOn: Binding(get: { model.currentProject == p.id }, set: { if $0 { model.currentProject = p.id } })) {
+            Text("\(p.name)  ·  \(p.files.formatted()) files")
         }
     }
 

@@ -39,15 +39,17 @@ and one for landscapes — logo, text or banner watermark, resize — auto tone
   to share automatically), either a folder per person or straight into one folder, optionally levelled, auto-toned,
   cropped, watermarked and resized, with names in the metadata and a notification on the Mac. Edit a rule any time.
   Runs only while no new file is waiting, so it never slows recognition.
-- **Teams (several Macs, one event):** share a project through a folder every Mac can reach (the NAS share, Dropbox,
-  iCloud Drive): File → Share Project with Team…, teammates pick the same folder with File → Join a Team… and add
-  their own photo folders. From then on a person named on any Mac is recognised on every Mac (names, merges, session
-  names and auto rules are shared; photos, faces and crops stay where they are), within seconds, with no account or
-  server. Each Mac appends to its own log in the folder and reads the others', so a Mac that was offline catches up,
-  the newest change wins, and the same name given on two Macs becomes one person. Everyone named on a Mac travels
-  (a Known-People folder prepared before the event, people from earlier events), so one team folder per event is
-  enough and the next event's team knows them all. The sidebar shows the team, its Macs and when it last synced;
-  Locate Team Folder… points it at the folder's new place when the NAS address changes; Leave Team keeps the names.
+- **Teams (several Macs, many events):** a team is a folder every Mac can reach (the NAS share, Dropbox, iCloud
+  Drive) and holds every project you share with it. File → Share Project with Team… creates the team or adds the
+  project to one you are in; teammates pick the same folder once with File → Join a Team…, and the team's projects
+  appear on their Mac by themselves. From then on a person named on any Mac is recognised on every Mac (projects,
+  names, merges, session names and auto rules are shared; photos, faces and crops stay where they are), within
+  seconds, with no account or server. Each Mac appends to its own log in the folder and reads the others', so a Mac
+  that was offline catches up, the newest change wins, and the same name given on two Macs becomes one person.
+  Everyone named on a Mac travels (a Known-People folder prepared before the event, people from earlier events). The
+  sidebar shows the team above the project, with its Macs and the last sync; the project menu groups projects by
+  team. Rename Team, Locate Team Folder… (when the NAS address changes), Stop Sharing a project, Leave Team (keeps
+  projects and names).
 - **Video moments:** per person, a clip of each appearance (cut without re-encoding), a highlight reel of the best
   moments, or the best still frames.
 - **Web gallery:** export a self-contained gallery folder, or share a live gallery on the local network (secret link,

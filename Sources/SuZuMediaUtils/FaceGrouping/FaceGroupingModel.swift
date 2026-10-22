@@ -21,6 +21,8 @@ struct ProjectSummary: Identifiable, Hashable {
     var folders: Int
     var files: Int
     var createdAt: Date
+    /// The team the project is shared with (nil = only on this Mac).
+    var teamId: Int64?
 }
 
 struct SourceSummary: Identifiable, Hashable {
@@ -116,7 +118,13 @@ final class FaceGroupingModel: ObservableObject {
     @Published var askShareTeam = false
     @Published var askJoinTeam = false
     /// The open project's team, if it is shared.
-    var currentTeam: TeamRecord? { currentProject.flatMap { p in teams.first { $0.projectId == p } } }
+    var currentTeam: TeamRecord? {
+        guard let tid = projects.first(where: { $0.id == currentProject })?.teamId else { return nil }
+        return teams.first { $0.id == tid }
+    }
+    func projects(in team: TeamRecord) -> [ProjectSummary] { projects.filter { $0.teamId == team.id } }
+    /// Projects shared with no team.
+    var localProjects: [ProjectSummary] { projects.filter { $0.teamId == nil } }
     /// Bumped after ratings, labels or flags change, so every view showing them re-reads.
     @Published var marksVersion = 0
     /// Folders being removed in the background; hidden from the sidebar right away.
@@ -287,10 +295,10 @@ final class FaceGroupingModel: ObservableObject {
 
     nonisolated static func fetchProjects(_ db: Database) throws -> [ProjectSummary] {
         try Row.fetchAll(db, sql: """
-            SELECT p.id, p.name, p.createdAt, COUNT(DISTINCT s.id) AS folders, COUNT(m.id) AS files
+            SELECT p.id, p.name, p.createdAt, p.teamId, COUNT(DISTINCT s.id) AS folders, COUNT(m.id) AS files
             FROM project p LEFT JOIN source s ON s.projectId = p.id LEFT JOIN media m ON m.sourceId = s.id AND m.duplicateOf IS NULL
             GROUP BY p.id ORDER BY p.createdAt DESC
-            """).map { ProjectSummary(id: $0["id"], name: $0["name"], folders: $0["folders"], files: $0["files"], createdAt: $0["createdAt"]) }
+            """).map { ProjectSummary(id: $0["id"], name: $0["name"], folders: $0["folders"], files: $0["files"], createdAt: $0["createdAt"], teamId: $0["teamId"]) }
     }
 
     /// Every named person in the library (cheap: counts come from the people list where shown).
@@ -603,7 +611,7 @@ final class FaceGroupingModel: ObservableObject {
 
     // MARK: - Teams
 
-    /// Shares the open project with other Macs through `folder`; they join by picking the same folder.
+    /// Starts a team in `folder` and shares the open project with it; teammates join by picking the same folder.
     func createTeam(named name: String, folder: URL) -> Bool {
         guard let project = currentProject else { return false }
         var ok = false
@@ -611,15 +619,37 @@ final class FaceGroupingModel: ObservableObject {
         return ok
     }
 
-    /// Joins the team in `folder`: a new project named after it (nil), or the open project.
-    func joinTeam(folder: URL, project: Int64?) -> Bool {
+    /// Joins the team in `folder`: its projects appear as the teammates' logs are read (the first ones right away).
+    func joinTeam(folder: URL) -> Bool {
+        guard let service else { return false }
         var joined: TeamRecord?
-        perform { joined = try $0.teamSync.join(folder: folder, project: project) }
-        if let joined, joined.projectId != currentProject { currentProject = joined.projectId }
-        return joined != nil
+        perform { joined = try $0.teamSync.join(folder: folder) }
+        guard let joined else { return false }
+        Task.detached {
+            service.teamSync.syncNow()
+            let first = try? service.teamSync.projects(in: joined.id!).last
+            await MainActor.run {
+                self.refresh()
+                // Open one of the team's projects unless the open one is already in it.
+                if let first, self.projects.first(where: { $0.id == self.currentProject })?.teamId != joined.id { self.currentProject = first.id }
+            }
+        }
+        return true
+    }
+
+    func shareProject(with team: TeamRecord) {
+        guard let project = currentProject else { return }
+        perform { try $0.teamSync.share(project: project, team: team.id!) }
+    }
+
+    func stopSharingProject() {
+        guard let project = currentProject else { return }
+        perform { try $0.teamSync.unshare(project: project) }
     }
 
     func leaveTeam(_ id: Int64) { perform { try $0.teamSync.leave(id) } }
+
+    func renameTeam(_ id: Int64, to name: String) { perform { try $0.teamSync.rename(id, to: name) } }
 
     /// The team folder moved (new NAS address or mount name): same team, new path.
     func relocateTeam(_ id: Int64, to folder: URL) { perform { try $0.teamSync.relocate(id, to: folder) } }

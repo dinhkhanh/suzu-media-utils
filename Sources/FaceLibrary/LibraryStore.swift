@@ -267,6 +267,35 @@ public final class LibraryStore: @unchecked Sendable {
             }
             try db.execute(sql: "INSERT INTO meta (key, value) VALUES ('deviceId', ?)", arguments: [SyncIds.new()])
         }
+        m.registerMigration("v10-team-projects") { db in
+            // A team holds many projects: the project carries the team, not the other way round, and has a stable
+            // id so it is the same project on every Mac of the team.
+            try db.alter(table: "project") { t in
+                t.add(column: "uuid", .text)
+                t.add(column: "teamId", .integer).references("team", onDelete: .setNull)
+                t.add(column: "updatedAt", .double).notNull().defaults(to: 0)
+            }
+            // The one project a team held so far gets the same id on every Mac of that team (derived from the
+            // team's), so the logs already in the team folder keep applying to it.
+            for r in try Row.fetchAll(db, sql: "SELECT id, uuid, projectId FROM team") {
+                try db.execute(sql: "UPDATE project SET uuid = ?, teamId = ? WHERE id = ?",
+                               arguments: [TeamSync.legacyProjectUuid(r["uuid"]), r["id"] as Int64, r["projectId"] as Int64])
+            }
+            for id in try Int64.fetchAll(db, sql: "SELECT id FROM project WHERE uuid IS NULL") {
+                try db.execute(sql: "UPDATE project SET uuid = ? WHERE id = ?", arguments: [SyncIds.new(), id])
+            }
+            try db.create(index: "project_uuid", on: "project", columns: ["uuid"], unique: true)
+            try db.create(table: "team_new") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("uuid", .text).notNull().unique()
+                t.column("name", .text).notNull()
+                t.column("folder", .text).notNull()
+                t.column("joinedAt", .datetime).notNull()
+            }
+            try db.execute(sql: "INSERT INTO team_new (id, uuid, name, folder, joinedAt) SELECT id, uuid, name, folder, joinedAt FROM team")
+            try db.execute(sql: "DROP TABLE team")
+            try db.execute(sql: "ALTER TABLE team_new RENAME TO team")
+        }
         return m
     }
 }

@@ -12,7 +12,7 @@ final class TeamSyncTests: XCTestCase {
         let store: LibraryStore
         let engine: GroupingEngine
         let sync: TeamSync
-        let project: Int64
+        var project: Int64
         let source: Int64
         let root: URL
 
@@ -86,6 +86,23 @@ final class TeamSyncTests: XCTestCase {
             engine.waitUntilIdle()
             engine.waitUntilIdle()
         }
+
+        func projectUuid() throws -> String {
+            try store.db.read { db in try String.fetchOne(db, sql: "SELECT uuid FROM project WHERE id = ?", arguments: [project])! }
+        }
+    }
+
+    /// B joins the team and works in the project A shared (its photo folder moves there), as a teammate would.
+    @discardableResult
+    func joinAsTeammate() throws -> TeamRecord {
+        let team = try b.sync.join(folder: shared)
+        exchange()
+        let uuid = try a.projectUuid()
+        let shared = try XCTUnwrap(try b.store.db.read { db in try Int64.fetchOne(db, sql: "SELECT id FROM project WHERE uuid = ?", arguments: [uuid]) },
+                                   "A's project appears on B after joining")
+        try b.store.db.write { db in try db.execute(sql: "UPDATE source SET projectId = ? WHERE id = ?", arguments: [shared, b.source]) }
+        b.project = shared
+        return team
     }
 
     var a: Mac!
@@ -120,28 +137,46 @@ final class TeamSyncTests: XCTestCase {
         }
     }
 
-    func testCreateAndJoinLinkProjects() throws {
-        let team = try a.sync.create(name: "Gala", folder: shared, project: a.project)
+    func testCreateAndJoinBringTheTeamsProjects() throws {
+        let team = try a.sync.create(name: "SuZu", folder: shared, project: a.project)
         XCTAssertTrue(FileManager.default.fileExists(atPath: shared.appendingPathComponent("team.json").path))
         XCTAssertThrowsError(try a.sync.create(name: "Again", folder: shared, project: a.project))
-        let joined = try b.sync.join(folder: shared, project: nil)
+        XCTAssertEqual(try a.sync.team(forProject: a.project)?.id, team.id)
+        let joined = try b.sync.join(folder: shared)
         XCTAssertEqual(joined.uuid, team.uuid)
-        XCTAssertEqual(joined.name, "Gala")
-        let projects = try b.store.db.read { db in try String.fetchAll(db, sql: "SELECT name FROM project ORDER BY id") }
-        XCTAssertEqual(projects, ["Gala", "Gala"], "joining without a project creates one named after the team")
-        XCTAssertThrowsError(try b.sync.join(folder: tmp.appendingPathComponent("NAS"), project: nil)) { e in
+        XCTAssertEqual(joined.name, "SuZu")
+        XCTAssertThrowsError(try b.sync.join(folder: tmp.appendingPathComponent("NAS"))) { e in
             XCTAssertTrue("\(e.localizedDescription)".contains("no team"))
         }
         exchange()
+        // A's "Gala" is now on B too, in the team; B's own "Gala" stays B's.
+        let onB = try b.store.db.read { db in try ProjectRecord.order(Column("id")).fetchAll(db) }
+        XCTAssertEqual(onB.map(\.name), ["Gala", "Gala"])
+        XCTAssertEqual(onB.map(\.teamId), [nil, joined.id])
+        XCTAssertEqual(onB[1].uuid, try a.projectUuid())
+        // A second event shared with the same team reaches B as well; renames follow.
+        var next = ProjectRecord(name: "Next event")
+        try a.store.db.write { db in try next.insert(db) }
+        try a.sync.share(project: next.id!, team: team.id!)
+        exchange()
+        XCTAssertEqual(try b.sync.projects(in: joined.id!).map(\.name).sorted(), ["Gala", "Next event"])
+        try a.store.db.write { db in
+            try db.execute(sql: "UPDATE project SET name = 'Gala 2026', updatedAt = ? WHERE id = ?", arguments: [Date().timeIntervalSince1970 + 5, a.project])
+        }
+        exchange()
+        XCTAssertEqual(try b.sync.projects(in: joined.id!).map(\.name).sorted(), ["Gala 2026", "Next event"])
         let status = try XCTUnwrap(a.sync.status(team.id!))
         XCTAssertTrue(status.reachable)
         XCTAssertEqual(Set(status.devices.map(\.name)), ["A's Mac", "B's Mac"])
         XCTAssertEqual(status.devices.first?.isThisMac, true)
+        // Stop sharing on B: B keeps the project, A keeps its own.
+        try b.sync.unshare(project: b.store.db.read { db in try Int64.fetchOne(db, sql: "SELECT id FROM project WHERE uuid = ?", arguments: [try a.projectUuid()])! })
+        XCTAssertEqual(try b.sync.projects(in: joined.id!).map(\.name), ["Next event"])
     }
 
     func testNameTravelsAndTeammatesFacesRecogniseThePerson() throws {
         try a.sync.create(name: "Gala", folder: shared, project: a.project)
-        try b.sync.join(folder: shared, project: b.project)
+        try joinAsTeammate()
         let an = try a.person("An")
         let v = vector(1)
         try a.photo("a1.jpg", person: an, vector: v)
@@ -188,7 +223,7 @@ final class TeamSyncTests: XCTestCase {
         for i in 1...3 { try b.photo("b\(i).jpg", person: nil, vector: v) }
         b.engine.reclusterNow(); b.settle()
         XCTAssertEqual(try b.people().map(\.name), [nil], "grouped before any name arrived")
-        try b.sync.join(folder: shared, project: b.project)
+        try joinAsTeammate()
         exchange()
         XCTAssertEqual(try b.people().map(\.name), ["An"], "the group takes the name from A's Known-People folder")
         XCTAssertEqual(try b.people().first?.faces, 3)
@@ -196,7 +231,7 @@ final class TeamSyncTests: XCTestCase {
 
     func testNewestNameWinsOnEveryMac() throws {
         try a.sync.create(name: "Gala", folder: shared, project: a.project)
-        try b.sync.join(folder: shared, project: b.project)
+        try joinAsTeammate()
         let an = try a.person("An", at: 100)
         try a.photo("a1.jpg", person: an, vector: vector(1))
         exchange()
@@ -217,7 +252,7 @@ final class TeamSyncTests: XCTestCase {
 
     func testTheSameNameGivenOnTwoMacsBecomesOnePerson() throws {
         try a.sync.create(name: "Gala", folder: shared, project: a.project)
-        try b.sync.join(folder: shared, project: b.project)
+        try joinAsTeammate()
         let minhA = try a.person("Minh", at: 100)
         try a.photo("a1.jpg", person: minhA, vector: vector(3))
         let minhB = try b.person("Minh", at: 110)
@@ -236,7 +271,7 @@ final class TeamSyncTests: XCTestCase {
 
     func testMergeTravels() throws {
         try a.sync.create(name: "Gala", folder: shared, project: a.project)
-        try b.sync.join(folder: shared, project: b.project)
+        try joinAsTeammate()
         let an = try a.person("An"), binh = try a.person("Bình")
         try a.photo("a1.jpg", person: an, vector: vector(1))
         try a.photo("a2.jpg", person: binh, vector: vector(4))
@@ -257,7 +292,7 @@ final class TeamSyncTests: XCTestCase {
 
     func testSessionNamesAndRulesTravel() throws {
         try a.sync.create(name: "Gala", folder: shared, project: a.project)
-        try b.sync.join(folder: shared, project: b.project)
+        try joinAsTeammate()
         let an = try a.person("An")
         try a.photo("a1.jpg", person: an, vector: vector(1))
         let session = EventSession(index: 0, start: 1_700_000_000, end: 1_700_000_900, photos: 1, videos: 0)
@@ -297,7 +332,7 @@ final class TeamSyncTests: XCTestCase {
     func testRuleWaitsForItsPeople() throws {
         // A rule naming someone whose name hasn't arrived yet is held back, not applied half-way.
         try a.sync.create(name: "Gala", folder: shared, project: a.project)
-        try b.sync.join(folder: shared, project: b.project)
+        try joinAsTeammate()
         let an = try a.person("An")
         var q = MediaQuery(); q.people = [an]
         try DeliveryService(store: a.store).add(DeliveryRule(name: "An", query: q, folder: nil, layout: .person, recipe: nil, writeNames: false, projectId: a.project), includeExisting: true)
@@ -310,7 +345,7 @@ final class TeamSyncTests: XCTestCase {
 
     func testOfflineFolderIsReportedAndResumes() throws {
         try a.sync.create(name: "Gala", folder: shared, project: a.project)
-        let team = try b.sync.join(folder: shared, project: b.project)
+        let team = try joinAsTeammate()
         let an = try a.person("An")
         try a.photo("a1.jpg", person: an, vector: vector(1))
         exchange()
@@ -330,7 +365,7 @@ final class TeamSyncTests: XCTestCase {
 
     func testTeamFolderCanMoveAndIsOneEventsOnly() throws {
         try a.sync.create(name: "Gala", folder: shared, project: a.project)
-        let team = try b.sync.join(folder: shared, project: b.project)
+        let team = try joinAsTeammate()
         let an = try a.person("An")
         try a.photo("a1.jpg", person: an, vector: vector(1))
         exchange()
@@ -352,13 +387,8 @@ final class TeamSyncTests: XCTestCase {
         XCTAssertEqual(try b.sync.status(team.id!)?.reachable, true)
         XCTAssertEqual(try b.people().map(\.name), ["An Lê"])
         XCTAssertEqual(try b.sync.teams().first?.folder, canonicalPath(moved))
-        // Joining the same folder again from the same project just relinks; from another project it is refused.
-        XCTAssertEqual(try b.sync.join(folder: moved, project: b.project).id, team.id)
-        var p2 = ProjectRecord(name: "Next event")
-        try b.store.db.write { db in try p2.insert(db) }
-        XCTAssertThrowsError(try b.sync.join(folder: moved, project: p2.id)) { e in
-            XCTAssertTrue(e.localizedDescription.contains("already uses"), e.localizedDescription)
-        }
+        // Joining the same folder again just relinks it.
+        XCTAssertEqual(try b.sync.join(folder: moved).id, team.id)
     }
 
     func testEveryNamedPersonTravelsSoTheNextEventKnowsThem() throws {
@@ -375,15 +405,43 @@ final class TeamSyncTests: XCTestCase {
         var f = FaceRecord(id: nil, mediaId: m.id!, x: 0.4, y: 0.4, w: 0.1, h: 0.1, quality: 0.8, time: nil,
                            embedding: Vector.encode(Vector.normalized(vector(9))), track: nil, personId: an, assignment: .user, rejectedPersonId: nil)
         try a.store.db.write { db in try f.insert(db) }
-        try b.sync.join(folder: shared, project: b.project)
+        try joinAsTeammate()
         exchange()
         XCTAssertEqual(try b.people().map(\.name), ["An"])
         XCTAssertEqual(try b.store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM personRemote") }, 1, "with An's faces, so B recognises them")
     }
 
+    func testOlderTeamFoldersKeepTheirFirstProject() throws {
+        // A change logged without a project (0.6.x logs) lands in the team's first project on every Mac.
+        let team = try a.sync.create(name: "Gala", folder: shared, project: a.project)
+        try a.store.db.write { db in
+            try db.execute(sql: "UPDATE project SET uuid = ? WHERE id = ?", arguments: [TeamSync.legacyProjectUuid(team.uuid), a.project])
+        }
+        let legacy = "{\"t\":\"session\",\"at\":5,\"name\":\"Awards\",\"moment\":1700000000}\n"
+        try legacy.write(to: TeamSync.devicesURL(shared).appendingPathComponent("old-mac.jsonl"), atomically: true, encoding: .utf8)
+        try joinAsTeammate()
+        for mac in [a!, b!] {
+            let labels = try mac.store.db.read { db in try Row.fetchAll(db, sql: "SELECT projectId, name FROM sessionLabel") }
+            XCTAssertEqual(labels.map { $0["name"] as String }, ["Awards"])
+            XCTAssertEqual(labels.first?["projectId"] as Int64?, mac.project)
+        }
+    }
+
+    func testRenamingTheTeamReachesEveryMac() throws {
+        try a.sync.create(name: "Gala", folder: shared, project: a.project)
+        let team = try joinAsTeammate()
+        try b.sync.rename(team.id!, to: "  Gala 2026 – Hà Nội ")
+        XCTAssertEqual(try b.sync.teams().first?.name, "Gala 2026 – Hà Nội")
+        XCTAssertEqual(TeamSync.readInfo(shared)?.name, "Gala 2026 – Hà Nội")
+        exchange()
+        XCTAssertEqual(try a.sync.teams().first?.name, "Gala 2026 – Hà Nội")
+        try b.sync.rename(team.id!, to: "   ")
+        XCTAssertEqual(try b.sync.teams().first?.name, "Gala 2026 – Hà Nội", "an empty name changes nothing")
+    }
+
     func testLeavingKeepsNamesAndForgetsSummaries() throws {
         try a.sync.create(name: "Gala", folder: shared, project: a.project)
-        let team = try b.sync.join(folder: shared, project: b.project)
+        let team = try joinAsTeammate()
         let an = try a.person("An")
         try a.photo("a1.jpg", person: an, vector: vector(1))
         exchange()

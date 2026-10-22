@@ -1,4 +1,4 @@
-# Tính năng của SuZu Media Utils (v0.6.3)
+# Tính năng của SuZu Media Utils (v0.6.4)
 
 Ứng dụng macOS cho SuZu Media: nhận diện và nhóm khuôn mặt trong ảnh/video sự kiện, cùng các công cụ xử lý ảnh
 hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi tiếng qua Amazon, nếu bật).
@@ -81,19 +81,20 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Top N và bỏ ảnh trùng | Chỉ xuất N ảnh đẹp nhất mỗi người và ảnh đẹp nhất mỗi loạt. |
 | Quy tắc tự động (Auto Rules) | Khi có file mới khớp điều kiện kiểu album thông minh (ảnh của một người, mọi người có tên, ảnh đơn đẹp nhất của bất kỳ ai, ảnh nhóm, chỉ ảnh/chỉ video…), tự chép vào thư mục (NAS, Google Drive, Dropbox) — mỗi người một thư mục hoặc tất cả vào một thư mục — có thể kèm cân chỉnh thẳng, auto tone, cắt, watermark, đổi cỡ, ghi tên vào metadata, và báo trên Mac. Sửa quy tắc bất kỳ lúc nào. Thư mục đích chưa gắn hoặc lỗi chép thì tự thử lại sau. |
 
-## Nhóm làm việc (Team) — nhiều máy, một sự kiện
+## Nhóm làm việc (Team) — nhiều máy, nhiều sự kiện
 
 | Tính năng | Mô tả ngắn |
 |---|---|
-| Chia sẻ dự án qua thư mục | File → Share Project with Team…: chọn một thư mục mọi máy đều mở được (share NAS, Dropbox, iCloud Drive). Không cần tài khoản hay máy chủ. |
-| Tham gia nhóm | Trên máy khác: File → Join a Team…, chọn đúng thư mục đó, rồi thêm thư mục ảnh của mình vào dự án. |
+| Một nhóm, nhiều dự án | Nhóm là một thư mục mọi máy đều mở được (share NAS, Dropbox, iCloud Drive) và chứa mọi dự án bạn chia sẻ với nhóm. Thanh bên hiện Nhóm ở trên, Dự án ở dưới; menu dự án gom theo nhóm (và "Chỉ trên máy này"). |
+| Chia sẻ dự án | File → Share Project with Team…: tạo nhóm mới trong một thư mục, hoặc thêm dự án vào nhóm đang có. Không cần tài khoản hay máy chủ. Stop Sharing để rút dự án khỏi nhóm trên máy này. |
+| Tham gia nhóm | Trên máy khác: File → Join a Team…, chọn đúng thư mục đó một lần; các dự án của nhóm tự xuất hiện, rồi thêm thư mục ảnh của mình vào dự án đang chụp. |
 | Nhận diện chung | Đặt tên một người trên máy nào thì mọi máy trong nhóm đều nhận ra người đó (kể cả máy của người khác) trong vài giây. |
-| Dữ liệu được chia sẻ | Tên người, gộp người, tên phiên và quy tắc tự động. Ảnh, khuôn mặt và ảnh cắt vẫn ở máy nào xử lý máy đó. |
+| Dữ liệu được chia sẻ | Dự án (tên), tên người, gộp người, tên phiên và quy tắc tự động. Ảnh, khuôn mặt và ảnh cắt vẫn ở máy nào xử lý máy đó. |
 | Làm việc cùng lúc | Mỗi máy ghi vào nhật ký riêng của mình trong thư mục và đọc của máy khác, nên nhiều máy chạy cùng lúc không đụng nhau; máy mất mạng sẽ tự bắt kịp khi có lại. |
 | Thay đổi mới nhất thắng | Hai máy cùng sửa tên: tên sửa sau thắng. Cùng một tên đặt trên hai máy thì gộp thành một người. |
-| Trạng thái nhóm | Thanh bên hiện tên nhóm, số máy, lần đồng bộ gần nhất; thư mục không truy cập được thì báo và tự tiếp tục khi có lại. Sync Now, mở thư mục nhóm, Leave Team (giữ tên người). |
+| Trạng thái nhóm | Thẻ nhóm hiện tên nhóm, số máy, lần đồng bộ gần nhất và danh sách dự án trong nhóm; thư mục không truy cập được thì báo và tự tiếp tục khi có lại. Sync Now, Rename Team, mở thư mục nhóm, Leave Team (giữ dự án và tên người). |
 | Đổi địa chỉ thư mục nhóm | NAS đổi địa chỉ hoặc share gắn tên khác: Locate Team Folder… trỏ nhóm sang chỗ mới của cùng thư mục, không mất gì. |
-| Người quen đi theo mọi sự kiện | Mọi người có tên trên một máy (thư mục Known People chuẩn bị trước sự kiện, người từ các sự kiện trước) đều được chia sẻ với nhóm, nên mỗi sự kiện một thư mục nhóm là đủ và máy mới tham gia biết hết. |
+| Người quen đi theo mọi sự kiện | Mọi người có tên trên một máy (thư mục Known People chuẩn bị trước sự kiện, người từ các sự kiện trước) đều được chia sẻ với nhóm, nên máy mới tham gia biết hết. |
 | Cập nhật tự động | Ứng dụng tự kiểm tra bản mới mỗi ngày (Settings → Updates, hoặc menu SuZu Media Utils → Check for Updates…) và cài bằng một cú bấm. Cài lần đầu bằng file .dmg (kéo vào Applications). |
 | Quy tắc chạy trên mọi máy | Quy tắc tự động của dự án chia sẻ chạy trên từng máy với các file máy đó xử lý. Thư mục đích nên là đường dẫn giống nhau trên mọi máy (cùng share NAS). |
 | Khoảnh khắc video | Mỗi người: cắt từng đoạn xuất hiện (không nén lại), dựng video highlight, hoặc xuất khung hình đẹp nhất. |

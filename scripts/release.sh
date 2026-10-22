@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.."
 TEAM_ID="KJ8A3B7BM7"
 PROFILE="${NOTARY_PROFILE:-suzu-notary}"
 export SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: GCE MEDIA AND SOFTWARE TECHNOLOGY COMPANY LIMITED ($TEAM_ID)}"
-export VERSION="${VERSION:-0.6.3}"
+export VERSION="${VERSION:-0.6.4}"
 # Where scripts/publish.sh puts the files (GitHub release assets); the appcast points here.
 DOWNLOAD_PREFIX="${SPARKLE_DOWNLOAD_PREFIX:-https://github.com/dinhkhanh/suzu-media-utils/releases/download/v$VERSION/}"
 NAME="SuZu Media Utils"

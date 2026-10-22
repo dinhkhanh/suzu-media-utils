@@ -1,12 +1,13 @@
 import Foundation
 import GRDB
 
-/// Shares a project between Macs — yours and your teammates' — through a folder they can all reach: a NAS share,
+/// Shares projects between Macs — yours and your teammates' — through a folder they can all reach: a NAS share,
 /// Dropbox, iCloud Drive. No account, no server: one Mac creates the team in a folder, the others join by picking
-/// that folder.
+/// that folder. A team holds any number of projects (one per event); joining brings them all.
 ///
-/// What travels: people (stable id, name, and a summary of their faces so every Mac recognises them), merges,
-/// session names and rules. Photos, face boxes and crops stay on the Mac that processed them.
+/// What travels: projects (stable id and name), people (stable id, name, and a summary of their faces so every Mac
+/// recognises them), merges, session names and rules. Photos, face boxes and crops stay on the Mac that processed
+/// them.
 ///
 /// How: every Mac appends its changes to its own log file (`devices/<id>.jsonl`) and reads everyone else's; nobody
 /// writes anyone else's file, so a shared folder needs no locking. Changes carry the time they were made and the
@@ -61,15 +62,13 @@ public final class TeamSync: @unchecked Sendable {
 
     public enum TeamError: LocalizedError {
         case notATeamFolder, alreadyATeamFolder(String), projectAlreadyShared(String), folderUnreachable
-        case teamInUse(String), differentTeam(String, String)
+        case differentTeam(String, String)
         public var errorDescription: String? {
             switch self {
             case .notATeamFolder: "That folder has no team in it. Pick the folder a teammate shared, or create a team."
             case .alreadyATeamFolder(let n): "That folder already holds the team “\(n)”. Join it instead."
             case .projectAlreadyShared(let n): "This project is already shared with the team “\(n)”."
             case .folderUnreachable: "The folder can't be reached. Mount the share (or open Dropbox / iCloud Drive) and try again."
-            case .teamInUse(let n):
-                "This Mac already uses that team folder for the project “\(n)”. Each event has its own team folder; people and their names carry over to every team by themselves."
             case .differentTeam(let found, let expected):
                 "That folder holds the team “\(found)”, not “\(expected)”. Pick the folder of this team at its new place."
             }
@@ -83,14 +82,21 @@ public final class TeamSync: @unchecked Sendable {
         deviceName = Host.current().localizedName ?? "Mac"
     }
 
-    // MARK: - Teams
+    // MARK: - Teams and their projects
 
     public func teams() throws -> [TeamRecord] {
         try store.db.read { db in try TeamRecord.order(Column("joinedAt")).fetchAll(db) }
     }
 
     public func team(forProject project: Int64) throws -> TeamRecord? {
-        try store.db.read { db in try TeamRecord.filter(Column("projectId") == project).fetchOne(db) }
+        try store.db.read { db in
+            guard let tid = try Int64.fetchOne(db, sql: "SELECT teamId FROM project WHERE id = ?", arguments: [project]) else { return nil }
+            return try TeamRecord.fetchOne(db, key: tid)
+        }
+    }
+
+    public func projects(in teamId: Int64) throws -> [ProjectRecord] {
+        try store.db.read { db in try ProjectRecord.filter(Column("teamId") == teamId).order(Column("createdAt").desc).fetchAll(db) }
     }
 
     public func status(_ teamId: Int64) -> TeamStatus? { lock.withLock { statuses[teamId] } }
@@ -99,11 +105,15 @@ public final class TeamSync: @unchecked Sendable {
     static func devicesURL(_ folder: URL) -> URL { folder.appendingPathComponent("devices", isDirectory: true) }
     static func summariesURL(_ folder: URL) -> URL { folder.appendingPathComponent("summaries", isDirectory: true) }
 
+    /// The id of the one project a team held before teams could hold several (and of changes logged without a
+    /// project): the same on every Mac of that team.
+    public static func legacyProjectUuid(_ teamUuid: String) -> String { "\(teamUuid)-project" }
+
     public static func readInfo(_ folder: URL) -> Info? {
         (try? Data(contentsOf: infoURL(folder))).flatMap { try? JSONDecoder().decode(Info.self, from: $0) }
     }
 
-    /// Starts a team for a project in an empty (or new) folder that every teammate's Mac can reach.
+    /// Starts a team in an empty (or new) folder that every teammate's Mac can reach, sharing `project` with it.
     @discardableResult
     public func create(name: String, folder: URL, project: Int64) throws -> TeamRecord {
         if let existing = try team(forProject: project) { throw TeamError.projectAlreadyShared(existing.name) }
@@ -117,41 +127,65 @@ public final class TeamSync: @unchecked Sendable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(info).write(to: Self.infoURL(folder), options: .atomic)
-        return try register(info, folder: folder, project: project)
+        let team = try register(info, folder: folder)
+        try share(project: project, team: team.id!)
+        return team
     }
 
-    /// Joins the team in `folder`, linking it to `project` (nil = a new project named after the team).
+    /// Joins the team in `folder`; its projects appear here as the teammates' logs are read. Joining a team this
+    /// Mac is already in just points it at this folder (the share may be mounted under another name).
     @discardableResult
-    public func join(folder: URL, project: Int64?) throws -> TeamRecord {
+    public func join(folder: URL) throws -> TeamRecord {
         guard let info = Self.readInfo(folder) else {
             throw FileManager.default.fileExists(atPath: folder.path) ? TeamError.notATeamFolder : TeamError.folderUnreachable
         }
         if let existing = try store.db.read({ db in try TeamRecord.filter(Column("uuid") == info.uuid).fetchOne(db) }) {
-            // Already joined for another project: a team folder belongs to one event (people carry over anyway).
-            if let project, project != existing.projectId {
-                let name = try store.db.read { db in try String.fetchOne(db, sql: "SELECT name FROM project WHERE id = ?", arguments: [existing.projectId]) }
-                throw TeamError.teamInUse(name ?? existing.name)
-            }
-            // Joined before, maybe from another path to the same share: just point at this folder.
             try relocate(existing.id!, to: folder)
             return try store.db.read { db in try TeamRecord.fetchOne(db, key: existing.id)! }
         }
-        if let project, let existing = try team(forProject: project) { throw TeamError.projectAlreadyShared(existing.name) }
-        let pid: Int64
-        if let project { pid = project } else {
-            var p = ProjectRecord(name: info.name)
-            try store.db.write { db in try p.insert(db) }
-            pid = p.id!
-        }
-        return try register(info, folder: folder, project: pid)
+        return try register(info, folder: folder)
     }
 
-    func register(_ info: Info, folder: URL, project: Int64) throws -> TeamRecord {
-        var t = TeamRecord(uuid: info.uuid, name: info.name, folder: canonicalPath(folder), projectId: project)
+    func register(_ info: Info, folder: URL) throws -> TeamRecord {
+        var t = TeamRecord(uuid: info.uuid, name: info.name, folder: canonicalPath(folder))
         try store.db.write { db in try t.insert(db) }
         lock.withLock { statuses[t.id!] = TeamStatus(teamId: t.id!, reachable: true) }
         syncSoon()
         return t
+    }
+
+    /// Shares a project of this Mac with a team: it appears on every Mac of the team, and its session names and
+    /// rules travel from then on.
+    public func share(project: Int64, team teamId: Int64) throws {
+        if let existing = try team(forProject: project), existing.id != teamId { throw TeamError.projectAlreadyShared(existing.name) }
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE project SET teamId = ?, updatedAt = ? WHERE id = ?", arguments: [teamId, Date().timeIntervalSince1970, project])
+        }
+        syncSoon()
+    }
+
+    /// Stops sharing a project from this Mac; teammates' Macs keep their copy of it.
+    public func unshare(project: Int64) throws {
+        try store.db.write { db in try db.execute(sql: "UPDATE project SET teamId = NULL WHERE id = ?", arguments: [project]) }
+        onChange?()
+    }
+
+    /// Renames the team for every Mac: the name lives in `team.json`, which every Mac re-reads on each pass.
+    public func rename(_ teamId: Int64, to rawName: String) throws {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let team = try store.db.read({ db in try TeamRecord.fetchOne(db, key: teamId) }) else { return }
+        guard var info = Self.readInfo(team.url) else { throw TeamError.folderUnreachable }
+        info.name = name
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let tmp = Self.infoURL(team.url).appendingPathExtension("tmp")
+        try encoder.encode(info).write(to: tmp)
+        guard Darwin.rename(tmp.path, Self.infoURL(team.url).path) == 0 else {
+            try? FileManager.default.removeItem(at: tmp)
+            throw CocoaError(.fileWriteUnknown)
+        }
+        try store.db.write { db in try db.execute(sql: "UPDATE team SET name = ? WHERE id = ?", arguments: [name, teamId]) }
+        onChange?()
     }
 
     /// The team folder moved (the NAS has a new address, the share is mounted under another name): point the team
@@ -169,10 +203,12 @@ public final class TeamSync: @unchecked Sendable {
         syncSoon()
     }
 
-    /// Leaves the team: forgets its folder and what teammates' Macs saw. People keep their names.
+    /// Leaves the team: forgets its folder and what teammates' Macs saw. Its projects stay here, now only on this
+    /// Mac; people keep their names.
     public func leave(_ teamId: Int64) throws {
         let affected = try store.db.write { db -> Set<Int64> in
             let ids = Set(try Int64.fetchAll(db, sql: "SELECT DISTINCT personId FROM personRemote WHERE teamId = ?", arguments: [teamId]))
+            try db.execute(sql: "UPDATE project SET teamId = NULL WHERE teamId = ?", arguments: [teamId])
             _ = try TeamRecord.deleteOne(db, key: teamId)
             return ids
         }
@@ -221,6 +257,11 @@ public final class TeamSync: @unchecked Sendable {
             status.reachable = true
             status.error = nil
             do {
+                // A teammate renamed the team.
+                if let info = Self.readInfo(folder), info.uuid == team.uuid, info.name != team.name {
+                    try store.db.write { db in try db.execute(sql: "UPDATE team SET name = ? WHERE id = ?", arguments: [info.name, team.id]) }
+                    changed = true
+                }
                 if try push(team, forced: forced) { changed = true }
                 if try pull(team) { changed = true }
                 status.devices = devices(team)
@@ -268,6 +309,8 @@ public final class TeamSync: @unchecked Sendable {
         var device: String?
         var centroid: String?
         var count: Int?
+        /// session, rule: the project's stable id (older logs: none = the team's first project).
+        var project: String?
     }
 
     struct RulePayload: Codable {
@@ -313,20 +356,15 @@ public final class TeamSync: @unchecked Sendable {
             ops.append(Op(t: "device", at: now, name: deviceName))
             updates["pub:device"] = deviceName
         }
-        var people = try relevantPeople(team)
-        // People a rule names count too, so a teammate's Mac can apply the rule.
-        let ruleRows = try store.db.read { db in
-            try DeliveryRule.filter(Column("projectId") == team.projectId).fetchAll(db)
-        }
-        let rulePeople = Set(ruleRows.filter { $0.deletedAt == nil }.flatMap { $0.mediaQuery.people })
-        let known = Set(people.map(\.id))
-        if !rulePeople.subtracting(known).isEmpty {
-            let extra = try store.db.read { db in
-                try Row.fetchAll(db, sql: "SELECT id, uuid, name, nameAt FROM person WHERE name IS NOT NULL AND id IN (\(rulePeople.subtracting(known).map(String.init).joined(separator: ",")))")
-                    .map { ($0["id"] as Int64, $0["uuid"] as String, $0["name"] as String, $0["nameAt"] as Double?) }
+        let projects = try projects(in: teamId)
+        for p in projects {
+            let value = "\(p.updatedAt)|\(p.name)"
+            if state["pub:project:\(p.uuid)"] != value {
+                ops.append(Op(t: "project", at: p.updatedAt, uuid: p.uuid, name: p.name))
+                updates["pub:project:\(p.uuid)"] = value
             }
-            people += extra
         }
+        let people = try relevantPeople(team)
         for p in people {
             let at = p.nameAt ?? 0
             let value = "\(at)|\(p.name)"
@@ -342,29 +380,32 @@ public final class TeamSync: @unchecked Sendable {
                 updates["pub:merge:\(from)"] = into
             }
         }
-        for r in try store.db.read({ db in try Row.fetchAll(db, sql: "SELECT at, name, updatedAt FROM sessionLabel WHERE projectId = ?", arguments: [team.projectId]) }) {
-            let moment: Double = r["at"], updatedAt: Double = r["updatedAt"]
-            let value = "\(updatedAt)"
-            if state["pub:session:\(moment)"] != value {
-                ops.append(Op(t: "session", at: updatedAt, name: r["name"], moment: moment))
-                updates["pub:session:\(moment)"] = value
-            }
-        }
         let uuidOf = Dictionary(people.map { ($0.id, $0.uuid) }, uniquingKeysWith: { a, _ in a })
-        for rule in ruleRows {
-            let value = "\(rule.updatedAt)|\(rule.deletedAt != nil)"
-            guard state["pub:rule:\(rule.uuid)"] != value else { continue }
-            var q = rule.mediaQuery
-            let uuids = q.people.compactMap { uuidOf[$0] }
-            guard uuids.count == q.people.count else { continue }  // a person without a name can't travel yet
-            q.people = []
-            q.project = nil
-            q.sourceId = nil
-            let payload = RulePayload(name: rule.name, folder: rule.folder, layout: rule.layout.rawValue, recipe: rule.recipe,
-                                      writeNames: rule.writeNames, enabled: rule.enabled, people: uuids, query: q,
-                                      createdAt: rule.createdAt.timeIntervalSince1970)
-            ops.append(Op(t: "rule", at: rule.updatedAt, uuid: rule.uuid, rule: payload, deleted: rule.deletedAt != nil))
-            updates["pub:rule:\(rule.uuid)"] = value
+        for project in projects {
+            let pid = project.id!
+            for r in try store.db.read({ db in try Row.fetchAll(db, sql: "SELECT at, name, updatedAt FROM sessionLabel WHERE projectId = ?", arguments: [pid]) }) {
+                let moment: Double = r["at"], updatedAt: Double = r["updatedAt"]
+                let value = "\(updatedAt)"
+                if state["pub:session:\(project.uuid):\(moment)"] != value {
+                    ops.append(Op(t: "session", at: updatedAt, name: r["name"], moment: moment, project: project.uuid))
+                    updates["pub:session:\(project.uuid):\(moment)"] = value
+                }
+            }
+            for rule in try store.db.read({ db in try DeliveryRule.filter(Column("projectId") == pid).fetchAll(db) }) {
+                let value = "\(rule.updatedAt)|\(rule.deletedAt != nil)"
+                guard state["pub:rule:\(rule.uuid)"] != value else { continue }
+                var q = rule.mediaQuery
+                let uuids = q.people.compactMap { uuidOf[$0] }
+                guard uuids.count == q.people.count else { continue }  // a person without a name can't travel yet
+                q.people = []
+                q.project = nil
+                q.sourceId = nil
+                let payload = RulePayload(name: rule.name, folder: rule.folder, layout: rule.layout.rawValue, recipe: rule.recipe,
+                                          writeNames: rule.writeNames, enabled: rule.enabled, people: uuids, query: q,
+                                          createdAt: rule.createdAt.timeIntervalSince1970)
+                ops.append(Op(t: "rule", at: rule.updatedAt, uuid: rule.uuid, rule: payload, deleted: rule.deletedAt != nil, project: project.uuid))
+                updates["pub:rule:\(rule.uuid)"] = value
+            }
         }
         var wrote = false
         if !ops.isEmpty {
@@ -432,7 +473,7 @@ public final class TeamSync: @unchecked Sendable {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let tmp = url.appendingPathExtension("tmp")
         try JSONEncoder().encode(summaries).write(to: tmp)
-        guard rename(tmp.path, url.path) == 0 else {
+        guard Darwin.rename(tmp.path, url.path) == 0 else {
             try? FileManager.default.removeItem(at: tmp)
             throw CocoaError(.fileWriteUnknown)
         }
@@ -575,8 +616,31 @@ public final class TeamSync: @unchecked Sendable {
         return nil
     }
 
+    /// The local project a change belongs to: by stable id (older logs: the team's first project), nil when not
+    /// known yet. `.gone` when this Mac deleted it.
+    enum ProjectLookup { case found(Int64), unknown, gone }
+    static func resolveProject(_ uuid: String?, team: TeamRecord, db: Database) throws -> ProjectLookup {
+        let u = uuid ?? legacyProjectUuid(team.uuid)
+        if let id = try Int64.fetchOne(db, sql: "SELECT id FROM project WHERE uuid = ? AND teamId = ?", arguments: [u, team.id]) { return .found(id) }
+        if try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM syncState WHERE teamId = ? AND key = ?", arguments: [team.id, "gone:project:\(u)"]) ?? 0 > 0 { return .gone }
+        return .unknown
+    }
+
     func apply(_ op: Op, team: TeamRecord, device: String, db: Database) throws -> Outcome {
         switch op.t {
+        case "project":
+            guard let uuid = op.uuid, let name = op.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return .ignored }
+            if let p = try ProjectRecord.filter(Column("uuid") == uuid).fetchOne(db) {
+                guard p.name != name, op.at > p.updatedAt else { return .ignored }
+                try db.execute(sql: "UPDATE project SET name = ?, updatedAt = ?, teamId = ? WHERE id = ?", arguments: [name, op.at, team.id, p.id])
+                return .applied(people: [], remote: [])
+            }
+            if case .gone = try Self.resolveProject(uuid, team: team, db: db) { return .ignored }
+            var p = ProjectRecord(name: name, uuid: uuid, teamId: team.id)
+            p.updatedAt = op.at
+            try p.insert(db)
+            return .applied(people: [], remote: [])
+
         case "person":
             guard let uuid = op.uuid, let name = op.name.map(PersonNames.clean), !name.isEmpty else { return .ignored }
             if let pid = try Self.resolve(uuid, db: db) {
@@ -619,11 +683,23 @@ public final class TeamSync: @unchecked Sendable {
 
         case "session":
             guard let moment = op.moment, let name = op.name else { return .ignored }
-            return try EventSessions.setName(db, project: team.projectId, at: moment, name: name, updatedAt: op.at)
+            let projectId: Int64
+            switch try Self.resolveProject(op.project, team: team, db: db) {
+            case .found(let id): projectId = id
+            case .unknown: return .deferred
+            case .gone: return .ignored
+            }
+            return try EventSessions.setName(db, project: projectId, at: moment, name: name, updatedAt: op.at)
                 ? .applied(people: [], remote: []) : .ignored
 
         case "rule":
             guard let uuid = op.uuid, let payload = op.rule else { return .ignored }
+            let projectId: Int64
+            switch try Self.resolveProject(op.project, team: team, db: db) {
+            case .found(let id): projectId = id
+            case .unknown: return .deferred
+            case .gone: return .ignored
+            }
             var ids: [Int64] = []
             for u in payload.people {
                 guard let id = try Self.resolve(u, db: db) else { return .deferred }
@@ -634,12 +710,12 @@ public final class TeamSync: @unchecked Sendable {
             if existing == nil && op.deleted == true { return .ignored }
             var q = payload.query
             q.people = ids
-            q.project = team.projectId
+            q.project = projectId
             var rule = existing ?? DeliveryRule(name: payload.name, query: q, folder: payload.folder, layout: .person, recipe: nil,
-                                                writeNames: payload.writeNames, projectId: team.projectId)
+                                                writeNames: payload.writeNames, projectId: projectId)
             rule.uuid = uuid
             rule.name = payload.name
-            rule.projectId = team.projectId
+            rule.projectId = projectId
             rule.setQuery(q)
             rule.folder = payload.folder
             rule.layout = DeliveryRule.Layout(rawValue: payload.layout) ?? .person

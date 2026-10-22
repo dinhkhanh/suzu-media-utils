@@ -346,3 +346,15 @@ and after every feature below; same 92 people.
 - Every named person on a Mac travels to its teams (not only the project's), so Known-People prepared before the
   event and people from earlier events reach every Mac. Summary signatures are checked every 15 s, written at most
   once a minute while faces keep arriving.
+
+## v0.6.4 (2026-10-23): a team holds many projects; rename team; sidebar
+- `project.uuid`, `project.teamId`, `project.updatedAt`; `team` no longer points at one project (table recreated in
+  migration v10). The project a team held before gets the id `<team uuid>-project` on every Mac of that team, and
+  session/rule changes logged without a project (0.6.x logs) land there, so existing team folders keep working.
+- Log gains `project {uuid, name, at}` (LWW on the name); session and rule ops carry `project`. Joining a team
+  brings its projects (created locally by uuid; teammates add their own folders). Unknown project → the change
+  waits in `syncDeferred`; a project deleted on this Mac is remembered (`gone:project:<uuid>`) so it never comes
+  back. Stop Sharing removes the project from the team on this Mac only; Leave Team keeps the projects as local ones.
+- Rename Team writes `team.json`; every Mac re-reads it each pass.
+- Sidebar: team card (tinted, "TEAM") above the project card ("PROJECT"); the project menu groups projects by team
+  and "Only on this Mac"; the team menu lists the team's projects, Macs and actions.

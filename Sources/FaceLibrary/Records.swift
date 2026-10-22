@@ -32,8 +32,20 @@ public struct ProjectRecord: Codable, FetchableRecord, MutablePersistableRecord,
     public var id: Int64?
     public var name: String
     public var createdAt: Date
+    /// Stable across Macs (team sync): a shared project is the same project on every Mac of its team.
+    public var uuid: String
+    /// The team this project is shared with; nil = only on this Mac.
+    public var teamId: Int64?
+    /// Last rename, seconds since 1970 (a teammate's newer name wins).
+    public var updatedAt: Double
 
-    public init(name: String) { self.name = name; createdAt = Date() }
+    public init(name: String, uuid: String = SyncIds.new(), teamId: Int64? = nil) {
+        self.name = name
+        createdAt = Date()
+        self.uuid = uuid
+        self.teamId = teamId
+        updatedAt = Date().timeIntervalSince1970
+    }
     public mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
 }
 
@@ -134,18 +146,18 @@ public enum SyncIds {
     public static func new() -> String { UUID().uuidString.lowercased() }
 }
 
-/// A project shared with other Macs through a folder they can all reach (see TeamSync).
+/// Macs sharing projects through a folder they can all reach (see TeamSync). A team holds any number of projects
+/// (`ProjectRecord.teamId`).
 public struct TeamRecord: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Hashable, Sendable {
     public static let databaseTableName = "team"
     public var id: Int64?
     public var uuid: String
     public var name: String
     public var folder: String
-    public var projectId: Int64
     public var joinedAt: Date
 
-    public init(uuid: String, name: String, folder: String, projectId: Int64) {
-        self.uuid = uuid; self.name = name; self.folder = folder; self.projectId = projectId; joinedAt = Date()
+    public init(uuid: String, name: String, folder: String) {
+        self.uuid = uuid; self.name = name; self.folder = folder; joinedAt = Date()
     }
     public mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
     public var url: URL { URL(fileURLWithPath: folder, isDirectory: true) }

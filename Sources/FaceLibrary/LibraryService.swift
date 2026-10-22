@@ -149,7 +149,10 @@ public final class LibraryService: @unchecked Sendable {
     public func renameProject(_ id: Int64, to name: String) throws {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        try store.db.write { db in try db.execute(sql: "UPDATE project SET name = ? WHERE id = ?", arguments: [trimmed, id]) }
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE project SET name = ?, updatedAt = ? WHERE id = ?", arguments: [trimmed, Date().timeIntervalSince1970, id])
+        }
+        teamSync.pushSoon()
     }
 
     /// Moves a folder (and everything found in it) to another project; nothing is re-scanned.
@@ -164,7 +167,14 @@ public final class LibraryService: @unchecked Sendable {
     public func deleteProject(_ id: Int64) throws {
         let sources = try store.db.read { db in try Int64.fetchAll(db, sql: "SELECT id FROM source WHERE projectId = ?", arguments: [id]) }
         for s in sources { try removeSource(s) }
-        try store.db.write { db in _ = try ProjectRecord.deleteOne(db, key: id) }
+        try store.db.write { db in
+            // A shared project deleted here stays on teammates' Macs; their later changes to it are ignored here
+            // rather than bringing it back.
+            if let p = try ProjectRecord.fetchOne(db, key: id), let team = p.teamId {
+                try db.execute(sql: "INSERT OR REPLACE INTO syncState (teamId, key, value) VALUES (?, ?, '1')", arguments: [team, "gone:project:\(p.uuid)"])
+            }
+            _ = try ProjectRecord.deleteOne(db, key: id)
+        }
     }
 
     /// Forgets a source and everything found in it. Files on disk are not touched. Deletes in small batches so the

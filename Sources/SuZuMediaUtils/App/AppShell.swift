@@ -39,7 +39,7 @@ struct AppShell: View {
                 ToolsSidebar()
             }
             .navigationSplitViewColumnWidth(min: 220, ideal: 250)
-            .safeAreaInset(edge: .top) { VStack(spacing: 0) { ProjectSwitcher(); TeamBar() } }
+            .safeAreaInset(edge: .top) { SidebarHeader() }
             .safeAreaInset(edge: .bottom) { FaceGroupingStatus() }
             .toolbar { FaceGroupingSidebarToolbar() }
         } detail: {

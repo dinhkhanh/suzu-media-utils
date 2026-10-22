@@ -2,16 +2,39 @@ import AppKit
 import FaceLibrary
 import SwiftUI
 
-/// Under the project switcher: the open project's team and how the sharing is going.
+/// Top of the sidebar: the team (who you work with) above the project (which event), since a team holds many
+/// projects. Both are menus.
+struct SidebarHeader: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            TeamBar()
+            ProjectSwitcher()
+        }
+    }
+}
+
+/// The open project's team, how the sharing is going, and the team's actions. A project shared with nobody says so
+/// and offers to share or join.
 struct TeamBar: View {
     @EnvironmentObject var model: FaceGroupingModel
     @State private var confirmLeave = false
+    @State private var renaming = false
+    @State private var newName = ""
 
     var body: some View {
-        if let team = model.currentTeam {
-            let status = model.teamStatus[team.id!]
-            Menu {
+        let team = model.currentTeam
+        let status = team.flatMap { model.teamStatus[$0.id!] }
+        Menu {
+            if let team {
+                let projects = model.projects(in: team)
+                Section("\(projects.count) project\(projects.count == 1 ? "" : "s") in this team") {
+                    ForEach(projects) { p in
+                        Button(p.id == model.currentProject ? "✓ \(p.name)" : p.name) { model.currentProject = p.id }
+                    }
+                }
+                Divider()
                 Button("Sync Now") { model.syncTeamNow() }
+                Button("Rename Team…") { newName = team.name; renaming = true }
                 Button("Show Team Folder in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: team.folder) }
                 // The NAS got a new address or the share a new mount name: same team, new path.
                 Button("Locate Team Folder…") {
@@ -24,38 +47,82 @@ struct TeamBar: View {
                     NSPasteboard.general.setString(team.folder, forType: .string)
                 }
                 if let status, !status.devices.isEmpty {
-                    Divider()
-                    ForEach(status.devices, id: \.id) { d in
-                        Text(d.isThisMac ? "\(d.name) (this Mac)" : "\(d.name)\(d.lastSeen.map { " · \(Self.ago($0))" } ?? "")")
+                    Section("Macs") {
+                        ForEach(status.devices, id: \.id) { d in
+                            Text(d.isThisMac ? "\(d.name) (this Mac)" : "\(d.name)\(d.lastSeen.map { " · \(Self.ago($0))" } ?? "")")
+                        }
                     }
                 }
                 Divider()
+                Button("Join Another Team…") { model.askJoinTeam = true }
                 Button("Leave Team…", role: .destructive) { confirmLeave = true }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: status?.reachable == false ? "person.3.fill" : "person.3")
-                        .foregroundStyle(status?.reachable == false ? Color.orange : Color.accentColor)
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text("Team \(team.name)").font(.subheadline.weight(.medium)).lineLimit(1)
-                        Text(Self.subtitle(status)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    Spacer(minLength: 0)
+            } else {
+                if model.currentProject != nil {
+                    ForEach(model.teams) { t in Button("Share with Team “\(t.name)”") { model.shareProject(with: t) } }
+                    Button(model.teams.isEmpty ? "Share with a Team…" : "Share with a New Team…") { model.askShareTeam = true }
                 }
-                .contentShape(Rectangle())
+                Button("Join a Team…") { model.askJoinTeam = true }
+                if !model.teams.isEmpty {
+                    Section("Your teams") {
+                        ForEach(model.teams) { t in
+                            let first = model.projects(in: t).first
+                            Button(t.name) { if let first { model.currentProject = first.id } }
+                        }
+                    }
+                }
             }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.4)))
-            .padding(.horizontal, 10).padding(.bottom, 4)
-            .help("Names, people, session names and rules are shared with every Mac in the team through \(team.folder)")
-            .confirmationDialog("Leave the team “\(team.name)”?", isPresented: $confirmLeave) {
-                Button("Leave Team", role: .destructive) { model.leaveTeam(team.id!) }
-            } message: {
-                Text("This Mac stops sharing with the team. People keep their names here; what teammates' Macs saw of their faces is forgotten. The team folder and the other Macs are not touched.")
-            }
+        } label: {
+            label(team: team, status: status)
         }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(team == nil ? 0.04 : 0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor.opacity(team == nil ? 0.15 : 0.35), lineWidth: 1))
+        .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 2)
+        .help(team.map { "Names, people, projects, session names and rules are shared with every Mac in the team through \($0.folder)" }
+              ?? "A team is a folder every Mac can reach; its projects, people and rules are shared between those Macs.")
+        .alert("Rename Team", isPresented: $renaming) {
+            TextField("Name", text: $newName)
+            Button("Rename") { if let team { model.renameTeam(team.id!, to: newName) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every Mac in the team sees the new name.")
+        }
+        .confirmationDialog("Leave the team “\(team?.name ?? "")”?", isPresented: $confirmLeave) {
+            Button("Leave Team", role: .destructive) { if let team { model.leaveTeam(team.id!) } }
+        } message: {
+            Text("This Mac stops sharing with the team. Its projects stay here, now only on this Mac; people keep their names; what teammates' Macs saw of their faces is forgotten. The team folder and the other Macs are not touched.")
+        }
+    }
+
+    var teamCount: String { "\(model.teams.count) team\(model.teams.count == 1 ? "" : "s")" }
+
+    func title(_ team: TeamRecord?) -> String {
+        if let team { return team.name }
+        return model.currentProject == nil ? teamCount : "Only on this Mac"
+    }
+
+    func caption(_ team: TeamRecord?, _ status: TeamSync.TeamStatus?) -> String {
+        if team != nil { return Self.subtitle(status) }
+        return model.currentProject == nil ? "Pick a project to see its team" : "Share to work on it from other Macs"
+    }
+
+    func label(team: TeamRecord?, status: TeamSync.TeamStatus?) -> some View {
+        let offline = status?.reachable == false
+        let tint: Color = team == nil ? .secondary : offline ? .orange : .accentColor
+        return HStack(spacing: 8) {
+            Image(systemName: team == nil ? "person.3" : "person.3.fill").foregroundStyle(tint)
+            VStack(alignment: .leading, spacing: 0) {
+                Text("TEAM").font(.caption2.weight(.semibold)).foregroundStyle(team == nil ? Color.secondary.opacity(0.6) : Color.accentColor.opacity(0.8))
+                Text(title(team)).font(.headline).lineLimit(1)
+                Text(caption(team, status)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.up.chevron.down").font(.caption).foregroundStyle(.secondary)
+        }
+        .contentShape(Rectangle())
     }
 
     static func subtitle(_ status: TeamSync.TeamStatus?) -> String {
@@ -76,21 +143,23 @@ struct TeamBar: View {
     }
 }
 
-/// Share the open project: pick a folder every teammate's Mac can reach, and tell them to join it.
+/// Share the open project: with a team this Mac is already in, or a new team in a folder every teammate's Mac can
+/// reach; then tell them to join it.
 struct ShareTeamSheet: View {
     @EnvironmentObject var model: FaceGroupingModel
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var folder: URL?
-    @State private var created: TeamRecord?
+    @State private var existing: Int64? = nil
+    @State private var done = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if let team = created ?? model.currentTeam {
-                Text("Shared with Team").font(.title2.bold())
-                Text("Your project is shared. People you name, merges, session names and rules reach every Mac in the team within seconds, and theirs reach you. Photos stay where they are.")
+            if done, let team = model.currentTeam {
+                Text("Shared with Team \(team.name)").font(.title2.bold())
+                Text("The project now appears on every Mac in the team. People you name, merges, session names and rules reach them within seconds, and theirs reach you. Photos stay where they are.")
                     .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                GroupBox("Tell your teammates") {
+                GroupBox("Tell teammates who are not in the team yet") {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("On their Mac: File → Join a Team… and pick this folder:")
                         HStack {
@@ -107,57 +176,66 @@ struct ShareTeamSheet: View {
                 HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
             } else {
                 Text("Share Project with Team").font(.title2.bold())
-                Text("Work on the same event from several Macs — yours or your teammates'. Name a person once and every Mac recognises them; session names and rules are shared too. Nothing to sign up for: the team lives in a folder every Mac can reach.")
+                Text("Work on the same event from several Macs — yours or your teammates'. Name a person once and every Mac recognises them; session names and rules are shared too. Nothing to sign up for: the team lives in a folder every Mac can reach, and holds every event you share with it.")
                     .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                TextField("Team name", text: $name, prompt: Text(model.projectName)).textFieldStyle(.roundedBorder)
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("Team folder").font(.headline)
-                        Spacer()
-                        Button("Choose…") {
-                            Panels.choose(folders: true, files: false, prompt: "Use This Folder",
-                                          message: "Choose an empty folder on the NAS (or in Dropbox / iCloud Drive) that every Mac of the team can open.",
-                                          start: model.projectSources.first.map { URL(fileURLWithPath: $0.path).deletingLastPathComponent() }) { folder = $0.first }
-                        }
+                if !model.teams.isEmpty {
+                    Picker("Team", selection: $existing) {
+                        ForEach(model.teams) { t in Text("\(t.name)  ·  \(model.projects(in: t).count) projects").tag(Int64?.some(t.id!)) }
+                        Text("New team…").tag(Int64?.none)
                     }
-                    Text(folder?.path ?? "An empty folder on the NAS, or in Dropbox / iCloud Drive").foregroundStyle(folder == nil ? .secondary : .primary)
-                        .lineLimit(2).truncationMode(.middle)
-                    Text("Tip: make it next to the event's photo folders, e.g. “Gala 2026 – Team”.").font(.caption).foregroundStyle(.secondary)
+                    .pickerStyle(.radioGroup)
+                }
+                if existing == nil {
+                    TextField("Team name", text: $name, prompt: Text(model.teams.isEmpty ? "e.g. SuZu Media" : "Team name")).textFieldStyle(.roundedBorder)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Team folder").font(.headline)
+                            Spacer()
+                            Button("Choose…") {
+                                Panels.choose(folders: true, files: false, prompt: "Use This Folder",
+                                              message: "Choose an empty folder on the NAS (or in Dropbox / iCloud Drive) that every Mac of the team can open.",
+                                              start: model.projectSources.first.map { URL(fileURLWithPath: $0.path).deletingLastPathComponent() }) { folder = $0.first }
+                            }
+                        }
+                        Text(folder?.path ?? "An empty folder on the NAS, or in Dropbox / iCloud Drive").foregroundStyle(folder == nil ? .secondary : .primary)
+                            .lineLimit(2).truncationMode(.middle)
+                        Text("One team folder serves every event: keep it somewhere permanent, e.g. “SuZu Media – Team”.").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 HStack {
                     Spacer()
                     Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                    Button("Create Team") {
-                        guard let folder else { return }
-                        if model.createTeam(named: name.isEmpty ? model.projectName : name, folder: folder) {
-                            created = model.currentTeam ?? TeamRecord(uuid: "", name: name.isEmpty ? model.projectName : name, folder: canonicalPath(folder), projectId: model.currentProject ?? 0)
+                    Button("Share") {
+                        if let id = existing, let team = model.teams.first(where: { $0.id == id }) {
+                            model.shareProject(with: team)
+                            done = model.currentTeam != nil
+                        } else if let folder {
+                            done = model.createTeam(named: name.isEmpty ? "SuZu Media" : name, folder: folder)
                         }
                     }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(folder == nil || model.currentProject == nil)
+                    .disabled((existing == nil && folder == nil) || model.currentProject == nil)
                 }
             }
         }
         .padding(20)
         .frame(width: 560)
+        .onAppear { existing = model.teams.first?.id }
     }
 }
 
-/// Join a team a teammate created: pick its folder, choose which project it becomes.
+/// Join a team a teammate created: pick its folder; its projects appear by themselves.
 struct JoinTeamSheet: View {
     @EnvironmentObject var model: FaceGroupingModel
     @Environment(\.dismiss) private var dismiss
     @State private var folder: URL?
     @State private var info: TeamSync.Info?
     @State private var problem: String?
-    @State private var linkCurrent = false
-
-    var canLinkCurrent: Bool { model.currentProject != nil && model.currentTeam == nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Join a Team").font(.title2.bold())
-            Text("Pick the team folder a teammate shared (on the NAS, or in Dropbox / iCloud Drive). From then on the people they name are recognised here, and yours there.")
+            Text("Pick the team folder a teammate shared (on the NAS, or in Dropbox / iCloud Drive). Its projects appear here, the people they name are recognised here, and yours there.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Text(folder?.path ?? "No folder chosen").foregroundStyle(folder == nil ? .secondary : .primary).lineLimit(2).truncationMode(.middle)
@@ -183,12 +261,7 @@ struct JoinTeamSheet: View {
                     .padding(4)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                Picker("Project", selection: $linkCurrent) {
-                    Text("New project “\(info.name)”").tag(false)
-                    if canLinkCurrent { Text("This project (\(model.projectName))").tag(true) }
-                }
-                .pickerStyle(.radioGroup)
-                Text("Then add your own photo folders to it. Your photos stay on your Mac; only names, session names and rules are shared.")
+                Text("The team's projects open here within seconds; add your own photo folders to the one you are shooting. Your photos stay on your Mac; only names, session names and rules are shared.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             HStack {
@@ -196,7 +269,7 @@ struct JoinTeamSheet: View {
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Join Team") {
                     guard let folder else { return }
-                    if model.joinTeam(folder: folder, project: linkCurrent ? model.currentProject : nil) { dismiss() }
+                    if model.joinTeam(folder: folder) { dismiss() }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(info == nil)
