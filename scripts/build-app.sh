@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 NAME="SuZu Media Utils"
-VERSION="${VERSION:-0.6.0}"
+VERSION="${VERSION:-0.6.1}"
 swift build -c release --product SuZuMediaUtils
 APP="dist/$NAME.app"
 rm -rf "$APP"

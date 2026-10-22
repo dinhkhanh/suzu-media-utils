@@ -1,4 +1,4 @@
-# Tính năng của SuZu Media Utils (v0.6.0)
+# Tính năng của SuZu Media Utils (v0.6.1)
 
 Ứng dụng macOS cho SuZu Media: nhận diện và nhóm khuôn mặt trong ảnh/video sự kiện, cùng các công cụ xử lý ảnh
 hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi tiếng qua Amazon, nếu bật).

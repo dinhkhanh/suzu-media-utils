@@ -300,7 +300,7 @@ and after every feature below; same 92 people.
 - Move All re-runs keep a photo already in someone's folder; files seen growing settle for 5 s (15 s on NAS); a
   folder offline at launch is polled every 5 s until its volume is known; copies are only duplicates within a project.
 
-## v0.6 (2026-10-23): teams (several Macs, one event) and auto rules
+## v0.6.1 (2026-10-23): teams (several Macs, one event) and auto rules
 - **Team sync** (`TeamSync`): a project is shared through a folder every Mac can reach (NAS share, Dropbox, iCloud
   Drive). Chosen over CloudKit/Bonjour for now: nothing to sign up for, works at the venue with no internet, and it
   is testable here end to end. The folder holds `team.json`, `devices/<deviceId>.jsonl` (each Mac appends only its
