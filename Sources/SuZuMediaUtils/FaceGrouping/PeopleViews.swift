@@ -168,6 +168,7 @@ struct PersonDetail: View {
     @State private var topN: Int?
     @State private var session: Int?
     @State private var notifyRule = false
+    @State private var videoExport = false
 
     var person: PersonSummary? { model.people.first { $0.id == personId } }
 
@@ -188,6 +189,7 @@ struct PersonDetail: View {
         .task(id: reloadKey) { reload() }
         .onAppear { name = person?.name ?? "" }
         .sheet(isPresented: $notifyRule) { NewRuleSheet(presetPerson: personId, notifyOnly: true) }
+        .sheet(isPresented: $videoExport) { VideoExportSheet(personId: personId, name: person?.name ?? "Person") }
         .sheet(item: $export) { mode in
             ExportSheet(scope: .person(personId), mode: mode, initialName: person?.name ?? name)
         }
@@ -370,6 +372,12 @@ struct PersonDetail: View {
             }
             ToolbarItem {
                 MoveFacesMenu(faces: selectedFaces, excluding: personId) { selectedFaces = [] }
+            }
+        }
+        if tab == .videos && !media.filter({ $0.kind == .video }).isEmpty {
+            ToolbarItem {
+                Button { videoExport = true } label: { Label("Export Clips…", systemImage: "film.stack") }
+                    .help("Clips of each appearance, a highlight reel, or best still frames")
             }
         }
         ToolbarItem {

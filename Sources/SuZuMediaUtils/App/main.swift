@@ -66,6 +66,27 @@ func runHeadless(_ args: [String]) -> Never {
     for r in rows.prefix(15) {
         print("  \((r["name"] as String?) ?? "(unnamed)"): \(r["faces"] as Int) faces in \(r["media"] as Int) files")
     }
+    if let dir = value("--reel") {
+        // Highlight reel (max 30 s) and clips of the person seen in the most videos: a real-footage check.
+        let pid = try! service.store.db.read { db in
+            try Int64.fetchOne(db, sql: "SELECT personId FROM face WHERE personId IS NOT NULL AND time IS NOT NULL GROUP BY personId ORDER BY COUNT(DISTINCT mediaId) DESC LIMIT 1")
+        }
+        if let pid {
+            let sem = DispatchSemaphore(value: 0)
+            Task {
+                let vx = VideoExport(store: service.store)
+                let apps = (try? vx.appearances(personId: pid)) ?? []
+                let t = Date()
+                let reel = try? await vx.export(personId: pid, name: "Person \(pid)", kind: .reel(maxSeconds: 30), to: URL(fileURLWithPath: dir))
+                let tReel = Date().timeIntervalSince(t)
+                let clips = try? await vx.export(personId: pid, name: "Person \(pid)", kind: .clips, to: URL(fileURLWithPath: dir).appendingPathComponent("clips"))
+                print(String(format: "person %lld: %d appearances; reel %@ in %.1f s; %d clips in %.1f s total", pid, apps.count,
+                             reel?.first?.lastPathComponent ?? "failed", tReel, clips?.count ?? 0, Date().timeIntervalSince(t)))
+                sem.signal()
+            }
+            sem.wait()
+        }
+    }
     if args.contains("--suggest-names") { suggestNamesHeadless(service, apply: args.contains("--apply")) }
     let failed = try! service.store.db.read { db in try Row.fetchAll(db, sql: "SELECT path, error FROM media WHERE status = 'failed' LIMIT 5") }
     for f in failed { print("  failed: \(f["path"] as String): \(f["error"] as String? ?? "")") }

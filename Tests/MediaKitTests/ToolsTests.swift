@@ -60,3 +60,50 @@ final class ToolsTests: XCTestCase {
         XCTAssertTrue(FolderVerifier.verify(source: src, destination: dst, checksums: true).isComplete)
     }
 }
+
+final class VideoExportTests: XCTestCase {
+    /// Real export on a short generated movie (AVAssetWriter), cut without re-encoding.
+    func testClipAndStillFromGeneratedMovie() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("vx-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let movie = dir.appendingPathComponent("m.mov")
+        try await TestMovie.write(to: movie, seconds: 6)
+        let clip = dir.appendingPathComponent("clip.mov")
+        try await VideoTools.exportClip(movie, segment: .init(start: 1, end: 4), to: clip)
+        let d = try await AVURLAsset(url: clip).load(.duration).seconds
+        XCTAssertEqual(d, 3, accuracy: 1.1)
+        let still = dir.appendingPathComponent("still.jpg")
+        var r = EditRecipe(); r.aspect = .square
+        try VideoTools.still(movie, at: 2, recipe: r, focus: nil, people: ["An"], to: still)
+        XCTAssertEqual(Metadata.people(in: still), ["An"])
+        let sheet = dir.appendingPathComponent("sheet.jpg")
+        try VideoTools.contactSheet(movie, columns: 3, rows: 2, width: 900, to: sheet)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sheet.path))
+    }
+}
+
+import AVFoundation
+import CoreVideo
+
+enum TestMovie {
+    static func write(to url: URL, seconds: Int, fps: Int32 = 10) async throws {
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: 320, AVVideoHeightKey: 240])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey as String: 320, kCVPixelBufferHeightKey as String: 240])
+        writer.add(input)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+        for i in 0..<(seconds * Int(fps)) {
+            while !input.isReadyForMoreMediaData { try await Task.sleep(for: .milliseconds(5)) }
+            var pb: CVPixelBuffer?
+            CVPixelBufferPoolCreatePixelBuffer(nil, adaptor.pixelBufferPool!, &pb)
+            CVPixelBufferLockBaseAddress(pb!, [])
+            memset(CVPixelBufferGetBaseAddress(pb!), Int32(i * 3 % 255), CVPixelBufferGetDataSize(pb!))
+            CVPixelBufferUnlockBaseAddress(pb!, [])
+            adaptor.append(pb!, withPresentationTime: CMTime(value: CMTimeValue(i), timescale: fps))
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+    }
+}
