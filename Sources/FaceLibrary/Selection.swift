@@ -20,7 +20,7 @@ public enum Selection {
     /// The files of the given people (best first per person), optionally only photos or videos, the best N, and the
     /// best of each burst. Reads only the database, so it's fast even for NAS libraries.
     public static func files(_ store: LibraryStore, personIds: [Int64], kind: MediaKind?, topN: Int?, bestOfBurst: Bool,
-                             project: Int64? = nil) throws -> [PersonFile] {
+                             project: Int64? = nil, taken: ClosedRange<Double>? = nil) throws -> [PersonFile] {
         guard !personIds.isEmpty else { return [] }
         let ids = personIds.map(String.init).joined(separator: ",")
         let rows = try store.db.read { db in
@@ -29,7 +29,7 @@ public enum Selection {
                        COALESCE(f.score, f.quality * 0.6, 0) AS s
                 FROM face f JOIN media m ON m.id = f.mediaId JOIN person p ON p.id = f.personId LEFT JOIN source src ON src.id = m.sourceId
                 WHERE f.personId IN (\(ids)) AND p.name IS NOT NULL AND m.duplicateOf IS NULL AND m.status = 'done'
-                  AND \(ProjectScope.sql(project, source: "src")) \(kind.map { "AND m.kind = '\($0.rawValue)'" } ?? "")
+                  AND \(ProjectScope.sql(project, source: "src")) AND \(EventSessions.sql(taken)) \(kind.map { "AND m.kind = '\($0.rawValue)'" } ?? "")
                 ORDER BY p.name COLLATE NOCASE, s DESC
                 """)
         }

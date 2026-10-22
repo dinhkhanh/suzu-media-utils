@@ -109,7 +109,7 @@ struct ToolInputView: View {
         }
         .onChange(of: files) { if mode == 0 { items = files.map { ToolItem(url: $0) } } }
         .onChange(of: mode) { mode == 0 ? (items = files.map { ToolItem(url: $0) }) : resolve() }
-        .task(id: "\(chosen.sorted())|\(topN ?? 0)|\(bestOfBurst)|\(faces.currentProject ?? 0)") { if mode == 1 { resolve() } }
+        .task(id: "\(chosen.sorted())|\(topN ?? 0)|\(bestOfBurst)|\(faces.currentProject ?? 0)|\(faces.sessionRange.map { "\($0)" } ?? "")") { if mode == 1 { resolve() } }
         // People of another project aren't in this one.
         .onChange(of: faces.currentProject) { chosen = [] }
     }
@@ -148,16 +148,17 @@ struct ToolInputView: View {
                 }
                 .labelsHidden().fixedSize()
                 Toggle("Skip similar shots", isOn: $bestOfBurst).toggleStyle(.checkbox)
+                SessionPicker()
             }
         }
     }
 
     func resolve() {
         guard let store = faces.store else { return }
-        let ids = Array(chosen), kind = mediaKind, topN = topN, burst = bestOfBurst, project = faces.currentProject
+        let ids = Array(chosen), kind = mediaKind, topN = topN, burst = bestOfBurst, project = faces.currentProject, taken = faces.sessionRange
         resolving = true
         Task.detached(priority: .userInitiated) {
-            let files = (try? Selection.files(store, personIds: ids, kind: kind, topN: topN, bestOfBurst: burst, project: project)) ?? []
+            let files = (try? Selection.files(store, personIds: ids, kind: kind, topN: topN, bestOfBurst: burst, project: project, taken: taken)) ?? []
             let items = files.map { ToolItem(url: $0.url, personName: $0.personName, people: $0.people, takenAt: $0.takenAt, focus: $0.focus) }
             await MainActor.run { self.items = items; resolving = false }
         }

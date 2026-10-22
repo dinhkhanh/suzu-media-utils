@@ -40,6 +40,8 @@ public struct Exporter: Sendable {
         public var bestOfBurst = false
         /// Only files of this project (nil = every project).
         public var project: Int64?
+        /// Only files captured in this time range (a session), seconds since 1970.
+        public var taken: ClosedRange<Double>?
         public init() {}
     }
 
@@ -81,7 +83,7 @@ public struct Exporter: Sendable {
                     EXISTS (SELECT 1 FROM face f2 JOIN person p2 ON p2.id = f2.personId
                             WHERE f2.mediaId = m.id AND f2.personId != ? AND p2.name IS NOT NULL) AS shared
                 FROM media m LEFT JOIN source s ON s.id = m.sourceId
-                WHERE m.duplicateOf IS NULL AND \(ProjectScope.sql(options.project)) AND m.id IN (SELECT mediaId FROM face WHERE personId = ?)
+                WHERE m.duplicateOf IS NULL AND \(ProjectScope.sql(options.project)) AND \(EventSessions.sql(options.taken)) AND m.id IN (SELECT mediaId FROM face WHERE personId = ?)
                 ORDER BY m.path
                 """, arguments: [personId, personId])
         }
@@ -114,6 +116,7 @@ public struct Exporter: Sendable {
                 SELECT m.id, m.path, s.path AS sourcePath, f.personId, MAX(f.w * f.h) AS area FROM face f
                 JOIN media m ON m.id = f.mediaId LEFT JOIN source s ON s.id = m.sourceId
                 WHERE f.personId IN (\(ids)) AND m.duplicateOf IS NULL AND \(ProjectScope.sql(options.project))
+                  AND \(EventSessions.sql(options.taken))
                 GROUP BY m.id, f.personId
                 ORDER BY m.path, area DESC
                 """)

@@ -167,6 +167,15 @@ public final class LibraryStore: @unchecked Sendable {
                 try db.execute(sql: "UPDATE smartAlbum SET projectId = ?", arguments: [pid])
             }
         }
+        m.registerMigration("v6-sessions") { db in
+            /// A session's name, stored as a moment inside it (see EventSessions).
+            try db.create(table: "sessionLabel") { t in
+                t.column("projectId", .integer).notNull().references("project", onDelete: .cascade)
+                t.column("at", .double).notNull()
+                t.column("name", .text).notNull()
+            }
+            try db.create(index: "sessionLabel_project", on: "sessionLabel", columns: ["projectId", "at"])
+        }
         return m
     }
 }

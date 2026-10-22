@@ -20,8 +20,11 @@ groups them by person, keeps up as new files arrive, and files each person's med
 - Groups form automatically; known people are recognised as soon as a file finishes copying.
 - Name people right in the grid, merge groups, fix mistakes ("Not this person", "Move to…"); pick any face as a
   person's picture, or let the best shot be chosen automatically (sharp, eyes open, facing the camera).
+- **Sessions:** each project splits itself into sessions wherever nobody shot for 30 minutes (adjustable): the
+  opening, each match, the awards. Click a session above the People grid to see only who was there; person pages,
+  Unassigned Faces, Search, Copy/Move and Batch Export's People source follow it. Right-click a session to name it.
 - **Best shots:** every face is scored (Vision capture quality, sharpness, eyes open, head angle, smile, size).
-  Person pages sort Best First, show Best 10/20/50, hide near-identical burst shots and filter by shooting session.
+  Person pages sort Best First, show Best 10/20/50 and hide near-identical burst shots.
 - **Search & smart albums:** people (all together / any), solo or group shots, photos/videos, dates, folder, best
   shots only; save as a smart album that keeps updating.
 - **Export:** Copy/Move to Folder per person or Export All (`<folder>/<Person Name>/`, never overwriting). Optional

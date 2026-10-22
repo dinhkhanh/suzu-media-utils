@@ -78,10 +78,25 @@ final class FaceGroupingModel: ObservableObject {
             guard currentProject != oldValue else { return }
             UserDefaults.standard.set(currentProject ?? 0, forKey: "currentProject")
             people = []
+            sessions = []
+            sessionAnchor = nil
             server?.show(project: currentProject, title: projectName)
             refresh()
         }
     }
+    /// The open project split into sessions at gaps in capture time (opening, matches, awards…).
+    @Published var sessions: [EventSession] = []
+    /// A moment inside the session being looked at (nil = the whole event). People, faces, person pages, search,
+    /// exports and the batch tools' People source follow it. A moment, not an index: sessions grow as files arrive.
+    @Published var sessionAnchor: Double? {
+        didSet { if sessionAnchor != oldValue { refresh() } }
+    }
+    /// Minutes without a shot that start a new session.
+    @Published var sessionGapMinutes: Int = UserDefaults.standard.object(forKey: "sessionGap") as? Int ?? 30 {
+        didSet { UserDefaults.standard.set(sessionGapMinutes, forKey: "sessionGap"); refresh() }
+    }
+    var currentSession: EventSession? { sessionAnchor.flatMap { a in sessions.first { $0.contains(a) } } }
+    var sessionRange: ClosedRange<Double>? { currentSession?.range }
     /// Asks the window to show the New Project sheet (e.g. "Add Folder" with no project open).
     @Published var askNewProject = false
     /// People in the open project.
@@ -172,18 +187,25 @@ final class FaceGroupingModel: ObservableObject {
         guard dirty, !refreshing, let db = store?.db else { return }
         dirty = false
         refreshing = true
-        let project = currentProject
+        let project = currentProject, range = sessionRange, gap = Double(sessionGapMinutes * 60)
         Task.detached(priority: .userInitiated) {
             let result = try? await db.read { db in
-                (try Self.fetchPeople(db, project: project), try Self.fetchSources(db), try Self.fetchStats(db, project: project),
+                (try Self.fetchPeople(db, project: project, taken: range), try Self.fetchSources(db),
+                 try Self.fetchStats(db, project: project, taken: range),
                  try SmartAlbum.order(Column("name")).fetchAll(db), try DeliveryRule.order(Column("createdAt")).fetchAll(db),
-                 try Self.fetchProjects(db), try Self.fetchKnownPeople(db))
+                 try Self.fetchProjects(db), try Self.fetchKnownPeople(db),
+                 project == nil ? [] : try EventSessions.list(db, project: project, gap: gap))
             }
             await MainActor.run {
                 defer { self.refreshing = false }
                 // The project changed while reading: the next tick reads the new one.
-                guard project == self.currentProject else { self.dirty = true; return }
-                if let (people, sources, stats, albums, rules, projects, known) = result {
+                guard project == self.currentProject, range == self.sessionRange else { self.dirty = true; return }
+                if let (people, sources, stats, albums, rules, projects, known, sessions) = result {
+                    if sessions != self.sessions {
+                        self.sessions = sessions
+                        // The session may have grown, merged or split: re-read with its current range.
+                        if self.sessionRange != range { self.dirty = true }
+                    }
                     if projects != self.projects { self.projects = projects }
                     if !self.restoredProject, let latest = projects.max(by: { $0.createdAt < $1.createdAt }) {
                         self.restoredProject = true
@@ -221,8 +243,8 @@ final class FaceGroupingModel: ObservableObject {
     }
 
     /// People with faces in the project (nil = anywhere), with counts for that project.
-    nonisolated static func fetchPeople(_ db: Database, project: Int64?) throws -> [PersonSummary] {
-        let scope = ProjectScope.sql(project)
+    nonisolated static func fetchPeople(_ db: Database, project: Int64?, taken: ClosedRange<Double>? = nil) throws -> [PersonSummary] {
+        let scope = "\(ProjectScope.sql(project)) AND \(EventSessions.sql(taken))"
         return try Row.fetchAll(db, sql: """
             SELECT p.id, p.name, COUNT(*) AS faces,
                 COUNT(DISTINCT CASE WHEN m.kind = 'photo' THEN m.id END) AS photos,
@@ -273,7 +295,7 @@ final class FaceGroupingModel: ObservableObject {
     }
 
     /// Files and unassigned faces of the project; pending files of the whole library (processing is shared).
-    nonisolated static func fetchStats(_ db: Database, project: Int64?) throws -> LibraryStats {
+    nonisolated static func fetchStats(_ db: Database, project: Int64?, taken: ClosedRange<Double>? = nil) throws -> LibraryStats {
         LibraryStats(
             files: try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM media m LEFT JOIN source s ON s.id = m.sourceId WHERE m.duplicateOf IS NULL AND \(ProjectScope.sql(project))
@@ -281,7 +303,7 @@ final class FaceGroupingModel: ObservableObject {
             pending: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'pending'") ?? 0,
             unassignedFaces: try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM face JOIN media m ON m.id = face.mediaId LEFT JOIN source s ON s.id = m.sourceId
-                WHERE face.personId IS NULL AND face.quality >= 0.3 AND \(ProjectScope.sql(project))
+                WHERE face.personId IS NULL AND face.quality >= 0.3 AND \(ProjectScope.sql(project)) AND \(EventSessions.sql(taken))
                 """) ?? 0)
     }
 
@@ -289,14 +311,14 @@ final class FaceGroupingModel: ObservableObject {
 
     func media(of personId: Int64, alsoWith others: Set<Int64>) async -> [PersonMedia] {
         guard let store else { return [] }
-        let project = currentProject
-        return await Task.detached(priority: .userInitiated) { Self.loadMedia(store, personId, others, project: project) }.value
+        let project = currentProject, range = sessionRange
+        return await Task.detached(priority: .userInitiated) { Self.loadMedia(store, personId, others, project: project, taken: range) }.value
     }
 
     func faces(of personId: Int64?) async -> [FaceItem] {
         guard let store else { return [] }
-        let project = currentProject
-        return await Task.detached(priority: .userInitiated) { Self.loadFaces(store, personId, project: project) }.value
+        let project = currentProject, range = sessionRange
+        return await Task.detached(priority: .userInitiated) { Self.loadFaces(store, personId, project: project, taken: range) }.value
     }
 
     /// Names of the other projects a person appears in (shown on their page: the name carries over).
@@ -339,14 +361,15 @@ final class FaceGroupingModel: ObservableObject {
         }.value
     }
 
-    nonisolated static func loadMedia(_ store: LibraryStore, _ personId: Int64, _ others: Set<Int64>, project: Int64?) -> [PersonMedia] {
+    nonisolated static func loadMedia(_ store: LibraryStore, _ personId: Int64, _ others: Set<Int64>, project: Int64?,
+                                      taken: ClosedRange<Double>? = nil) -> [PersonMedia] {
         let db = store.db
         let rows = (try? db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT m.id, m.path, m.kind, m.takenAt, m.burstId, f.id AS faceId, f.time,
                     COALESCE(f.score, f.quality * 0.6, 0) AS score FROM face f
                 JOIN media m ON m.id = f.mediaId LEFT JOIN source s ON s.id = m.sourceId
-                WHERE f.personId = ? AND \(ProjectScope.sql(project))
+                WHERE f.personId = ? AND \(ProjectScope.sql(project)) AND \(EventSessions.sql(taken))
                 ORDER BY m.path, score DESC
                 """, arguments: [personId])
         }) ?? []
@@ -367,11 +390,11 @@ final class FaceGroupingModel: ObservableObject {
         }
     }
 
-    nonisolated static func loadFaces(_ store: LibraryStore, _ personId: Int64?, project: Int64?) -> [FaceItem] {
+    nonisolated static func loadFaces(_ store: LibraryStore, _ personId: Int64?, project: Int64?, taken: ClosedRange<Double>? = nil) -> [FaceItem] {
         let db = store.db
         let filter = personId == nil
-            ? "f.personId IS NULL AND f.quality >= 0.3 AND \(ProjectScope.sql(project))"
-            : "f.personId = \(personId!) AND (\(ProjectScope.sql(project)) OR s.kind = 'reference')"
+            ? "f.personId IS NULL AND f.quality >= 0.3 AND \(ProjectScope.sql(project)) AND \(EventSessions.sql(taken))"
+            : "f.personId = \(personId!) AND ((\(ProjectScope.sql(project)) AND \(EventSessions.sql(taken))) OR s.kind = 'reference')"
         return (try? db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT f.id, f.mediaId, m.path, COALESCE(f.quality, 0) AS q, f.time FROM face f
@@ -417,6 +440,25 @@ final class FaceGroupingModel: ObservableObject {
                 self.refresh()
             }
         }
+    }
+
+    /// Names a session of the open project ("Awards"); empty clears it.
+    func renameSession(_ session: EventSession, to name: String) {
+        guard let project = currentProject else { return }
+        perform { try EventSessions.setName($0.store, project: project, session: session, name: name) }
+    }
+
+    /// "Awards" or "14:00–14:05"; with the day when the event spans several days.
+    func sessionTitle(_ s: EventSession) -> String { s.name ?? sessionTime(s) }
+
+    func sessionTime(_ s: EventSession) -> String {
+        let start = Date(timeIntervalSince1970: s.start), end = Date(timeIntervalSince1970: s.end)
+        let cal = Calendar.current
+        let multiDay = Set(sessions.map { cal.startOfDay(for: Date(timeIntervalSince1970: $0.start)) }).count > 1
+        let time = DateFormatter()
+        time.dateFormat = "HH:mm"  // 24-hour, as event schedules are written
+        let range = "\(time.string(from: start))–\(time.string(from: end))"
+        return multiDay ? "\(start.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))) \(range)" : range
     }
 
     func moveSource(_ id: Int64, to project: Int64) { perform { try $0.moveSource(id, to: project) } }

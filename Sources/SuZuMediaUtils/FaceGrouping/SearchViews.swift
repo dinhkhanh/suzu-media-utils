@@ -113,6 +113,11 @@ struct SearchView: View {
         q.project = album?.projectId ?? model.currentProject
         q.from = useDates ? Calendar.current.startOfDay(for: from) : nil
         q.to = useDates ? Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: to) : nil
+        // A session picked for the event narrows it to that stretch of time.
+        if album == nil, let r = model.sessionRange {
+            q.from = Date(timeIntervalSince1970: r.lowerBound)
+            q.to = Date(timeIntervalSince1970: r.upperBound)
+        }
         return q
     }
 
@@ -179,6 +184,7 @@ struct SearchView: View {
                 ForEach(model.projectSources) { Text($0.name).tag(Int64?.some($0.id)) }
             }
             .fixedSize()
+            if album == nil { SessionPicker() }
             HStack(spacing: 6) {
                 Toggle("Dates", isOn: $useDates).toggleStyle(.checkbox)
                 if useDates {

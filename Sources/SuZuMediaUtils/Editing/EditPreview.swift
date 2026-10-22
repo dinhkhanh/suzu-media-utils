@@ -100,6 +100,8 @@ struct EditPreview: View {
     var excluded: Binding<Set<ToolItem>>? = nil
     @State private var index = 0
     @State private var gridMode = false
+    /// The strip re-centres for the arrows, not when a visible thumbnail is clicked.
+    @State private var clickedInStrip = false
     /// Last photo ticked or unticked, for Shift-click ranges.
     @State private var anchor: Int?
     @State private var rendered: PreviewCache.Rendered?
@@ -206,14 +208,13 @@ struct EditPreview: View {
                 LazyHStack(spacing: 6) {
                     // Long lists only show their start; the arrows still step through all of them.
                     ForEach(Array(samples.prefix(300).enumerated()), id: \.offset) { i, item in
-                        StripThumb(url: item.url, selected: i == index, checked: isChecked(item), onCheck: { tick(i) })
-                            .id(i)
-                            .onTapGesture {
-                                // Click previews; ⌘-click ticks or unticks; ⇧-click ticks a range.
-                                let mods = NSEvent.modifierFlags
-                                if mods.contains(.shift) || mods.contains(.command) { tick(i) } else { index = i }
-                            }
-                            .help(item.url.lastPathComponent)
+                        // Click previews; the circle (or ⌘-click) ticks or unticks; ⇧-click ticks a range.
+                        StripThumb(url: item.url, selected: i == index, checked: isChecked(item), onCheck: { tick(i) }, onTap: {
+                            let mods = NSEvent.modifierFlags
+                            if mods.contains(.shift) || mods.contains(.command) { tick(i) } else { clickedInStrip = true; index = i }
+                        })
+                        .id(i)
+                        .help(item.url.lastPathComponent)
                     }
                 }
                 .padding(.horizontal, 10).padding(.vertical, 8)
@@ -221,7 +222,9 @@ struct EditPreview: View {
             .frame(height: 112)
             .background(Color(nsColor: NSColor(white: 0.09, alpha: 1)))
             .environment(\.colorScheme, .dark)
-            .onChange(of: index) { withAnimation { proxy.scrollTo(index, anchor: .center) } }
+            .onChange(of: index) {
+                if clickedInStrip { clickedInStrip = false } else { withAnimation { proxy.scrollTo(index, anchor: .center) } }
+            }
         }
     }
 
@@ -270,10 +273,9 @@ struct EditPreview: View {
             ScrollView {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], spacing: 8) {
                     ForEach(Array(samples.enumerated()), id: \.offset) { i, item in
-                        StripThumb(url: item.url, selected: i == index, checked: isChecked(item), side: 150, onCheck: { tick(i) })
+                        StripThumb(url: item.url, selected: i == index, checked: isChecked(item), side: 150,
+                                   onCheck: { tick(i) }, onTap: { tick(i) }, onDoubleTap: { index = i; gridMode = false })
                             .id(i)
-                            .onTapGesture(count: 2) { index = i; gridMode = false }
-                            .onTapGesture { tick(i) }
                             .help("\(item.url.lastPathComponent)\(item.personName.map { " · \($0)" } ?? "")")
                     }
                 }
@@ -302,11 +304,18 @@ struct EditPreview: View {
 struct StripThumb: View {
     let url: URL
     let selected: Bool
-    /// nil = no tick box; false = left out (dimmed).
+    /// nil = no tick circle; false = left out (dimmed).
     var checked: Bool? = nil
     var side: CGFloat = 96
     var onCheck: () -> Void = {}
+    var onTap: () -> Void = {}
+    var onDoubleTap: (() -> Void)? = nil
     @State private var image: NSImage?
+    @State private var hoveringCheck = false
+
+    /// The circle's click area: the top-right corner, bigger than the circle so it's easy to hit.
+    var checkArea: CGFloat { side > 120 ? 46 : 38 }
+    func inCheck(_ p: CGPoint) -> Bool { checked != nil && p.x >= side - checkArea && p.y <= checkArea }
 
     var body: some View {
         ZStack {
@@ -319,18 +328,32 @@ struct StripThumb: View {
         .overlay(RoundedRectangle(cornerRadius: 5).stroke(selected ? Color.accentColor : .clear, lineWidth: 3))
         .overlay(alignment: .topTrailing) {
             if let checked {
-                Button(action: onCheck) {
-                    Image(systemName: checked ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: side > 120 ? 20 : 16))
-                        .symbolRenderingMode(.palette)
-                        .foregroundStyle(.white, checked ? Color.accentColor : Color.black.opacity(0.35))
-                        .shadow(radius: 2)
-                }
-                .buttonStyle(.plain)
-                .padding(5)
-                .help(checked ? "Included — click to leave out" : "Left out — click to include")
+                Image(systemName: checked ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: side > 120 ? 22 : 18))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, checked ? Color.accentColor : Color.black.opacity(hoveringCheck ? 0.6 : 0.35))
+                    .shadow(radius: 2)
+                    .scaleEffect(hoveringCheck ? 1.15 : 1)
+                    .padding(6)
+                    .allowsHitTesting(false)
             }
         }
+        .contentShape(Rectangle())
+        // One handler for the whole thumbnail, so a click on the circle always reaches it.
+        .gesture(taps)
+        .onContinuousHover { phase in
+            if case .active(let p) = phase { hoveringCheck = inCheck(p) } else { hoveringCheck = false }
+        }
         .task(id: url) { image = await Thumbnails.shared.media(url, time: nil, side: side) }
+    }
+
+    /// Without a double-click action, single clicks act at once instead of waiting out the double-click interval.
+    var taps: AnyGesture<Void> {
+        let single = SpatialTapGesture().onEnded { v in if inCheck(v.location) { onCheck() } else { onTap() } }
+        guard let onDoubleTap else { return AnyGesture(single.map { _ in () }) }
+        return AnyGesture(SpatialTapGesture(count: 2)
+            .onEnded { v in if !inCheck(v.location) { onDoubleTap() } }
+            .exclusively(before: single)
+            .map { _ in () })
     }
 }

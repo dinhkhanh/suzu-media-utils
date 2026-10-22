@@ -65,6 +65,14 @@ func runHeadless(_ args: [String]) -> Never {
                 }
             }
         }
+        time("sessions (project \(firstProject ?? 0))") {
+            let list = try service.store.db.read { db in try EventSessions.list(db, project: firstProject) }
+            for x in list { print(String(format: "    %@ – %@  %d photos %d videos", Date(timeIntervalSince1970: x.start).formatted(), Date(timeIntervalSince1970: x.end).formatted(.dateTime.hour().minute()), x.photos, x.videos)) }
+            return list.count
+        }
+        if let s = try? service.store.db.read({ db in try EventSessions.list(db, project: firstProject) }).last {
+            time("people in last session") { try service.store.db.read { db in try FaceGroupingModel.fetchPeople(db, project: firstProject, taken: s.range).count } }
+        }
         time("projects") { try service.store.db.read { db in try FaceGroupingModel.fetchProjects(db).count } }
         time("known people") { try service.store.db.read { db in try FaceGroupingModel.fetchKnownPeople(db).count } }
         // The person with the most faces is the slow case for per-person queries.

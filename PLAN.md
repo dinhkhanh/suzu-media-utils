@@ -276,3 +276,9 @@ and after every feature below; same 92 people.
 - Watermarks: presets (logo or text with shadow) in Settings; each screen keeps its own copy and remembers its edits.
 - Edit layout: large preview (1600 px decode cache, before/after, output size, click-to-place watermark), film strip
   of 96 pt thumbnails, inspector with crop shapes and a 3×3 alignment grid.
+- Sessions per project (`EventSessions`): split at gaps in capture time (default 30 min), names stored as a moment
+  inside the session (table `sessionLabel`) so they survive the session growing. One selected session filters People,
+  faces, person pages, search, exports and the batch tools. 21 sessions for 7,170 files in 8 ms. Times are camera
+  clocks: a camera set to the wrong time lands its photos in odd sessions.
+- Batch Export picks photos with tick circles (whole top-right corner is the hit area, one click handler per
+  thumbnail; v0.5's circle was a nested button that lost clicks to the thumbnail), a grid of all photos, and PNG.

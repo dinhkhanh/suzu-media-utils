@@ -26,6 +26,8 @@ struct PeopleGrid: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+        SessionBar()
         ScrollView {
             if shown.isEmpty {
                 ContentUnavailableView(model.people.isEmpty ? "No people yet" : "No matches", systemImage: "person.2",
@@ -56,7 +58,8 @@ struct PeopleGrid: View {
             }
             .padding(20)
         }
-        .navigationTitle("People")
+        }
+        .navigationTitle(model.currentSession.map { "People · \(model.sessionTitle($0))" } ?? "People")
         .navigationSubtitle("\(shown.count) people · click a name to edit, double-click to open, ⌘-click to select several")
         .searchable(text: $search, prompt: "Search names")
         .sheet(isPresented: $suggesting) { CelebritySheet() }
@@ -172,7 +175,6 @@ struct PersonDetail: View {
     @State private var sort = MediaSort.best
     @State private var collapseBursts = true
     @State private var topN: Int?
-    @State private var session: Int?
     @State private var notifyRule = false
     @State private var videoExport = false
     @State private var otherProjects: [String] = []
@@ -203,7 +205,7 @@ struct PersonDetail: View {
     }
 
     /// Reload when the person's contents change (new files assigned, edits) or the filter changes.
-    var reloadKey: String { "\(person?.faces ?? 0)-\(person?.name ?? "")-\(alsoWith.sorted())" }
+    var reloadKey: String { "\(person?.faces ?? 0)-\(person?.name ?? "")-\(alsoWith.sorted())-\(model.sessionRange.map { "\($0)" } ?? "")" }
 
     func reload() async {
         async let m = model.media(of: personId, alsoWith: alsoWith)
@@ -281,15 +283,9 @@ struct PersonDetail: View {
         }
     }
 
-    var sessions: [Sessions.Session] { Sessions.split(media.compactMap(\.takenAt)) }
-
     /// The grid after session filter, sort, burst collapsing and Top N.
     func shown(_ kind: MediaKind) -> [PersonMedia] {
         var items = media.filter { $0.kind == kind }
-        if let s = session, s < sessions.count {
-            let range = sessions[s].start...sessions[s].end
-            items = items.filter { $0.takenAt.map(range.contains) ?? false }
-        }
         if collapseBursts {
             var best: [Int64: Int] = [:]
             var out: [PersonMedia] = []
@@ -319,14 +315,7 @@ struct PersonDetail: View {
             }
             .fixedSize()
             .help("Show only the best shots (sharp, eyes open, facing the camera, smiling)")
-            if sessions.count > 1 {
-                Picker("", selection: $session) {
-                    Text("All sessions").tag(Int?.none)
-                    ForEach(sessions) { Text($0.label).tag(Int?.some($0.index)) }
-                }
-                .fixedSize()
-                .help("Shooting sessions, split wherever there's a gap of 30 minutes or more")
-            }
+            SessionPicker()
             Toggle("Hide similar shots", isOn: $collapseBursts)
                 .toggleStyle(.checkbox)
                 .fixedSize()
@@ -485,6 +474,8 @@ struct UnassignedView: View {
     @State private var selection: Set<Int64> = []
 
     var body: some View {
+        VStack(spacing: 0) {
+        SessionBar()
         ScrollView {
             if faces.isEmpty {
                 ContentUnavailableView("Nothing unassigned", systemImage: "checkmark.circle",
@@ -493,6 +484,7 @@ struct UnassignedView: View {
             }
             FaceGrid(faces: faces, selection: $selection)
         }
+        }
         .navigationTitle("Unassigned Faces")
         .navigationSubtitle("Seen fewer than 3 times, or not matched yet. Select faces to name them.")
         .toolbar {
@@ -500,7 +492,7 @@ struct UnassignedView: View {
                 ToolbarItem { MoveFacesMenu(faces: selection) { selection = [] } }
             }
         }
-        .task(id: model.stats.unassignedFaces) {
+        .task(id: "\(model.stats.unassignedFaces)|\(model.sessionRange.map { "\($0)" } ?? "")") {
             faces = await model.faces(of: nil)
             selection = selection.intersection(faces.map(\.id))
         }

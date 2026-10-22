@@ -36,6 +36,8 @@ struct ExportSheet: View {
     @State private var running = false
     @State private var progress = 0
     @State private var result: Exporter.Result?
+    /// Ignore the session picked in the People view and export the whole event.
+    @State private var wholeEvent = false
 
     init(scope: ExportScope, mode: ExportMode, initialName: String = "") {
         self.scope = scope
@@ -54,6 +56,16 @@ struct ExportSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Text(isAll ? "\(verb) everyone's files to their folders" : "\(verb) to “\(folder.isEmpty ? "…" : folder)” folder")
                 .font(.title2.bold())
+            if result == nil, let s = model.currentSession, !isMedia {
+                HStack {
+                    Image(systemName: "timer")
+                    Text(wholeEvent ? "The whole event" : "Only the “\(model.sessionTitle(s))” session (\(model.sessionTime(s)))")
+                    Toggle("Whole event", isOn: $wholeEvent).toggleStyle(.checkbox).padding(.leading, 8)
+                }
+                .font(.callout)
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.1)))
+            }
             if let result { resultView(result) } else { form }
         }
         .padding(20)
@@ -61,7 +73,7 @@ struct ExportSheet: View {
         .frame(maxHeight: 860)
         .frame(width: editPhotos ? 960 : 620)
         .onAppear { chosen = Set(named.map(\.id)) }
-        .task(id: "\(name)|\(base?.path ?? "")|\(chosen.sorted())|\(editPhotos)|\(recipe.hashValue)|\(writeNames)|\(topN ?? 0)|\(bestOfBurst)") { await replan() }
+        .task(id: "\(name)|\(base?.path ?? "")|\(chosen.sorted())|\(editPhotos)|\(recipe.hashValue)|\(writeNames)|\(topN ?? 0)|\(bestOfBurst)|\(wholeEvent)") { await replan() }
     }
 
     @ViewBuilder
@@ -115,6 +127,7 @@ struct ExportSheet: View {
         o.topN = topN
         o.bestOfBurst = bestOfBurst
         o.project = model.currentProject
+        o.taken = wholeEvent ? nil : model.sessionRange
         return o
     }
 

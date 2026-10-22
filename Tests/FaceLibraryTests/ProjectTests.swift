@@ -142,3 +142,48 @@ final class ProjectTests: XCTestCase {
         XCTAssertNoThrow(try LibraryService.checkNewFolder(tmp.appendingPathComponent("Event 2").path, store: store))
     }
 }
+
+final class SessionTests: XCTestCase {
+    func testSessionsSplitAtGapsKeepNamesAndFilterPeople() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("sess-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = try LibraryStore(directory: tmp)
+        var p = ProjectRecord(name: "Cup")
+        try store.db.write { db in try p.insert(db) }
+        var s = SourceRecord(path: "/Cup", projectId: p.id)
+        try store.db.write { db in try s.insert(db) }
+        var an = PersonRecord(name: "An"), binh = PersonRecord(name: "Bình")
+        try store.db.write { db in try an.insert(db); try binh.insert(db) }
+        // Opening 10:00-10:20, awards 14:00-14:05 (a 3.5 h pause in between).
+        let day = 1_790_000_000.0
+        let shots: [(Double, Int64)] = [(0, an.id!), (600, an.id!), (1200, binh.id!), (4 * 3600, binh.id!), (4 * 3600 + 300, binh.id!)]
+        for (i, (t, pid)) in shots.enumerated() {
+            var m = MediaRecord(sourceId: s.id, path: "/Cup/\(i).jpg", kind: .photo, size: 1, mtime: 0, contentKey: "\(i)")
+            m.status = .done; m.takenAt = day + t
+            try store.db.write { db in try m.insert(db) }
+            var f = FaceRecord(id: nil, mediaId: m.id!, x: 0, y: 0, w: 0.1, h: 0.1, quality: 0.8, time: nil, embedding: nil,
+                               track: nil, personId: pid, assignment: .user, rejectedPersonId: nil)
+            try store.db.write { db in try f.insert(db) }
+        }
+        var sessions = try store.db.read { db in try EventSessions.list(db, project: p.id) }
+        XCTAssertEqual(sessions.map(\.photos), [3, 2])
+
+        try EventSessions.setName(store, project: p.id!, session: sessions[1], name: "Awards")
+        // A later file extends the session; its name stays.
+        var late = MediaRecord(sourceId: s.id, path: "/Cup/late.jpg", kind: .photo, size: 1, mtime: 0, contentKey: "late")
+        late.status = .done; late.takenAt = day + 4 * 3600 + 900
+        try store.db.write { db in try late.insert(db) }
+        sessions = try store.db.read { db in try EventSessions.list(db, project: p.id) }
+        XCTAssertEqual(sessions.map(\.name), [nil, "Awards"])
+        XCTAssertEqual(sessions[1].photos, 3)
+
+        // Who is in the awards session, and their files only.
+        let awards = sessions[1].range
+        XCTAssertEqual(Set(try Selection.files(store, personIds: [an.id!, binh.id!], kind: nil, topN: nil, bestOfBurst: false,
+                                               project: p.id, taken: awards).map(\.personName)), ["Bình"])
+        var opts = Exporter.Options(); opts.taken = sessions[0].range
+        XCTAssertEqual(try Exporter(store: store).plan(personId: binh.id!, name: "Bình", base: tmp, options: opts).items.count, 1)
+        // Wider gaps merge the two sessions.
+        XCTAssertEqual(try store.db.read { db in try EventSessions.list(db, project: p.id, gap: 5 * 3600) }.count, 1)
+    }
+}
