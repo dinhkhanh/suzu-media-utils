@@ -230,3 +230,30 @@ The app is now "SuZu Media Utils" (bundle id dk.dinhkhanh.suzumediautils), a she
 Grouping as the first. Executable target `SuZuMediaUtils` (was `FaceGroupingApp`); `--headless` unchanged. Library moved
 to `~/Library/Application Support/SuZu Media Utils/Face Grouping` (the old `FaceGrouping` folder is copied on first
 launch and kept). Env overrides: `SUZU_FACE_LIBRARY`, `SUZU_FACE_MODEL`. Icon drawn by `tools/make_icon.swift`.
+
+## v0.4 (2026-10-22)
+Rule from the user: no feature may slow face recognition and grouping. A/B on "3. PHOTO" (542 photos): 14–15 s before
+and after every feature below; same 92 people.
+
+- MediaKit: Core Image auto tone/enhance (strength blend), face-aware crops (largest rect of the ratio, main face at
+  40% height, whole group when it fits; saliency when no faces), logo watermark (size relative to the short side,
+  9 positions, opacity), Lanczos resize, JPEG with EXIF kept and IPTC/XMP PersonInImage + keywords, lossless in-place
+  name tagging, video clips (passthrough), HEVC highlight reels, 720p proxies, contact sheets, rename patterns,
+  folder verifier.
+- Best shots: per face eyes-open (eye contour aspect), smile (mouth width / eye distance), sharpness (Laplacian
+  variance on the aligned crop), yaw/pitch; score = 0.45 quality + 0.20 sharp + 0.12 eyes + 0.13 frontal + 0.05 smile
+  + 0.05 size, ×0.6 with closed eyes. First weighting (more sharpness/size/smile) picked laughing, eyes-shut, looking-up
+  covers; the reweighted one matched or beat Vision-quality covers on the 12 largest groups.
+- Covers: user-picked face, else best by score gated on yaw < 0.35, pitch < 0.3, eyes >= 0.5, sharpness >= 120,
+  photos over video frames.
+- Bursts: same folder, <= 2 s apart, Vision feature-print distance <= 0.48 (checked by eye: 0.37/0.45 near-identical,
+  0.55 same person different pose, 0.65+ different shots). The feature print cost 46% of ingest when computed inline,
+  so it is computed from the JPEG's embedded preview in an idle-time pass (542 photos: 7 s).
+- Sessions: 30-minute gaps.
+- Search (people all/any, solo/group, kind, dates, folder, best only, bursts) and smart albums.
+- Delivery rules (folder per person, optional edits/names, macOS notifications; idle-time only). Zalo/Telegram
+  dropped at the user's request.
+- Per-person video export: 20 s of 4K HEVC reel from 7 appearances in 20 s; clips cut without re-encoding.
+- Web gallery: static export (11 s for 3 people/150 photos) and LAN server (token URL, Bonjour, Range streaming,
+  chunked downloads, rename by POST).
+- Tools: Batch Export, Batch Rename (updates library paths), Copy Verifier (+repair), Video Tools.

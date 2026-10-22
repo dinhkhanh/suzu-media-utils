@@ -13,16 +13,45 @@ groups them by person, keeps up as new files arrive, and files each person's med
 
 - Photos (JPEG, HEIC, PNG, TIFF) and videos (MP4/MOV natively; AV1, WebM, MKV, AVI… via ffmpeg). Videos are sampled
   at 1 frame per second; a person counts once per video.
-- Groups form automatically; known people are recognised as soon as a file finishes copying (local: ~1–2 s, NAS: ~5–10 s).
-- Name people right in the grid, merge groups, fix mistakes ("Not this person", "Move to…").
-- Copy/Move to Folder for one person, or Export All for everyone: `<folder>/<Person Name>/`. Existing files are
-  never overwritten (skip by default, or keep both). Group photos in Move All go to the main subject and are copied
-  to the others.
-- Auto-naming: a Known-People folder (`<folder>/<Name>/<photos>`) names matching groups offline; optional Amazon
+- Groups form automatically; known people are recognised as soon as a file finishes copying.
+- Name people right in the grid, merge groups, fix mistakes ("Not this person", "Move to…"); pick any face as a
+  person's picture, or let the best shot be chosen automatically (sharp, eyes open, facing the camera).
+- **Best shots:** every face is scored (Vision capture quality, sharpness, eyes open, head angle, smile, size).
+  Person pages sort Best First, show Best 10/20/50, hide near-identical burst shots and filter by shooting session.
+- **Search & smart albums:** people (all together / any), solo or group shots, photos/videos, dates, folder, best
+  shots only; save as a smart album that keeps updating.
+- **Export:** Copy/Move to Folder per person or Export All (`<folder>/<Person Name>/`, never overwriting). Optional
+  edits (auto tone, face-aware social crop 1:1 · 4:5 · 9:16 · 16:9 · 1.91:1, logo watermark, resize — auto tone
+  turns on with crops and watermarks), Top N, best of each burst, and people's names written into the files
+  (IPTC/XMP, read by Lightroom, Photo Mechanic, Bridge and Photos).
+- **Delivery rules:** new photos of a person (or anyone named) are copied — optionally edited — into a folder (put
+  it inside Google Drive or Dropbox to share automatically) with a notification on the Mac. Runs only while no new
+  file is waiting, so it never slows recognition.
+- **Video moments:** per person, a clip of each appearance (cut without re-encoding), a highlight reel of the best
+  moments, or the best still frames.
+- **Web gallery:** export a self-contained gallery folder, or share a live gallery on the local network (secret link,
+  Bonjour) to browse, play, download and rename people from a MacBook, iPad or phone.
+- **Auto-naming:** a Known-People folder (`<folder>/<Name>/<photos>`) names matching groups offline; optional Amazon
   Rekognition celebrity lookup ("Suggest Names…").
 - Files are tracked by content, so moving/renaming in Finder or copying never loses names or duplicates work.
 
-Speed on an M2 dev Mac: ~45–70 photos/s from local disk, NAS-bound (~110 MB/s) over 1 GbE; 4K video at ~100× real time.
+### Batch Export
+Auto tone, face-aware social crops, logo watermark and resize for any photos, no library needed.
+
+### Batch Rename
+Patterns like `{event}_{date}_{person}_{seq:3}` with a live preview; people come from Face Grouping, and renamed
+library files keep their faces and names.
+
+### Copy Verifier
+Checks that a copy (memory card → NAS, NAS → backup) is complete — missing, truncated or (with checksums) damaged
+files — and repairs it.
+
+### Video Tools
+720p proxies and contact sheets for many videos at once.
+
+Extras never slow the core: scoring reuses data the recognizer already has (A/B: same speed), burst fingerprints and
+upgrades of older libraries run only when no new file is waiting, and tools run at lower priority.
+Speed on an M2 dev Mac: ~40–70 photos/s from local disk, NAS-bound (~110 MB/s) over 1 GbE; 4K video at ~100× real time.
 Details and measurements: [PLAN.md](PLAN.md).
 
 ## Setup
@@ -70,7 +99,8 @@ About $1 per 1,000 faces; up to 3 face crops per unnamed group are sent, each fa
 
 ```sh
 .build/release/SuZuMediaUtils --headless <folder> [--reference <known-people folder>] [--library <dir>] \
-    [--suggest-names [--apply]]          # full pipeline without UI, prints the people found
+    [--extras] [--suggest-names [--apply]] [--gallery <dir>] [--reel <dir>] [--serve <seconds>]
+    # full pipeline without UI, prints the people found; the flags exercise the extras
 .build/release/facescan scan <folder> --out runs/x && .build/release/facescan cluster runs/x --sweep   # research CLI
 ```
 
@@ -79,11 +109,13 @@ About $1 per 1,000 faces; up to 3 face crops per unnamed group are sent, each fa
 | Path | What |
 |---|---|
 | `Sources/FaceCore` | Detection (Vision), alignment, Core ML embeddings, clustering, video sampling, ffmpeg fallback |
-| `Sources/FaceLibrary` | SQLite library (GRDB), folder monitor, processor, grouping engine, exporter, Rekognition |
+| `Sources/MediaKit` | Edit pipeline (auto tone, crops, watermark), metadata, video clips/reels/proxies/contact sheets, rename, verifier |
+| `Sources/FaceLibrary` | SQLite library (GRDB), folder monitor, processor, grouping, best shots, bursts, search, delivery, export, gallery, Rekognition |
 | `Sources/SuZuMediaUtils/App` | App shell: window, sidebar, settings, headless mode |
 | `Sources/SuZuMediaUtils/FaceGrouping` | Face Grouping UI |
+| `Sources/SuZuMediaUtils/Tools` | Batch Export, Batch Rename, Copy Verifier, Video Tools |
 | `Sources/facescan` | Research CLI used to benchmark and tune thresholds |
-| `Tests/FaceLibraryTests` | Library tests |
+| `Tests/FaceLibraryTests`, `Tests/MediaKitTests` | Tests (28) |
 | `tools/` | Model conversion, icon, evaluation scripts |
 
 ### Adding a tool
