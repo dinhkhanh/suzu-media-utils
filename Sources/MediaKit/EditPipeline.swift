@@ -76,8 +76,10 @@ public enum EditPipeline {
         if let long = recipe.maxLongSide, long > 0 {
             let scale = Double(long) / Double(max(image.extent.width, image.extent.height))
             if scale < 1 {
+                // Exact output size (e.g. 1080 x 1350): Lanczos leaves fractional edges that rounding would grow.
+                let w = (image.extent.width * scale).rounded(), h = (image.extent.height * scale).rounded()
                 image = image.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1])
-                image = image.cropped(to: image.extent.integral)
+                image = image.cropped(to: CGRect(x: image.extent.minX.rounded(), y: image.extent.minY.rounded(), width: w, height: h))
             }
         }
         if let wm = recipe.watermark { image = try watermark(image, spec: wm) }
@@ -114,12 +116,14 @@ public enum EditPipeline {
             if all.width <= cw * 0.9 && all.height <= ch * 0.8 { target = all }
         }
         guard let t = target else {
-            return CGRect(x: (W - cw) / 2, y: (H - ch) / 2, width: cw, height: ch)
+            return CGRect(x: ((W - cw) / 2).rounded(), y: ((H - ch) / 2).rounded(), width: cw.rounded(), height: ch.rounded())
+                .intersection(CGRect(origin: .zero, size: imageSize))
         }
         // Eyes roughly on the upper third: put the face centre at 40% of the crop height.
         let x = min(max(t.midX - cw / 2, 0), W - cw)
         let y = min(max(t.midY - ch * 0.40, 0), H - ch)
-        return CGRect(x: x, y: y, width: cw, height: ch).integral
+        return CGRect(x: x.rounded(), y: y.rounded(), width: cw.rounded(), height: ch.rounded())
+            .intersection(CGRect(origin: .zero, size: imageSize))
     }
 
     /// Faces (or, without faces, the most eye-catching region) for crops of images not in the library.

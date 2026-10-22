@@ -199,9 +199,14 @@ public struct Exporter: Sendable {
                 """)
         }
         let byMedia = Dictionary(grouping: faces) { $0["mediaId"] as Int64 }
-        func score(_ mediaId: Int64, _ personId: Int64?) -> Double {
-            byMedia[mediaId]?.filter { ($0["personId"] as Int64?) == personId }.map { $0["s"] as Double }.max() ?? 0
+        // Best score per (file, person), read once: sorting thousands of files compares them many times.
+        var best: [Int64: [Int64: Double]] = [:]
+        for f in faces {
+            guard let pid = f["personId"] as Int64? else { continue }
+            let m: Int64 = f["mediaId"], s: Double = f["s"]
+            if s > best[m]?[pid] ?? -1 { best[m, default: [:]][pid] = s }
         }
+        func score(_ mediaId: Int64, _ personId: Int64?) -> Double { personId.flatMap { best[mediaId]?[$0] } ?? 0 }
         // Per person: optionally only the best of each burst, then only the top N.
         var keep: Set<String> = []
         for (name, group) in Dictionary(grouping: plan.items, by: \.personName) {

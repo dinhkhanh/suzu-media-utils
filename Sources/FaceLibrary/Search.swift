@@ -55,7 +55,9 @@ extension MediaQuery {
         case .group: conds.append("(SELECT COUNT(DISTINCT COALESCE(c.personId, -c.id)) FROM face c WHERE c.mediaId = m.id AND c.quality >= 0.3) >= 2")
         }
         // The face that represents the file: best of the searched people, else best of anyone.
-        let faceFilter = people.isEmpty ? "" : "AND bf.personId IN (\(ids))"
+        // "+" keeps SQLite on the per-file index: by person it would scan all of a star's faces for every file
+        // (24 s instead of 0.08 s for someone with 12,000 faces).
+        let faceFilter = people.isEmpty ? "" : "AND +bf.personId IN (\(ids))"
         let sql = """
             SELECT m.id, m.path, m.kind, m.takenAt, m.burstId, bf.id AS faceId, bf.time, COALESCE(bf.score, bf.quality * 0.6, 0) AS score
             FROM media m LEFT JOIN source s ON s.id = m.sourceId

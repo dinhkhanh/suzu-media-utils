@@ -17,6 +17,7 @@ struct SearchView: View {
     @State private var albumName = ""
     @State private var exporting = false
     @State private var shown = 600
+    @State private var generation = 0
 
     var album: SmartAlbum? { albumId.flatMap { id in model.albums.first { $0.id == id } } }
     var named: [PersonSummary] { model.people.filter { $0.name != nil } }
@@ -68,8 +69,8 @@ struct SearchView: View {
         .sheet(isPresented: $exporting) {
             ExportSheet(scope: .media(hits.map(\.id), title: album?.name ?? "Search"), mode: .copy, initialName: album?.name ?? "Search results")
         }
-        .onAppear(perform: load)
-        .onChange(of: albumId) { load() }
+        // Albums arrive with the first library read; load the album's filters whenever it (re)appears or changes.
+        .onChange(of: album?.query, initial: true) { load() }
         // Re-run when the filters change (after typing pauses), and every 15 s for newly processed files.
         .task(id: currentQuery.hashValue) {
             try? await Task.sleep(for: .milliseconds(250))
@@ -83,6 +84,27 @@ struct SearchView: View {
                 search()
             }
         }
+        .task { await benchFilters() }
+    }
+
+    /// SUZU_BENCH_SEARCH=1 (testing): flips through filter combinations like a user would; any value logs results.
+    func benchFilters() async {
+        guard ProcessInfo.processInfo.environment["SUZU_BENCH_SEARCH"] == "1" else { return }
+        try? await Task.sleep(for: .seconds(4))
+        let named = named.map(\.id)
+        for step in 0..<24 where !Task.isCancelled {
+            switch step % 6 {
+            case 0: query.kind = .photo
+            case 1: query.crowd = .group
+            case 2: query.people = Array(named.prefix(1))
+            case 3: query.kind = nil; query.crowd = .any
+            case 4: query.people = []; query.kind = .video
+            default: query = MediaQuery()
+            }
+            FileHandle.standardError.write(Data("BENCH step \(step) at \(Date().timeIntervalSince1970)\n".utf8))
+            try? await Task.sleep(for: .seconds(1.5))
+        }
+        FileHandle.standardError.write(Data("BENCH done\n".utf8))
     }
 
     var currentQuery: MediaQuery {
@@ -101,11 +123,21 @@ struct SearchView: View {
     }
 
     func search() {
-        guard let store = model.store else { return }
+        // An album's filters load with the album list; don't flash "everything" before that.
+        guard let store = model.store, albumId == nil || album != nil else { return }
         let q = currentQuery
-        Task.detached {
+        generation += 1
+        let gen = generation
+        Task.detached(priority: .userInitiated) {
             let r = (try? q.run(store)) ?? []
-            await MainActor.run { hits = r }
+            await MainActor.run {
+                // A slower earlier search must not overwrite the results of the latest filters.
+                guard gen == generation else { return }
+                if r != hits { hits = r }
+                if ProcessInfo.processInfo.environment["SUZU_BENCH_SEARCH"] != nil {
+                    FileHandle.standardError.write(Data("BENCH hits \(r.count) at \(Date().timeIntervalSince1970)\n".utf8))
+                }
+            }
         }
     }
 

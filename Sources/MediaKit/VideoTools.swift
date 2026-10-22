@@ -82,7 +82,7 @@ public enum VideoTools {
 
     /// A grid of evenly spaced frames with timestamps: a one-page overview of a clip.
     public static func contactSheet(_ url: URL, columns: Int = 4, rows: Int = 4, width: Int = 2000, to dest: URL) throws {
-        let duration = FFmpeg.duration(url) ?? avDuration(url)
+        let duration = FFmpeg.duration(url) ?? VideoSampler.duration(url)
         guard duration > 0 else { throw VideoSampler.Unsupported() }
         let n = columns * rows
         let cellW = width / columns
@@ -116,14 +116,6 @@ public enum VideoTools {
         let image = try EditPipeline.apply(recipe, to: CIImage(cgImage: frame), focus: focus)
         guard let cg = EditPipeline.context.createCGImage(image, from: image.extent) else { throw CocoaError(.fileWriteUnknown) }
         try EditPipeline.writeJPEG(cg, to: dest, quality: recipe.jpegQuality, sourceProperties: nil, people: recipe.writePeopleNames ? people : [])
-    }
-
-    static func avDuration(_ url: URL) -> Double {
-        let sem = DispatchSemaphore(value: 0)
-        var d = 0.0
-        Task { d = (try? await AVURLAsset(url: url).load(.duration).seconds) ?? 0; sem.signal() }
-        sem.wait()
-        return d
     }
 
     public static func timecode(_ t: Double) -> String {

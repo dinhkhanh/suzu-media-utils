@@ -14,9 +14,10 @@ struct AppShell: View {
     @State private var route: AppRoute? = AppShell.startRoute
     @State private var path = NavigationPath()
 
-    /// SUZU_START_ROUTE=search | rules | tool.<name> (testing): open the app on that screen.
+    /// SUZU_START_ROUTE=search | rules | album.<id> | tool.<name> (testing): open the app on that screen.
     static var startRoute: AppRoute {
         let r = ProcessInfo.processInfo.environment["SUZU_START_ROUTE"] ?? ""
+        if r.hasPrefix("album."), let id = Int64(r.dropFirst(6)) { return .faces(.album(id)) }
         if r.hasPrefix("tool."), let t = ToolRoute(rawValue: String(r.dropFirst(5))) { return .tool(t) }
         switch r {
         case "search": return .faces(.search)

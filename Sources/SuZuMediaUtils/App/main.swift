@@ -42,6 +42,18 @@ func runHeadless(_ args: [String]) -> Never {
         var q = MediaQuery(); q.people = Array(people.prefix(3).map(\.id)); q.match = .any
         time("search 3 people") { try q.run(service.store).count }
         time("search everything") { try MediaQuery().run(service.store).count }
+        // The person with the most faces is the slow case for per-person queries.
+        if let top = try! service.store.db.read({ db in
+            try Int64.fetchOne(db, sql: "SELECT personId FROM face WHERE personId IS NOT NULL GROUP BY personId ORDER BY COUNT(*) DESC LIMIT 1")
+        }) {
+            var one = MediaQuery(); one.people = [top]
+            time("search person with most faces") { try one.run(service.store).count }
+            one.kind = .photo; one.crowd = .group
+            time("  + photos, group shots") { try one.run(service.store).count }
+            for album in try! service.store.db.read({ db in try SmartAlbum.fetchAll(db) }) {
+                time("album \(album.name)") { try album.mediaQuery.run(service.store).count }
+            }
+        }
         exit(0)
     }
     let t0 = Date()

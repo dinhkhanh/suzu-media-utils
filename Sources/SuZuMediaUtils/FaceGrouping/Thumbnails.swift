@@ -8,6 +8,8 @@ final class Thumbnails: @unchecked Sendable {
     static let shared = Thumbnails()
     private let cache = NSCache<NSString, NSImage>()
 
+    private let videoSlots = AsyncLimiter(4)
+
     init() { cache.countLimit = 4000 }
 
     func face(_ id: Int64, store: URL) -> NSImage? {
@@ -24,7 +26,15 @@ final class Thumbnails: @unchecked Sendable {
         if let img = cache.object(forKey: key) { return img }
         var image: NSImage?
         if let time {
-            let cg = await Task.detached { VideoSampler.frameSync(url, at: time, maxPixel: Int(side * 2)) }.value
+            // A grid can ask for hundreds of video frames at once: decode a few at a time, and skip cells that
+            // scrolled away (their task is cancelled) instead of decoding frames nobody will see.
+            await videoSlots.acquire()
+            defer { Task { await videoSlots.release() } }
+            guard !Task.isCancelled else { return nil }
+            var cg = await VideoSampler.frame(url, at: time, maxPixel: Int(side * 2))
+            if cg == nil, FFmpeg.isAvailable, !Task.isCancelled {
+                cg = await Task.detached(priority: .utility) { FFmpeg.frame(url, at: time, maxPixel: Int(side * 2)) }.value
+            }
             image = cg.map { NSImage(cgImage: $0, size: .zero) }
         } else {
             let req = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: side, height: side), scale: 2,
@@ -33,6 +43,22 @@ final class Thumbnails: @unchecked Sendable {
         }
         if let image { cache.setObject(image, forKey: key) }
         return image
+    }
+}
+
+/// At most `limit` holders at a time; others wait their turn without blocking a thread.
+actor AsyncLimiter {
+    private var free: Int
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    init(_ limit: Int) { free = limit }
+
+    func acquire() async {
+        if free > 0 { free -= 1; return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    func release() {
+        if waiting.isEmpty { free += 1 } else { waiting.removeFirst().resume() }
     }
 }
 
