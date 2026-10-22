@@ -2,6 +2,7 @@ import CoreGraphics
 import FaceCore
 import Foundation
 import ImageIO
+import MediaKit
 
 // facescan scan <folder> --out <dir> [--workers 8] [--detect 1500] [--hires 0|3000] [--models ArcFaceR50,SFace]
 //                        [--models-dir models/compiled] [--limit N]
@@ -34,6 +35,18 @@ func now() -> Double { Date().timeIntervalSinceReferenceDate }
 func fmt(_ v: Double, _ p: Int = 1) -> String { String(format: "%.\(p)f", v) }
 
 switch command {
+case "render":
+    // facescan render <photo> --out x.jpg [--aspect 4:5] [--tone] [--logo logo.png] [--long 1350]
+    var r = EditRecipe()
+    r.autoTone = flags.contains("tone")
+    r.aspect = opts["aspect"].flatMap(AspectPreset.init(rawValue:))
+    r.maxLongSide = opts["long"].flatMap(Int.init)
+    r.watermark = opts["logo"].map(WatermarkSpec.init(logoPath:))
+    try! EditPipeline.render(target, recipe: r, focus: nil, to: URL(fileURLWithPath: opts["out"]!))
+    print("ok")
+case "sheet":
+    try! VideoTools.contactSheet(target, to: URL(fileURLWithPath: opts["out"]!))
+    print("ok")
 case "crop":
     // facescan crop <file> --box x,y,w,h [--time t] --out file.jpg : the crop a recognition service would receive.
     let b = opts["box"]!.split(separator: ",").map { Double($0)! }

@@ -15,7 +15,7 @@ public enum FFmpeg {
     }
 
     /// Runs a tool and returns stdout; throws with stderr on failure.
-    static func run(_ path: String, _ args: [String]) throws -> Data {
+    public static func run(_ path: String, _ args: [String]) throws -> Data {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = args
