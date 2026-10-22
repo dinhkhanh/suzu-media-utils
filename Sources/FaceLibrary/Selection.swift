@@ -17,6 +17,23 @@ public struct PersonFile: Sendable, Hashable {
 }
 
 public enum Selection {
+    /// Every face in each photo (not video frames), so a crop keeps everyone in the shot, not only the chosen person.
+    public static func faceBoxes(_ db: Database, mediaIds: some Collection<Int64>) throws -> [Int64: [(id: Int64, box: CGRect)]] {
+        guard !mediaIds.isEmpty else { return [:] }
+        var out: [Int64: [(id: Int64, box: CGRect)]] = [:]
+        for r in try Row.fetchAll(db, sql: """
+            SELECT id, mediaId, x, y, w, h FROM face WHERE time IS NULL AND mediaId IN (\(mediaIds.map(String.init).joined(separator: ",")))
+            """) {
+            out[r["mediaId"], default: []].append((r["id"], CGRect(x: r["x"] as Double, y: r["y"] as Double, width: r["w"] as Double, height: r["h"] as Double)))
+        }
+        return out
+    }
+
+    /// Crop focus on one face, with the photo's other faces.
+    public static func focus(face: Int64, box: CGRect, in faces: [(id: Int64, box: CGRect)]?) -> FocusHint {
+        FocusHint(primary: box, others: (faces ?? []).filter { $0.id != face }.map(\.box))
+    }
+
     /// The files of the given people (best first per person), optionally only photos or videos, the best N, and the
     /// best of each burst. Reads only the database, so it's fast even for NAS libraries.
     public static func files(_ store: LibraryStore, personIds: [Int64], kind: MediaKind?, topN: Int?, bestOfBurst: Bool,
@@ -25,7 +42,7 @@ public enum Selection {
         let ids = personIds.map(String.init).joined(separator: ",")
         let rows = try store.db.read { db in
             try Row.fetchAll(db, sql: """
-                SELECT m.id, m.path, m.kind, m.takenAt, m.burstId, p.id AS pid, p.name, f.x, f.y, f.w, f.h,
+                SELECT m.id, m.path, m.kind, m.takenAt, m.burstId, p.id AS pid, p.name, f.id AS faceId, f.x, f.y, f.w, f.h,
                        COALESCE(f.score, f.quality * 0.6, 0) AS s
                 FROM face f JOIN media m ON m.id = f.mediaId JOIN person p ON p.id = f.personId LEFT JOIN source src ON src.id = m.sourceId
                 WHERE f.personId IN (\(ids)) AND p.name IS NOT NULL AND m.duplicateOf IS NULL AND m.status = 'done'
@@ -34,6 +51,7 @@ public enum Selection {
                 """)
         }
         let mediaIds = Set(rows.map { $0["id"] as Int64 })
+        let boxes = try store.db.read { db in try faceBoxes(db, mediaIds: mediaIds) }
         let namesByMedia = try store.db.read { db -> [Int64: [String]] in
             guard !mediaIds.isEmpty else { return [:] }
             var out: [Int64: [String]] = [:]
@@ -54,7 +72,8 @@ public enum Selection {
                 list.append(PersonFile(mediaId: mid, url: URL(fileURLWithPath: r["path"], isDirectory: false), isVideo: (r["kind"] as String) == "video",
                                        personName: r["name"], people: (namesByMedia[mid] ?? []).sorted(),
                                        takenAt: (r["takenAt"] as Double?).map(Date.init(timeIntervalSince1970:)),
-                                       focus: FocusHint(primary: CGRect(x: r["x"] as Double, y: r["y"] as Double, width: r["w"] as Double, height: r["h"] as Double))))
+                                       focus: focus(face: r["faceId"], box: CGRect(x: r["x"] as Double, y: r["y"] as Double, width: r["w"] as Double, height: r["h"] as Double),
+                                                    in: boxes[mid])))
             }
             if let topN { list = Array(list.prefix(topN)) }
             out += list

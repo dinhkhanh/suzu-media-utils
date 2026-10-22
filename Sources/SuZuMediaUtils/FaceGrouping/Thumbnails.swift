@@ -80,6 +80,17 @@ struct FaceImage: View {
     }
 }
 
+extension Set {
+    /// A click in a grid: ⌘-click adds or removes, a plain click selects just this one.
+    mutating func click(_ e: Element) {
+        if NSEvent.modifierFlags.contains(.command) {
+            if contains(e) { remove(e) } else { insert(e) }
+        } else {
+            self = [e]
+        }
+    }
+}
+
 struct MediaThumbnail: View {
     let item: PersonMedia
     var side: CGFloat = 180

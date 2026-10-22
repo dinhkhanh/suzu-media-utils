@@ -51,6 +51,62 @@ final class EditPipelineTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(r.maxX, 0.61 * 6000)
     }
 
+    func testCropKeepsBothPeopleButNotTheBackground() {
+        // Two people side by side; a small face far right is someone in the background. 4:5 crop of a landscape photo.
+        let r = EditPipeline.cropRect(imageSize: CGSize(width: 6000, height: 4000), ratio: 0.8,
+                                      focus: FocusHint(primary: CGRect(x: 0.25, y: 0.25, width: 0.07, height: 0.1),
+                                                       others: [CGRect(x: 0.55, y: 0.22, width: 0.07, height: 0.1),
+                                                                CGRect(x: 0.92, y: 0.3, width: 0.02, height: 0.03)]))
+        XCTAssertLessThanOrEqual(r.minX, 0.25 * 6000)
+        XCTAssertGreaterThanOrEqual(r.maxX, 0.62 * 6000)
+        XCTAssertLessThan(r.maxX, 0.92 * 6000)
+        // The pair is centred, not the main person: the gap either side of them is about equal.
+        XCTAssertEqual(0.25 * 6000 - r.minX, r.maxX - 0.62 * 6000, accuracy: 60)
+    }
+
+    func testCropByOrientationPicksTheShapePerPhoto() throws {
+        var r = EditRecipe()
+        r.cropByOrientation = true
+        r.portraitAspect = .portrait
+        r.aspect = .landscape
+        XCTAssertTrue(r.crops)
+        func out(_ w: CGFloat, _ h: CGFloat) throws -> CGSize {
+            try EditPipeline.apply(r, to: CIImage(color: .gray).cropped(to: CGRect(x: 0, y: 0, width: w, height: h)), focus: FocusHint(primary: nil)).extent.size
+        }
+        XCTAssertEqual(try out(1200, 1800), CGSize(width: 1200, height: 1500))  // portrait -> 4:5
+        XCTAssertEqual(try out(1800, 1200), CGSize(width: 1800, height: 1013))  // landscape -> 16:9
+        XCTAssertEqual(try out(1000, 1000), CGSize(width: 1000, height: 563))   // square counts as landscape
+        // Portraits keep their frame when only landscapes are cropped.
+        r.portraitAspect = nil
+        XCTAssertEqual(try out(1200, 1800), CGSize(width: 1200, height: 1800))
+        XCTAssertEqual(r.cropDescription, "original portraits, 16:9 landscapes")
+        // Old saved recipes: one crop for every photo.
+        var old = EditRecipe()
+        old.aspect = .portrait
+        let decoded = try JSONDecoder().decode(EditRecipe.self, from: JSONEncoder().encode(old))
+        XCTAssertEqual(decoded.aspect(for: CGSize(width: 1800, height: 1200)), .portrait)
+    }
+
+    func testCropPlacedByHandWinsAndStaysInside() {
+        let faces = FocusHint(primary: CGRect(x: 0.1, y: 0.25, width: 0.07, height: 0.1))
+        var placed = faces
+        placed.center = CGPoint(x: 0.6, y: 0.5)
+        let r = EditPipeline.cropRect(imageSize: CGSize(width: 6000, height: 4000), ratio: 0.8, focus: placed)
+        XCTAssertEqual(r.midX, 3600, accuracy: 1)
+        placed.center = CGPoint(x: 0.99, y: 0.5)
+        XCTAssertEqual(EditPipeline.cropRect(imageSize: CGSize(width: 6000, height: 4000), ratio: 0.8, focus: placed).maxX, 6000)
+    }
+
+    func testCropAddsPeopleNearestFirstWhenNotAllFit() {
+        // Main person in the middle, one neighbour close by, another at the far edge: the crop can't hold all three.
+        let r = EditPipeline.cropRect(imageSize: CGSize(width: 6000, height: 4000), ratio: 0.8,
+                                      focus: FocusHint(primary: CGRect(x: 0.45, y: 0.25, width: 0.07, height: 0.1),
+                                                       others: [CGRect(x: 0.02, y: 0.25, width: 0.07, height: 0.1),
+                                                                CGRect(x: 0.62, y: 0.25, width: 0.07, height: 0.1)]))
+        XCTAssertLessThanOrEqual(r.minX, 0.45 * 6000)
+        XCTAssertGreaterThanOrEqual(r.maxX, 0.69 * 6000)
+    }
+
     func testRenderCropsResizesWatermarksAndTagsPeople() throws {
         let photo = try makeJPEG("p.jpg", w: 3000, h: 2000)
         let logo = try makeJPEG("logo.jpg", w: 400, h: 120, dark: false)
@@ -115,6 +171,50 @@ final class WatermarkTests: XCTestCase {
         XCTAssertEqual(try EditPipeline.watermark(canvas, spec: WatermarkSpec(logoPath: "")).extent, canvas.extent)
     }
 
+    func testBannerKeepsItsHeightAndTrimsItsSides() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("banner-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // Landscape banner white, portrait banner red, both wider than they need to be.
+        func bar(_ name: String, _ color: CIColor, width: CGFloat) throws -> String {
+            let url = dir.appendingPathComponent(name)
+            let img = CIImage(color: color).cropped(to: CGRect(x: 0, y: 0, width: width, height: 50))
+            try CIContext().writePNGRepresentation(of: img, to: url, format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+            return url.path
+        }
+        var spec = WatermarkSpec(banner: try bar("wide.png", .white, width: 600), portrait: try bar("tall.png", .red, width: 400))
+        spec.bannerHeight = 0.1
+        func pixel(_ image: CIImage, _ x: CGFloat, _ y: CGFloat) -> (Double, Double) {
+            var px = [UInt8](repeating: 0, count: 4)
+            CIContext().render(image, toBitmap: &px, rowBytes: 4, bounds: CGRect(x: x, y: y, width: 1, height: 1), format: .RGBA8, colorSpace: nil)
+            return (Double(px[0]) / 255, Double(px[1]) / 255)
+        }
+        let dark = CIColor(red: 0.1, green: 0.1, blue: 0.1)
+        // Landscape 1200 x 800: a 120 px white bar along the whole bottom edge, nothing above it.
+        let wide = try EditPipeline.watermark(CIImage(color: dark).cropped(to: CGRect(x: 0, y: 0, width: 1200, height: 800)), spec: spec)
+        for x: CGFloat in [1, 600, 1198] { XCTAssertGreaterThan(pixel(wide, x, 5).1, 0.9) }
+        XCTAssertGreaterThan(pixel(wide, 600, 115).1, 0.9)
+        XCTAssertLessThan(pixel(wide, 600, 125).1, 0.2)
+        // Portrait 800 x 1200 (same long side): the red banner across the width, as high as the landscape one.
+        // Both are 120 px high, unstretched, centred, with the sides trimmed.
+        let tall = try EditPipeline.watermark(CIImage(color: dark).cropped(to: CGRect(x: 0, y: 0, width: 800, height: 1200)), spec: spec)
+        for x: CGFloat in [1, 798] { XCTAssertGreaterThan(pixel(tall, x, 5).0, 0.9) }
+        let p = pixel(tall, 400, 115)
+        XCTAssertGreaterThan(p.0, 0.9); XCTAssertLessThan(p.1, 0.2)
+        XCTAssertLessThan(pixel(tall, 400, 125).0, 0.2)
+        // A banner too narrow to cover the photo is stretched sideways and keeps its height: 300 x 50 on 1200 x 800.
+        var short = WatermarkSpec(banner: try bar("narrow.png", .white, width: 300))
+        short.bannerHeight = 0.1
+        let narrow = try EditPipeline.watermark(CIImage(color: dark).cropped(to: CGRect(x: 0, y: 0, width: 1200, height: 800)), spec: short)
+        for x: CGFloat in [1, 1198] { XCTAssertGreaterThan(pixel(narrow, x, 115).1, 0.9) }
+        XCTAssertLessThan(pixel(narrow, 600, 125).1, 0.2)
+        // Without a portrait banner, portrait photos use the landscape one.
+        var one = spec
+        one.portraitLogoPath = nil
+        let fallback = try EditPipeline.watermark(CIImage(color: dark).cropped(to: CGRect(x: 0, y: 0, width: 800, height: 1200)), spec: one)
+        XCTAssertGreaterThan(pixel(fallback, 400, 5).1, 0.9)
+    }
+
     func testOldSavedRecipesStillDecode() throws {
         let json = #"{"autoTone":true,"autoToneStrength":0.8,"jpegQuality":0.9,"writePeopleNames":true,"watermark":{"logoPath":"/a.png","position":"bottomRight","size":0.22,"opacity":0.9,"margin":0.035}}"#
         let r = try JSONDecoder().decode(EditRecipe.self, from: Data(json.utf8))
@@ -155,5 +255,49 @@ final class PNGExportTests: XCTestCase {
         XCTAssertFalse([.first, .last, .premultipliedFirst, .premultipliedLast].contains(img.alphaInfo), "no alpha channel")
         XCTAssertEqual(img.colorSpace?.name as String?, CGColorSpace.displayP3 as String, "keeps the photo's colour space")
         XCTAssertEqual(Metadata.people(in: out), ["Mỹ Tâm"])
+    }
+}
+
+final class StraightenTests: XCTestCase {
+    /// A wall with pillars and door frames (long vertical lines), turned by `degrees` (counter-clockwise).
+    func scene(tilt degrees: Double) -> CIImage {
+        var wall = CIImage(color: CIColor(red: 0.8, green: 0.78, blue: 0.72)).cropped(to: CGRect(x: -2000, y: -2000, width: 6000, height: 5000))
+        for (i, x) in stride(from: -400.0, through: 1600, by: 110).enumerated() {
+            let shade = i % 2 == 0 ? 0.25 : 0.45
+            wall = CIImage(color: CIColor(red: shade, green: shade, blue: shade + 0.05))
+                .cropped(to: CGRect(x: x, y: -1500, width: 18 + Double(i % 3) * 8, height: 4000)).composited(over: wall)
+        }
+        let t = degrees * .pi / 180
+        return wall
+            .transformed(by: CGAffineTransform(translationX: -600, y: -400).concatenating(CGAffineTransform(rotationAngle: t))
+                .concatenating(CGAffineTransform(translationX: 600, y: 400)))
+            .cropped(to: CGRect(x: 0, y: 0, width: 1200, height: 800))
+    }
+
+    func testFindsTheTiltAndLevelsIt() throws {
+        let tilted = scene(tilt: 5)
+        let tilt = try XCTUnwrap(EditPipeline.horizonTilt(tilted))
+        XCTAssertEqual(tilt, 5, accuracy: 1)
+        var r = EditRecipe()
+        r.straighten = true
+        XCTAssertEqual(try XCTUnwrap(EditPipeline.rotation(r, tilted)), -5, accuracy: 1)
+        // Levelled: no tilt left (or too little to count), smaller (trimmed corners), same shape.
+        let level = try EditPipeline.apply(r, to: tilted, focus: nil)
+        XCTAssertLessThan(abs(EditPipeline.horizonTilt(level) ?? 0), 1)
+        XCTAssertEqual(level.extent.width / level.extent.height, 1.5, accuracy: 0.01)
+        XCTAssertLessThan(level.extent.width, 1200)
+        // A level photo is left alone, and the photo's own setting wins.
+        XCTAssertNil(EditPipeline.rotation(r, scene(tilt: 0)))
+        r.rotation = 0
+        XCTAssertNil(EditPipeline.rotation(r, tilted))
+    }
+
+    func testFacesTurnWithThePhoto() {
+        // A face right of centre stays right of centre after a small turn, and inside the frame.
+        let (_, f) = EditPipeline.rotate(CIImage(color: .gray).cropped(to: CGRect(x: 0, y: 0, width: 1200, height: 800)), degrees: 3,
+                                         focus: FocusHint(primary: CGRect(x: 0.7, y: 0.4, width: 0.1, height: 0.15)))
+        let p = f!.primary!
+        XCTAssertEqual(p.midX, 0.75, accuracy: 0.05)
+        XCTAssertTrue(CGRect(x: 0, y: 0, width: 1, height: 1).contains(p))
     }
 }

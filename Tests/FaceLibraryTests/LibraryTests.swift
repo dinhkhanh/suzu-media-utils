@@ -115,6 +115,48 @@ final class LibraryTests: XCTestCase {
         XCTAssertNil(try store.db.read { db in try FaceRecord.fetchOne(db, key: faceA) })
     }
 
+    /// Ratings written into a photo change its bytes; the library must still see the same file (no reprocessing,
+    /// which would drop its faces), and a later scan must not take it for a changed file either.
+    func testWritingMarksIntoAPhotoKeepsItsFaces() throws {
+        let url = root.appendingPathComponent("a.jpg")
+        let ctx = CGContext(data: nil, width: 64, height: 48, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        ctx.setFillColor(red: 1, green: 0, blue: 0, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: 64, height: 48))
+        let dst = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil)!
+        CGImageDestinationAddImage(dst, ctx.makeImage()!, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(dst))
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -3600)], ofItemAtPath: url.path)
+        let m = monitor()
+        m.scan()
+        let id = try XCTUnwrap(try store.db.read { db in try Int64.fetchOne(db, sql: "SELECT id FROM media") })
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE media SET status = 'done' WHERE id = ?", arguments: [id])
+            var f = FaceRecord(id: nil, mediaId: id, x: 0.4, y: 0.4, w: 0.2, h: 0.2, quality: 0.8, time: nil, embedding: nil, track: nil,
+                               personId: nil, assignment: .none, rejectedPersonId: nil)
+            try f.insert(db)
+            try Marks.apply(.rating(4), to: [id], db: db)
+            try Marks.apply(.label(.green), to: [id], db: db)
+        }
+
+        XCTAssertEqual(try Marks.writeToFiles([id], store: store).written, 1)
+        XCTAssertEqual(Metadata.rating(in: url).rating, 4)
+        XCTAssertEqual(Metadata.rating(in: url).label, "Green")
+        m.scan()
+        m.scan()
+        XCTAssertEqual(try store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM face WHERE mediaId = ?", arguments: [id]) }, 1)
+        XCTAssertEqual(try store.db.read { db in try String.fetchOne(db, sql: "SELECT status FROM media WHERE id = ?", arguments: [id]) }, "done")
+
+        // A reject is written as rating -1, as Bridge does; no label clears the old one.
+        try store.db.write { db in
+            try Marks.apply(.flag(.reject), to: [id], db: db)
+            try Marks.apply(.label(nil), to: [id], db: db)
+        }
+        XCTAssertEqual(try Marks.writeToFiles([id], store: store).written, 1)
+        XCTAssertEqual(Metadata.rating(in: url).rating, -1)
+        XCTAssertEqual(Metadata.rating(in: url).label ?? "", "")
+    }
+
     func testFileStillBeingWrittenWaitsUntilStable() throws {
         let url = root.appendingPathComponent("incoming.jpg")
         try Data(count: 1000).write(to: url)  // fresh mtime: not settled by age

@@ -47,6 +47,70 @@ final class ProjectTests: XCTestCase {
         return p.id!
     }
 
+    /// The Files browser: only the project's files, with the names in them; copies show the original's people.
+    func testProjectFilesListsTheProjectsFilesByFolder() throws {
+        let gala = try project("Gala"), other = try project("Other")
+        let g = try source("Gala", project: gala), o = try source("Other", project: other)
+        let known = try source("Known", project: nil, kind: .reference)
+        let an = try person("An"), unnamed = try person(nil)
+        let first = try photo("Gala/Stage/1.jpg", source: g, person: an)
+        try photo("Gala/Stage/Close/2.jpg", source: g, person: unnamed)
+        try photo("Gala/3.jpg", source: g, person: nil)
+        try photo("Other/4.jpg", source: o, person: an)
+        try photo("Known/An/5.jpg", source: known, person: an)
+        var copy = MediaRecord(sourceId: g, path: tmp.appendingPathComponent("Gala/Copy of 1.jpg").path, kind: .photo, size: 100, mtime: 0, contentKey: "1")
+        copy.duplicateOf = first.media
+        try store.db.write { db in try copy.insert(db) }
+
+        let files = try store.db.read { db in try ProjectFiles.list(db, project: gala) }
+        XCTAssertEqual(files.map(\.name).sorted(), ["1.jpg", "2.jpg", "3.jpg", "Copy of 1.jpg"])
+        XCTAssertEqual(files.first { $0.name == "1.jpg" }?.people, ["An"])
+        let unnamedOnly = try XCTUnwrap(files.first { $0.name == "2.jpg" })
+        XCTAssertEqual(unnamedOnly.people, [])
+        XCTAssertEqual(unnamedOnly.faces, 1)
+        let dup = try XCTUnwrap(files.first { $0.duplicate })
+        XCTAssertEqual(dup.people, ["An"])
+
+        let root = tmp.appendingPathComponent("Gala").path
+        let top = ProjectFiles.contents(of: root, in: files)
+        XCTAssertEqual(top.folders, [root + "/Stage": 2])
+        XCTAssertEqual(top.files.map(\.name).sorted(), ["3.jpg", "Copy of 1.jpg"])
+        XCTAssertEqual(ProjectFiles.contents(of: root + "/Stage", in: files).folders, [root + "/Stage/Close": 1])
+        XCTAssertEqual(ProjectFiles.contents(of: root, in: files, recursive: true).files.count, 4)
+        // A folder whose name starts like another's is not inside it.
+        XCTAssertTrue(ProjectFiles.contents(of: root + "/Sta", in: files).files.isEmpty)
+        XCTAssertEqual(try store.db.read { db in try ProjectFiles.list(db, project: nil) }.count, 5)
+    }
+
+    /// Culling marks and the closed-eyes / soft-focus hints come with each file.
+    func testProjectFilesCarryMarksAndHints() throws {
+        let gala = try project("Gala"), g = try source("Gala", project: gala)
+        let an = try person("An")
+        let sharp = try photo("Gala/1.jpg", source: g, person: an), blink = try photo("Gala/2.jpg", source: g, person: nil)
+        let small = try photo("Gala/3.jpg", source: g, person: nil)
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE face SET eyesOpen = 0.9, sharpness = 800 WHERE id = ?", arguments: [sharp.face])
+            try db.execute(sql: "UPDATE face SET eyesOpen = 0.1, sharpness = 30 WHERE id = ?", arguments: [blink.face])
+            // A tiny face in the crowd says nothing about the shot.
+            try db.execute(sql: "UPDATE face SET eyesOpen = 0.1, sharpness = 30, w = 0.01, h = 0.01 WHERE id = ?", arguments: [small.face])
+            try Marks.apply(.rating(5), to: [sharp.media], db: db)
+            try Marks.apply(.label(.red), to: [sharp.media, blink.media], db: db)
+            try Marks.apply(.flag(.reject), to: [blink.media], db: db)
+            try Marks.apply(.rating(9), to: [blink.media], db: db)
+        }
+        let files = Dictionary(uniqueKeysWithValues: try store.db.read { db in try ProjectFiles.list(db, project: gala) }.map { ($0.name, $0) })
+        XCTAssertEqual(files["1.jpg"]?.rating, 5)
+        XCTAssertEqual(files["1.jpg"]?.label, .red)
+        XCTAssertEqual(files["1.jpg"]?.flag, PickFlag.none)
+        XCTAssertEqual(files["1.jpg"]?.personIds, [an])
+        XCTAssertEqual(files["1.jpg"].map { [$0.eyesClosed, $0.soft] }, [false, false])
+        XCTAssertEqual(files["2.jpg"]?.flag, .reject)
+        XCTAssertEqual(files["2.jpg"]?.rating, 5, "ratings stop at five stars")
+        XCTAssertEqual(files["2.jpg"].map { [$0.eyesClosed, $0.soft] }, [true, true])
+        XCTAssertEqual(files["3.jpg"].map { [$0.eyesClosed, $0.soft] }, [false, false])
+        XCTAssertEqual(try store.db.read { db in try ProjectFiles.faces(db, mediaId: sharp.media) }.map(\.name), ["An"])
+    }
+
     func testFoldersFromBeforeProjectsBecomeTheFirstProject() throws {
         let dir = tmp.appendingPathComponent("old")
         let db = try DatabaseQueue(path: tmp.appendingPathComponent("old.sqlite").path)

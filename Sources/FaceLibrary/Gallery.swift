@@ -102,6 +102,7 @@ public struct GalleryExporter: Sendable {
         try fm.createDirectory(at: folder.appendingPathComponent("faces"), withIntermediateDirectories: true)
         var cards: [GalleryHTML.PersonCard] = []
         let lists = try people.map { try data.files(personId: $0.id, topN: options.topN, bestOfBurst: options.bestOfBurst).filter { options.includeVideos || !$0.isVideo } }
+        let boxes = try store.db.read { db in try Selection.faceBoxes(db, mediaIds: Set(lists.joined().filter { !$0.isVideo }.map(\.mediaId))) }
         let total = lists.map(\.count).reduce(0, +)
         var done = 0
         // Folder names drop accents, so Hùng and Hưng (or Thu and Thư) would share one: number the second.
@@ -127,7 +128,7 @@ public struct GalleryExporter: Sendable {
                     tiles.append(.init(thumb: "thumbs/\(base).jpg", view: name, download: name, isVideo: true, caption: src.lastPathComponent))
                 } else {
                     do {
-                        try EditPipeline.render(src, recipe: options.recipe, focus: FocusHint(primary: f.box), people: [p.name], to: dir.appendingPathComponent("\(base).jpg"))
+                        try EditPipeline.render(src, recipe: options.recipe, focus: Selection.focus(face: f.faceId, box: f.box, in: boxes[f.mediaId]), people: [p.name], to: dir.appendingPathComponent("\(base).jpg"))
                         var thumb = EditRecipe(); thumb.maxLongSide = 480; thumb.jpegQuality = 0.8; thumb.writePeopleNames = false
                         try EditPipeline.render(dir.appendingPathComponent("\(base).jpg"), recipe: thumb, focus: nil, to: dir.appendingPathComponent("thumbs/\(base).jpg"))
                         tiles.append(.init(thumb: "thumbs/\(base).jpg", view: "\(base).jpg", download: "\(base).jpg", isVideo: false, caption: src.lastPathComponent))

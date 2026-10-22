@@ -22,8 +22,10 @@ public enum EditPipeline {
         }
     }
 
-    /// Writes the edited photo as JPEG to `dest`. `focus` nil: faces are detected on the fly when cropping.
+    /// Writes the edited photo as JPEG to `dest`. `focus` nil: faces are detected on the fly when cropping. The photo's
+    /// own crop (shape and placement edited by hand) wins over the recipe's.
     public static func render(_ url: URL, recipe: EditRecipe, focus: FocusHint?, people: [String] = [], to dest: URL) throws {
+        let recipe = CropPlacements.shared.recipe(recipe, for: url)
         // One read per file (a network share would otherwise send it twice), then decode only as many pixels as the
         // output needs: a 1350 px Instagram crop doesn't need all 33 megapixels.
         guard let data = try? Data(contentsOf: url, options: .uncached),
@@ -33,7 +35,7 @@ public enum EditPipeline {
         let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
         guard var image = decode(src, data: data, recipe: recipe, properties: props) else { throw Failure.unreadable(url.lastPathComponent) }
         let sourceSpace = image.colorSpace
-        image = try apply(recipe, to: image, focus: focus)
+        image = try apply(recipe, to: image, focus: CropPlacements.shared.focus(for: url, given: focus))
         let deep = (props?[kCGImagePropertyDepth] as? Int ?? 8) > 8
         guard let cg = pixels(image, format: recipe.outputFormat, sourceSpace: sourceSpace, deep: deep) else {
             throw Failure.write(dest.lastPathComponent)
@@ -65,11 +67,13 @@ public enum EditPipeline {
         if let target = recipe.maxLongSide, w > 0, h > 0 {
             // Share of the long side the crop keeps (crops never upscale, so this is how much detail is needed).
             var keep = 1.0
-            if let a = recipe.aspect {
+            if let a = recipe.aspect(for: CGSize(width: w, height: h)) {
                 let cw = min(w, h * a.ratio), ch = min(h, w / a.ratio)
                 keep = max(cw, ch) / max(w, h)
             }
-            let needed = Int((Double(target) / keep * 1.05).rounded(.up))
+            // Straightening trims up to about 15% (at 10°).
+            let turn = recipe.straighten == true || recipe.rotation != nil ? 1 / 0.85 : 1
+            let needed = Int((Double(target) / keep * 1.05 * turn).rounded(.up))
             if Double(needed) < max(w, h) * 0.9 {
                 let opts: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: needed,
                                              kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceShouldCacheImmediately: true]
@@ -81,9 +85,10 @@ public enum EditPipeline {
 
     /// The recipe applied to an image in memory (also used for video frames and previews).
     public static func apply(_ recipe: EditRecipe, to input: CIImage, focus: FocusHint?) throws -> CIImage {
-        var image = input
+        var image = input, focus = focus
         if recipe.autoTone { image = autoTone(image, strength: recipe.autoToneStrength) }
-        if let aspect = recipe.aspect {
+        if let degrees = rotation(recipe, image) { (image, focus) = rotate(image, degrees: degrees, focus: focus) }
+        if let aspect = recipe.aspect(for: image.extent.size) {
             let size = image.extent.size
             let hint = focus ?? detectFaces(image)
             let r = cropRect(imageSize: size, ratio: aspect.ratio, focus: hint)
@@ -119,20 +124,80 @@ public enum EditPipeline {
             .cropped(to: image.extent)
     }
 
+    // MARK: - Straighten
+
+    /// How far the photo is turned off level, in degrees counter-clockwise, when it looks like a slip: 0.3°–10°,
+    /// measured on its long straight lines (see TiltEstimator). Bigger tilts are taken as meant. Vision's horizon
+    /// request isn't used: it reports a confident tilt for most level photos taken indoors.
+    public static func horizonTilt(_ image: CIImage) -> Double? {
+        guard let degrees = TiltEstimator.tilt(image) else { return nil }
+        return abs(degrees) >= 0.3 && abs(degrees) <= 10 ? degrees : nil
+    }
+
+    /// The turn a recipe asks for, in degrees counter-clockwise: the photo's own, else the one that levels its horizon.
+    public static func rotation(_ recipe: EditRecipe, _ image: CIImage) -> Double? {
+        if let r = recipe.rotation { return abs(r) < 0.01 ? nil : r }
+        return recipe.straighten == true ? horizonTilt(image).map { -$0 } : nil
+    }
+
+    /// Share of each side left after turning a w x h photo by `degrees` and trimming to the largest frame of the same
+    /// shape that has no empty corners.
+    public static func rotatedScale(_ size: CGSize, degrees: Double) -> Double {
+        let t = degrees * .pi / 180, c = abs(cos(t)), s = abs(sin(t)), w = size.width, h = size.height
+        return min(w / (w * c + h * s), h / (w * s + h * c))
+    }
+
+    /// Turned `degrees` counter-clockwise about its centre and trimmed to the largest frame of the same shape inside,
+    /// so no empty corners show. Face rects (normalized, top-left origin) turn with it.
+    public static func rotate(_ image: CIImage, degrees: Double, focus: FocusHint?) -> (CIImage, FocusHint?) {
+        let ext = image.extent, w = ext.width, h = ext.height, t = degrees * .pi / 180
+        let k = rotatedScale(ext.size, degrees: degrees)
+        let W = (w * k).rounded(.down), H = (h * k).rounded(.down)
+        let turn = CGAffineTransform(translationX: -ext.midX, y: -ext.midY)
+            .concatenating(CGAffineTransform(rotationAngle: t))
+            .concatenating(CGAffineTransform(translationX: W / 2, y: H / 2))
+        // Clamped first, so the edges don't fade into the transparent area outside.
+        let out = image.clampedToExtent().transformed(by: turn).cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
+        func map(_ r: CGRect) -> CGRect {
+            let corners = [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY)]
+            let turned = corners.map { p -> CGPoint in
+                let dx = (p.x - 0.5) * w, dy = (0.5 - p.y) * h  // from the centre, y up
+                let x = dx * cos(t) - dy * sin(t), y = dx * sin(t) + dy * cos(t)
+                return CGPoint(x: (x + W / 2) / W, y: (H / 2 - y) / H)
+            }
+            let minX = max(0, turned.map(\.x).min()!), maxX = min(1, turned.map(\.x).max()!)
+            let minY = max(0, turned.map(\.y).min()!), maxY = min(1, turned.map(\.y).max()!)
+            return CGRect(x: minX, y: minY, width: max(0, maxX - minX), height: max(0, maxY - minY))
+        }
+        guard var f = focus else { return (out, nil) }
+        f.primary = f.primary.map(map)
+        f.others = f.others.map(map)
+        return (out, f)
+    }
+
     // MARK: - Crop
 
     /// Largest rect of the given aspect ratio that fits, placed so the main face sits a little above centre
-    /// (headroom), keeping every listed face in frame when they fit. Top-left origin, pixels.
+    /// (headroom), with everyone else in the shot in frame too: faces at least half the main face's height (smaller ones
+    /// are people in the background), nearest first, as many as fit. Top-left origin, pixels.
     public static func cropRect(imageSize: CGSize, ratio: Double, focus: FocusHint?) -> CGRect {
         let W = imageSize.width, H = imageSize.height
         var cw = W, ch = W / ratio
         if ch > H { ch = H; cw = H * ratio }
         func px(_ r: CGRect) -> CGRect { CGRect(x: r.minX * W, y: r.minY * H, width: r.width * W, height: r.height * H) }
-        var target: CGRect?
-        if let p = focus?.primary { target = px(p) }
-        if let others = focus?.others, !others.isEmpty {
-            let all = others.map(px).reduce(target ?? px(others[0])) { $0.union($1) }
-            if all.width <= cw * 0.9 && all.height <= ch * 0.8 { target = all }
+        if let c = focus?.center {
+            let x = min(max(c.x * W - cw / 2, 0), W - cw), y = min(max(c.y * H - ch / 2, 0), H - ch)
+            return CGRect(x: x.rounded(), y: y.rounded(), width: cw.rounded(), height: ch.rounded())
+                .intersection(CGRect(origin: .zero, size: imageSize))
+        }
+        let others = (focus?.others ?? []).map(px)
+        var target = focus?.primary.map(px) ?? others.max { $0.height < $1.height }
+        if let main = target {
+            func distance(_ r: CGRect) -> CGFloat { hypot(r.midX - main.midX, r.midY - main.midY) }
+            for r in others.filter({ $0.height >= main.height * 0.5 }).sorted(by: { distance($0) < distance($1) }) {
+                let group = target!.union(r)
+                if group.width <= cw * 0.9 && group.height <= ch * 0.8 { target = group }
+            }
         }
         guard let t = target else {
             return CGRect(x: ((W - cw) / 2).rounded(), y: ((H - ch) / 2).rounded(), width: cw.rounded(), height: ch.rounded())
@@ -165,27 +230,42 @@ public enum EditPipeline {
 
     public static func watermark(_ image: CIImage, spec: WatermarkSpec) throws -> CIImage {
         guard !spec.isEmpty else { return image }
-        let key = (spec.isText ? "text|\(spec.textColor?.rawValue ?? "")|\(spec.text!)" : spec.logoPath) as NSString
-        var logo = logoCache.object(forKey: key)
-        if logo == nil {
-            let made = spec.isText ? textMark(spec.text!, color: spec.textColor ?? .white)
-                : CIImage(contentsOf: URL(fileURLWithPath: spec.logoPath, isDirectory: false))
-            guard let l = made else { throw Failure.logo(spec.logoPath) }
-            logoCache.setObject(l, forKey: key)
-            logo = l
-        }
         let ext = image.extent
-        let short = min(ext.width, ext.height)
-        let targetW = short * spec.size
-        var mark = logo!.transformed(by: CGAffineTransform(scaleX: targetW / logo!.extent.width, y: targetW / logo!.extent.width))
+        let path = spec.logoPath(for: ext.size)
+        let logo = try spec.isText ? cachedMark("text|\(spec.textColor?.rawValue ?? "")|\(spec.text!)", path) { textMark(spec.text!, color: spec.textColor ?? .white) }
+            : loadLogo(path)
+        let short = min(ext.width, ext.height), long = max(ext.width, ext.height)
+        var mark: CIImage
+        if spec.isBanner {
+            // Exactly the same height on every photo shape, whatever the banner was made for: banners are made wider than
+            // any photo, with their text and logos in a safe zone in the middle, and the sides are trimmed (cropped(to:)
+            // below). One too narrow to cover the width is stretched sideways to cover it; the height never changes.
+            let s = long * (spec.bannerHeight ?? WatermarkSpec.defaultBannerHeight) / logo.extent.height
+            mark = logo.transformed(by: CGAffineTransform(scaleX: max(s, ext.width / logo.extent.width), y: s))
+        } else {
+            // Sized on the shorter side, so it looks the same either way round.
+            let s = short * spec.size / logo.extent.width
+            mark = logo.transformed(by: CGAffineTransform(scaleX: s, y: s))
+        }
         mark = mark.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: spec.opacity)])
         let m = short * spec.margin, w = mark.extent.width, h = mark.extent.height
-        let xs: [CGFloat] = [m, (ext.width - w) / 2, ext.width - w - m]
+        let xs: [CGFloat] = spec.isBanner ? Array(repeating: (ext.width - w) / 2, count: 3) : [m, (ext.width - w) / 2, ext.width - w - m]
         let ys: [CGFloat] = [ext.height - h - m, (ext.height - h) / 2, m]  // top, middle, bottom (bottom-left origin)
         let idx = WatermarkSpec.Position.allCases.firstIndex(of: spec.position)!
         let pos = CGPoint(x: xs[idx % 3], y: ys[idx / 3])
         mark = mark.transformed(by: CGAffineTransform(translationX: ext.minX + pos.x - mark.extent.minX, y: ext.minY + pos.y - mark.extent.minY))
         return mark.composited(over: image).cropped(to: ext)
+    }
+
+    static func loadLogo(_ path: String) throws -> CIImage {
+        try cachedMark(path, path) { CIImage(contentsOf: URL(fileURLWithPath: path, isDirectory: false)) }
+    }
+
+    static func cachedMark(_ key: String, _ path: String, make: () -> CIImage?) throws -> CIImage {
+        if let l = logoCache.object(forKey: key as NSString) { return l }
+        guard let l = make(), l.extent.width > 0, l.extent.height > 0 else { throw Failure.logo(path) }
+        logoCache.setObject(l, forKey: key as NSString)
+        return l
     }
 
     /// Text drawn large with a soft shadow (legible on light and dark areas), then scaled like a logo.

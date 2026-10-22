@@ -30,7 +30,8 @@ groups them by person, keeps up as new files arrive, and files each person's med
 - **Search & smart albums:** people (all together / any), solo or group shots, photos/videos, dates, folder, best
   shots only; save as a smart album that keeps updating.
 - **Export:** Copy/Move to Folder per person or Export All (`<folder>/<Person Name>/`, never overwriting). Optional
-  edits (auto tone, face-aware social crop 1:1 · 4:5 · 9:16 · 16:9 · 1.91:1, logo or text watermark, resize — auto tone
+  edits (auto tone, face-aware social crop 1:1 · 4:5 · 9:16 · 16:9 · 1.91:1 — one for every photo, or one for portraits
+and one for landscapes — logo, text or banner watermark, resize — auto tone
   turns on with crops and watermarks), Top N, best of each burst, and people's names written into the files
   (IPTC/XMP, read by Lightroom, Photo Mechanic, Bridge and Photos).
 - **Delivery rules:** new photos of a person (or anyone named) are copied — optionally edited — into a folder (put
@@ -50,13 +51,29 @@ groups them by person, keeps up as new files arrive, and files each person's med
 
 ### Batch Export
 Auto tone, face-aware social crops, watermark and resize for any photos or people's photos: a large preview of the
-result (film strip, before/after, click the photo to place the watermark) with the settings beside it. Tick or untick
+result (film strip, before/after, click the photo to place the watermark, drag it to move the crop — remembered per
+photo for every screen, with Reset crop to go back to the automatic one) with the settings beside it. Tick or untick
 photos in the strip or in a grid of all of them (⇧-click for a range, Select All / None) to export only some; save as
-JPEG or as lossless PNG (the photo's own colour space, 16-bit when the original is). It never overwrites a file:
-a name already taken (an original, an earlier export, or another camera's photo of the same name) gets " (2)".
+JPEG or as lossless PNG (the photo's own colour space, 16-bit when the original is). It remembers what it exported
+(a green tick on the thumbnail, the date in the preview): exporting a photo into a folder that already has it asks,
+photo by photo or for all, whether to skip it or overwrite it. Originals are never overwritten, and another camera's
+photo of the same name gets " (2)".
+
+Straighten tilted photos (Look) levels photos turned 0.3°–10° off by their vertical lines — pillars, door frames, screen
+and banner edges — and trims the corners; it only turns a photo when many lines agree (on event photos turned ±3°, it
+was never more than 0.2° off), and leaves the rest alone. Level in the preview turns any photo by hand.
+
+Right-click → Open on any photo in the library (a person's photos or faces, unassigned faces, search, smart albums)
+opens it in an Edit & Export window, Batch Export with just that photo — or every ⌘-click-selected one — and the
+faces the library already knows, so crops keep everyone in frame.
 
 ### Watermarks
-Save any number of watermark presets — logos or text credits — in Settings → Watermarks. Every editing screen (Batch
+Save any number of watermark presets — logos, text credits or full-width banners — in Settings → Watermarks. A banner
+is a bar stretched across the whole width of the photo (top, middle or bottom), with one image for landscape photos
+and another for portrait ones. You set its height (by default 112 px for every 2048 px of the long side), so it is the same
+height on every photo shape; it is centred and its sides are trimmed to the photo's width (one too narrow for the photo is
+stretched sideways, never made taller). Make
+banners a little wider than any photo and keep text and logos in a safe zone in the middle. Every editing screen (Batch
 Export, Copy/Move, delivery rules, web gallery, video stills) picks its own preset and position, edits it in place,
 and remembers its choices; edits can be saved back to the preset or as a new one.
 

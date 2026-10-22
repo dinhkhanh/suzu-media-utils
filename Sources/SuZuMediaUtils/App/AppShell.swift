@@ -2,6 +2,8 @@ import SwiftUI
 
 /// Where the user is in the app. Add a case per tool; the tool decides what its own route values mean.
 enum AppRoute: Hashable {
+    /// The project's photos and videos by folder (the start screen).
+    case files
     case faces(FaceRoute)
     case tool(ToolRoute)
 }
@@ -15,7 +17,7 @@ struct AppShell: View {
     @State private var path = NavigationPath()
     @EnvironmentObject var faces: FaceGroupingModel
 
-    /// SUZU_START_ROUTE=search | rules | album.<id> | tool.<name> (testing): open the app on that screen.
+    /// SUZU_START_ROUTE=people | unassigned | search | rules | album.<id> | tool.<name> (testing): open the app on that screen.
     static var startRoute: AppRoute {
         let r = ProcessInfo.processInfo.environment["SUZU_START_ROUTE"] ?? ""
         if r.hasPrefix("album."), let id = Int64(r.dropFirst(6)) { return .faces(.album(id)) }
@@ -24,13 +26,15 @@ struct AppShell: View {
         case "search": return .faces(.search)
         case "rules": return .faces(.rules)
         case "unassigned": return .faces(.unassigned)
-        default: return .faces(.people)
+        case "people": return .faces(.people)
+        default: return .files
         }
     }
 
     var body: some View {
         NavigationSplitView {
             List(selection: $route) {
+                FilesSidebar()
                 FaceGroupingSidebar()
                 ToolsSidebar()
             }
@@ -40,7 +44,8 @@ struct AppShell: View {
             .toolbar { FaceGroupingSidebarToolbar() }
         } detail: {
             NavigationStack(path: $path) {
-                switch route ?? .faces(.people) {
+                switch route ?? .files {
+                case .files: FilesBrowser()
                 case .faces(let r): FaceGroupingDetail(route: r, path: $path)
                 case .tool(let t): ToolDetail(route: t)
                 }

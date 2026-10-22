@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreImage
 import FaceCore
 import Foundation
 import ImageIO
@@ -36,14 +37,34 @@ func fmt(_ v: Double, _ p: Int = 1) -> String { String(format: "%.\(p)f", v) }
 
 switch command {
 case "render":
-    // facescan render <photo> --out x.jpg [--aspect 4:5] [--tone] [--logo logo.png] [--long 1350]
+    // facescan render <photo> --out x.jpg [--aspect 4:5] [--tone] [--straighten] [--logo logo.png] [--banner wide.png [--banner-portrait tall.png]] [--long 1350]
     var r = EditRecipe()
     r.autoTone = flags.contains("tone")
+    r.straighten = flags.contains("straighten") ? true : nil
     r.aspect = opts["aspect"].flatMap(AspectPreset.init(rawValue:))
     r.maxLongSide = opts["long"].flatMap(Int.init)
-    r.watermark = opts["logo"].map(WatermarkSpec.init(logoPath:))
+    r.watermark = opts["logo"].map(WatermarkSpec.init(logoPath:)) ?? opts["banner"].map { WatermarkSpec(banner: $0, portrait: opts["banner-portrait"]) }
     try! EditPipeline.render(target, recipe: r, focus: nil, to: URL(fileURLWithPath: opts["out"]!))
     print("ok")
+case "tilt":
+    // facescan tilt <folder> [--test] : the tilt straightening would correct, per photo (blank: left alone). --test
+    // also turns each photo 3° each way and prints how far off the estimates are.
+    let files = (FileManager.default.enumerator(at: target, includingPropertiesForKeys: nil)?.compactMap { $0 as? URL } ?? [])
+        .filter { ImageLoader.extensions.contains($0.pathExtension.lowercased()) }.sorted { $0.path < $1.path }
+    for f in files.prefix(Int(opts["limit"] ?? "200")!) {
+        guard let src = CGImageSourceCreateWithURL(f as CFURL, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 1024,
+                                                                   kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) else { continue }
+        let image = CIImage(cgImage: cg), base = EditPipeline.horizonTilt(image)
+        var line = [base.map { fmt($0) + "°" } ?? "", f.lastPathComponent]
+        if flags.contains("test") {
+            for turn in [3.0, -3.0] {
+                let est = EditPipeline.horizonTilt(EditPipeline.rotate(image, degrees: turn, focus: nil).0)
+                line.append(est.map { "\(fmt(turn, 0)): err \(fmt($0 - (base ?? 0) - turn, 2))" } ?? "\(fmt(turn, 0)): none")
+            }
+        }
+        print(line.joined(separator: "\t"))
+    }
 case "sheet":
     try! VideoTools.contactSheet(target, to: URL(fileURLWithPath: opts["out"]!))
     print("ok")

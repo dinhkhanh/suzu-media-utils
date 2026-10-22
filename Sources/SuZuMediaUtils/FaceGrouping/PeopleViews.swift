@@ -171,6 +171,9 @@ struct PersonDetail: View {
     @State private var faces: [FaceItem] = []
     @State private var alsoWith: Set<Int64> = []
     @State private var selectedFaces: Set<Int64> = []
+    /// Photos and videos selected in the grid (⌘-click for several), for Open.
+    @State private var selectedMedia: Set<Int64> = []
+    @Environment(\.openWindow) private var openWindow
     @State private var export: ExportMode?
     @State private var sort = MediaSort.best
     @State private var collapseBursts = true
@@ -351,10 +354,17 @@ struct PersonDetail: View {
                                 .help("\(item.hiddenInBurst) similar shots hidden; this is the best of the burst")
                         }
                     }
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(selectedMedia.contains(item.id) ? Color.accentColor : .clear, lineWidth: 3))
                     .onTapGesture(count: 2) { NSWorkspace.shared.open(item.url) }
+                    .onTapGesture { selectedMedia.click(item.id) }
                     .contextMenu {
-                        Button("Open") { NSWorkspace.shared.open(item.url) }
-                        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
+                        // The selection when this photo is in it, else just this photo.
+                        let open = selectedMedia.contains(item.id) ? items.filter { selectedMedia.contains($0.id) } : [item]
+                        Button(open.count > 1 ? "Open \(open.count) Photos" : "Open") {
+                            openWindow.edit(open.map(\.path), faces: Dictionary(open.map { ($0.path, $0.faceId) }, uniquingKeysWith: { a, _ in a }))
+                        }
+                        Button("Open With Default App") { open.forEach { NSWorkspace.shared.open($0.url) } }
+                        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(open.map(\.url)) }
                         Divider()
                         Button("Use as \(person?.name ?? "Person")'s Picture") { model.setCover(personId, faceId: item.faceId) }
                     }
@@ -412,7 +422,8 @@ extension ExportMode: Identifiable {
 struct FaceGrid<Menu: View>: View {
     let faces: [FaceItem]
     @Binding var selection: Set<Int64>
-    var menu: (Int64) -> Menu
+    @ViewBuilder var menu: (Int64) -> Menu
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 6)], spacing: 6) {
@@ -424,7 +435,19 @@ struct FaceGrid<Menu: View>: View {
                         if selection.contains(f.id) { selection.remove(f.id) } else { selection.insert(f.id) }
                     }
                     .onTapGesture(count: 2) { NSWorkspace.shared.open(URL(fileURLWithPath: f.path, isDirectory: false)) }
-                    .contextMenu { menu(f.id) }
+                    .contextMenu {
+                        // The selected faces' photos when this face is selected, else this face's photo.
+                        let open = selection.contains(f.id) ? faces.filter { selection.contains($0.id) } : [f]
+                        let paths = open.reduce(into: [String]()) { if !$0.contains($1.path) { $0.append($1.path) } }
+                        Button(paths.count > 1 ? "Open \(paths.count) Photos" : "Open") {
+                            openWindow.edit(paths, faces: Dictionary(open.map { ($0.path, $0.id) }, uniquingKeysWith: { a, _ in a }))
+                        }
+                        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(paths.map { URL(fileURLWithPath: $0, isDirectory: false) }) }
+                        if Menu.self != EmptyView.self {
+                            Divider()
+                            menu(f.id)
+                        }
+                    }
                     .help("\(URL(fileURLWithPath: f.path, isDirectory: false).lastPathComponent)\(f.time.map { " at " + MediaThumbnail.timecode($0) } ?? "")")
             }
         }
@@ -468,10 +491,33 @@ struct MoveFacesMenu: View {
     }
 }
 
+/// "New Person…" and "Move to ▸ <name>" as menu items, for a right-click menu (which can't show the name alert
+/// itself: `newPerson` asks for the name).
+struct FaceAssignItems: View {
+    @EnvironmentObject var model: FaceGroupingModel
+    let faces: Set<Int64>
+    let newPerson: () -> Void
+    let done: () -> Void
+
+    var body: some View {
+        Button(faces.count > 1 ? "New Person from \(faces.count) Faces…" : "New Person…", action: newPerson)
+        Menu(faces.count > 1 ? "Move \(faces.count) Faces to" : "Move to") {
+            // Anyone named in any project.
+            ForEach(model.knownPeople) { p in
+                Button(p.displayName) { model.assign(faces, to: p.id); done() }
+            }
+        }
+        .disabled(model.knownPeople.isEmpty)
+    }
+}
+
 struct UnassignedView: View {
     @EnvironmentObject var model: FaceGroupingModel
     @State private var faces: [FaceItem] = []
     @State private var selection: Set<Int64> = []
+    /// Faces to give a new person, while asking for the name.
+    @State private var naming: Set<Int64>?
+    @State private var newName = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -482,11 +528,28 @@ struct UnassignedView: View {
                                        description: Text("Clear faces that don't belong to any group show up here."))
                     .padding(.top, 80)
             }
-            FaceGrid(faces: faces, selection: $selection)
+            FaceGrid(faces: faces, selection: $selection) { faceId in
+                // The selected faces when this one is selected, else just this one.
+                let targets = selection.contains(faceId) ? selection : [faceId]
+                FaceAssignItems(faces: targets, newPerson: { naming = targets }, done: { selection.subtract(targets) })
+            }
         }
         }
         .navigationTitle("Unassigned Faces")
-        .navigationSubtitle("Seen fewer than 3 times, or not matched yet. Select faces to name them.")
+        .navigationSubtitle("Seen fewer than 3 times, or not matched yet. Right-click a face (or ⌘-click several) to name it.")
+        .alert("New person", isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
+            TextField("Name", text: $newName)
+            Button("Create") {
+                if let faces = naming, !newName.trimmingCharacters(in: .whitespaces).isEmpty {
+                    model.newPerson(named: newName, faces: faces)
+                    selection.subtract(faces)
+                }
+                newName = ""; naming = nil
+            }
+            Button("Cancel", role: .cancel) { newName = ""; naming = nil }
+        } message: {
+            if let n = naming?.count, n > 1 { Text("\(n) faces") }
+        }
         .toolbar {
             if !selection.isEmpty {
                 ToolbarItem { MoveFacesMenu(faces: selection) { selection = [] } }

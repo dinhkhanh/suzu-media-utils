@@ -122,3 +122,32 @@ final class OutputNamesTests: XCTestCase {
         XCTAssertEqual(names.reserve(in: dir, base: "IMG_0002", ext: "png").lastPathComponent, "IMG_0002.png")
     }
 }
+
+final class ExportHistoryTests: XCTestCase {
+    func testRemembersExportsWhileTheirFilesExist() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("hist-\(UUID().uuidString)")
+        let out = dir.appendingPathComponent("Export"), other = dir.appendingPathComponent("Elsewhere")
+        for d in [out, other] { try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true) }
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let history = ExportHistory(file: dir.appendingPathComponent("history.json"))
+        let photo = URL(fileURLWithPath: "/Volumes/NAS/Event/IMG_0001.JPG")
+        let first = out.appendingPathComponent("An/IMG_0001.jpg")
+        try FileManager.default.createDirectory(at: first.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([1]).write(to: first)
+        history.add(photo, to: first)
+        XCTAssertEqual(history.exported(photo, into: out)?.path, first.standardizedFileURL.path, "a person's folder inside counts")
+        XCTAssertNil(history.exported(photo, into: other))
+        XCTAssertEqual(history.sources()[first.standardizedFileURL.path], photo.standardizedFileURL.path)
+        // Replaced as PNG: one export, the new one.
+        let png = first.deletingPathExtension().appendingPathExtension("png")
+        try Data([2]).write(to: png)
+        history.add(photo, to: png, replacing: first.standardizedFileURL.path)
+        XCTAssertEqual(history.exports(of: photo).map(\.path), [png.standardizedFileURL.path])
+        // Saved, and gone once its file is deleted.
+        history.save()
+        let reloaded = ExportHistory(file: dir.appendingPathComponent("history.json"))
+        XCTAssertNotNil(reloaded.exported(photo, into: out))
+        try FileManager.default.removeItem(at: png)
+        XCTAssertNil(reloaded.exported(photo, into: out))
+    }
+}

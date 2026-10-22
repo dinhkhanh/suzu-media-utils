@@ -1,4 +1,4 @@
-# Tính năng của SuZu Media Utils (v0.5.1)
+# Tính năng của SuZu Media Utils (v0.6.0)
 
 Ứng dụng macOS cho SuZu Media: nhận diện và nhóm khuôn mặt trong ảnh/video sự kiện, cùng các công cụ xử lý ảnh
 hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi tiếng qua Amazon, nếu bật).
@@ -16,6 +16,12 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Chống trùng thư mục | Một thư mục chỉ thuộc một dự án; từ chối thư mục lồng nhau (tránh đếm file hai lần). |
 | Theo dõi theo nội dung | Đổi tên, di chuyển trong Finder hoặc chép trùng không làm mất tên người và không xử lý lại. |
 | Tìm lại thư mục | Cả thư mục sự kiện bị đổi tên hay di chuyển: chuột phải → Locate Folder… (hoặc thêm lại thư mục), giữ nguyên mọi khuôn mặt và tên. |
+| Duyệt file (Files) | Màn hình mặc định, như Finder: xem mọi ảnh/video trong thư mục của dự án theo từng thư mục con, dạng biểu tượng hoặc danh sách (tên, người trong ảnh, ngày chụp, dung lượng, loại); lọc ảnh/video, xem cả thư mục con, tìm theo tên file hoặc tên người, Space để Quick Look, nhấp đúp để mở, xuất các file đã chọn. |
+| Chấm điểm, nhãn màu, chọn/loại | Phím như Lightroom: 0–5 sao, 6–9 nhãn màu (đỏ, vàng, xanh lá, xanh dương), P chọn, X loại, U bỏ cờ; lọc theo sao, cờ (chỉ ảnh chọn, ẩn ảnh loại…) và nhãn. Lưu trong thư viện, không đụng tới file. |
+| Ghi điểm vào file | "Write Ratings & Labels to Files…" ghi sao và nhãn vào XMP của ảnh JPEG/HEIC/PNG/TIFF gốc để Lightroom, Bridge, Photo Mechanic đọc được (ảnh loại ghi là −1); điểm ảnh không đổi, thư viện vẫn giữ nguyên khuôn mặt và tên. |
+| Lọc ảnh toàn màn hình (Cull) | Nút Cull hoặc phím F: xem từng ảnh toàn màn hình, ← → để chuyển, chấm điểm bằng phím, tự sang ảnh kế. Khung và tên từng khuôn mặt, dải ảnh cắt khuôn mặt ở độ phân giải gốc để kiểm tra nét và mắt, Z để phóng 100% vào khuôn mặt. |
+| Cảnh báo nhắm mắt / mờ | Ảnh có khuôn mặt chính nhắm mắt hoặc không nét được đánh dấu; một lệnh loại tất cả các ảnh đó cùng lúc. |
+| Lọc theo người | Thanh khuôn mặt phía trên: bấm một hoặc nhiều người để chỉ hiện ảnh có tất cả họ, trong thư mục đang xem và thư mục con. |
 
 ## Nhận diện và nhóm khuôn mặt
 
@@ -31,7 +37,7 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Đặt tên ngay trên lưới | Bấm vào tên để sửa, Enter để lưu và chuyển sang nhóm chưa có tên tiếp theo. |
 | Gộp nhóm | Chọn nhiều nhóm (⌘-click) rồi gộp làm một. |
 | Sửa nhầm lẫn | "Không phải người này" (không tự gán lại), "Chuyển sang…" người khác hoặc người mới. |
-| Khuôn mặt chưa gán | Danh sách khuôn mặt rõ nét chưa thuộc nhóm nào để đặt tên thủ công. |
+| Khuôn mặt chưa gán | Danh sách khuôn mặt rõ nét chưa thuộc nhóm nào để đặt tên thủ công. Chuột phải lên khuôn mặt (hoặc ⌘-click chọn nhiều): "New Person…" để đặt tên người mới, "Move to" để chuyển vào người đã có tên. |
 | Thư mục người quen (Known People) | Thư mục `<Tên>/<ảnh>` giúp tự đặt tên các nhóm khớp, không cần mạng. |
 | Gợi ý tên người nổi tiếng | Tra cứu nhóm chưa tên qua Amazon Rekognition (tùy chọn, chỉ gửi ảnh cắt khuôn mặt). |
 | Cũng có trong… | Trang người hiển thị các dự án khác mà người đó xuất hiện. |
@@ -83,19 +89,26 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Tính năng | Mô tả ngắn |
 |---|---|
 | Tự động cân màu | Tự chỉnh phơi sáng, tương phản, vùng sáng/tối, màu da; chỉnh được độ mạnh. Tự bật khi cắt khung hoặc đóng watermark. |
-| Cắt khung mạng xã hội | 1:1, 4:5, 9:16, 16:9, 1.91:1; giữ khuôn mặt trong khung (cả nhóm nếu vừa). |
+| Làm thẳng ảnh nghiêng | Ô "Straighten tilted photos" (phần Look): tự xoay ảnh nghiêng 0,3°–10° theo các đường thẳng đứng (cột, khung cửa, cạnh màn hình, băng rôn) rồi cắt bỏ góc trống. Chỉ xoay khi nhiều đường thẳng cùng chỉ một góc (thử trên ảnh sự kiện xoay ±3°: sai lệch tối đa 0,2°); ảnh không đủ đường thẳng thì giữ nguyên. Nút "Level" trên ảnh xem trước: thanh trượt xoay tay từng ảnh (±10°, bước 0,1°), "Automatic" hoặc "Not Turned". |
+| Cắt khung mạng xã hội | 1:1, 4:5, 9:16, 16:9, 1.91:1; giữ mọi người trong ảnh vào khung (người gần người chính trước, bỏ qua người nhỏ ở hậu cảnh). |
+| Cắt khung theo hướng ảnh | Bấm một khung để áp dụng cho mọi ảnh; ⌘-click khung thứ hai, vd. 4:5 và 16:9: ảnh dọc cắt 4:5, ảnh ngang (và vuông) cắt 16:9, tự nhận biết từng ảnh. Chọn một khung + "Original" để chỉ cắt một loại, loại kia giữ khung gốc. Chọn một khung thì áp dụng cho mọi ảnh như trước. Mũi tên cạnh nút Export → "Export Each Photo in Both Shapes": mỗi ảnh xuất cả hai khung (tên file thêm "_4x5", "_16x9"). |
+| Chỉnh vị trí cắt bằng tay | Kéo ảnh trong khung xem trước để đặt vị trí cắt; ghi nhớ theo từng ảnh, dùng cho mọi khung và mọi màn hình xuất. Nút "Reset crop" để quay lại tự động. |
+| Khung riêng cho từng ảnh | Menu "Crop" góc trên bên trái ảnh xem trước: chọn khung riêng cho ảnh đó (hoặc "Same as the others"). Ảnh đã chỉnh có biểu tượng khung cắt trên ảnh nhỏ. |
+| Không xuất trùng | Ghi nhớ ảnh nào đã xuất ra file nào (dấu ✓ xanh trên ảnh nhỏ, ngày xuất ở thanh thông tin). Khi xuất lại vào cùng thư mục, hỏi từng ảnh: Skip / Overwrite, có ô "Apply to all". Không bao giờ ghi đè ảnh gốc; hai ảnh khác nhau trùng tên vẫn được thêm " (2)". |
 | Watermark logo hoặc chữ | Logo PNG hoặc dòng chữ (vd. "© SuZu Media") có bóng đổ; chỉnh vị trí, kích thước, độ mờ, khoảng cách lề. |
+| Watermark dạng banner | Thanh ngang trải hết chiều rộng ảnh (trên, giữa hoặc dưới); một ảnh banner cho ảnh ngang, một cho ảnh dọc, tự chọn theo hướng ảnh. Đặt chiều cao banner (mặc định 112 px trên ảnh cạnh dài 2048 px, tính theo cạnh dài) nên ảnh ngang hay dọc, khung nào cũng cao như nhau; banner được căn giữa, hai bên dư được cắt bỏ (banner hẹp hơn ảnh thì được kéo giãn ngang, chiều cao không đổi). Làm banner rộng hơn ảnh một chút và để chữ, logo ở vùng an toàn giữa banner. |
 | Mẫu watermark (preset) | Lưu nhiều mẫu trong Settings → Watermarks; mỗi màn hình chọn và chỉnh mẫu riêng, lưu lại hoặc lưu thành mẫu mới. |
 | Căn vị trí watermark | Lưới 3×3 hoặc bấm thẳng lên ảnh xem trước để đặt watermark. |
 | Nhớ cài đặt theo màn hình | Mỗi màn hình (Batch Export, Copy/Move, quy tắc gửi, gallery, ảnh từ video) nhớ cài đặt chỉnh sửa riêng. |
 | Xem trước lớn | Ảnh xem trước lớn, so sánh trước/sau, hiện kích thước đầu ra, dải ảnh thu nhỏ để chọn ảnh khác. |
-| Thay đổi kích thước | Cạnh dài 1080–3000 px hoặc kích thước gốc; cỡ khuyến nghị theo từng nền tảng. |
+| Thay đổi kích thước | Cạnh dài 1080–3000 px hoặc kích thước gốc. Khi cắt khung, mặc định cạnh dài 2048 px (Facebook hiển thị tới 2048 px mà không thu nhỏ); vẫn chọn được cỡ riêng của từng nền tảng (vd. 1350 px cho Instagram 4:5). Giữ khung gốc thì giữ kích thước gốc. |
 | Xuất JPEG hoặc PNG | JPEG chỉnh được chất lượng; PNG không nén mất dữ liệu, giữ không gian màu gốc, 16-bit nếu ảnh gốc sâu hơn 8-bit. |
 
 ## Công cụ hàng loạt
 
 | Tính năng | Mô tả ngắn |
 |---|---|
+| Mở để chỉnh & xuất | Chuột phải → Open trên ảnh ở mọi màn hình (People, khuôn mặt, khuôn mặt chưa gán, tìm kiếm, smart album) mở cửa sổ "Edit & Export" giống Batch Export với đúng ảnh đó; ⌘-click chọn nhiều ảnh rồi Open để mở tất cả. Video mở bằng ứng dụng mặc định. |
 | Batch Export | Cân màu, cắt khung, watermark, đổi kích thước cho file/thư mục hoặc ảnh của những người đã chọn. Không bao giờ ghi đè: tên đã có thì thêm " (2)". |
 | Chọn ảnh để xuất | Tích/bỏ tích từng ảnh trên dải ảnh hoặc lưới (⇧-click chọn dải, Chọn tất cả / Bỏ chọn tất cả). |
 | Nguồn là người | Batch Export, Batch Rename, Video Tools nhận đầu vào là người: N ảnh đẹp nhất, bỏ ảnh trùng, mỗi người một thư mục. |

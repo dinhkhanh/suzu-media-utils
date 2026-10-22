@@ -110,6 +110,8 @@ final class FaceGroupingModel: ObservableObject {
     @Published var sharingURL: String?
     private var server: GalleryServer?
     @Published var rules: [DeliveryRule] = []
+    /// Bumped after ratings, labels or flags change, so every view showing them re-reads.
+    @Published var marksVersion = 0
     /// Folders being removed in the background; hidden from the sidebar right away.
     @Published var removing: Set<Int64> = []
     private var cancellables: Set<AnyCancellable> = []
@@ -344,7 +346,7 @@ final class FaceGroupingModel: ObservableObject {
         return await Task.detached(priority: .userInitiated) {
             let rows = (try? store.db.read { db in
                 try Row.fetchAll(db, sql: """
-                    SELECT m.path, f.x, f.y, f.w, f.h, p.name FROM face f JOIN media m ON m.id = f.mediaId
+                    SELECT m.id, m.path, f.id AS faceId, f.x, f.y, f.w, f.h, p.name FROM face f JOIN media m ON m.id = f.mediaId
                     LEFT JOIN source s ON s.id = m.sourceId LEFT JOIN person p ON p.id = f.personId
                     WHERE m.kind = 'photo' AND m.duplicateOf IS NULL AND \(ProjectScope.sql(project))
                       \(personId.map { "AND f.personId = \($0)" } ?? "AND f.personId IS NOT NULL")
@@ -352,12 +354,13 @@ final class FaceGroupingModel: ObservableObject {
                     """)
             }) ?? []
             var seen: Set<String> = []
-            return rows.compactMap { r -> ToolItem? in
-                let path: String = r["path"]
-                guard seen.insert(path).inserted else { return nil }
-                return ToolItem(url: URL(fileURLWithPath: path, isDirectory: false), personName: r["name"],
-                                focus: FocusHint(primary: CGRect(x: r["x"] as Double, y: r["y"] as Double, width: r["w"] as Double, height: r["h"] as Double)))
-            }.prefix(limit).map { $0 }
+            let picked = rows.filter { seen.insert($0["path"]).inserted }.prefix(limit)
+            let boxes = (try? store.db.read { db in try Selection.faceBoxes(db, mediaIds: picked.map { $0["id"] as Int64 }) }) ?? [:]
+            return picked.map { r in
+                ToolItem(url: URL(fileURLWithPath: r["path"], isDirectory: false), personName: r["name"],
+                         focus: Selection.focus(face: r["faceId"], box: CGRect(x: r["x"] as Double, y: r["y"] as Double, width: r["w"] as Double, height: r["h"] as Double),
+                                                in: boxes[r["id"]]))
+            }
         }.value
     }
 

@@ -18,6 +18,9 @@ struct SearchView: View {
     @State private var exporting = false
     @State private var shown = 600
     @State private var generation = 0
+    /// Files selected in the grid (⌘-click for several), for Open.
+    @State private var selected: Set<Int64> = []
+    @Environment(\.openWindow) private var openWindow
 
     var album: SmartAlbum? { albumId.flatMap { id in model.albums.first { $0.id == id } } }
     var named: [PersonSummary] { model.people.filter { $0.name != nil } }
@@ -34,10 +37,18 @@ struct SearchView: View {
                     ForEach(hits.prefix(shown)) { h in
                         MediaThumbnail(item: PersonMedia(id: h.id, path: h.path, kind: h.kind, faceId: h.faceId ?? 0, time: h.time,
                                                          score: h.score, takenAt: h.takenAt, burstId: h.burstId), side: 170)
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(selected.contains(h.id) ? Color.accentColor : .clear, lineWidth: 3))
                             .onTapGesture(count: 2) { NSWorkspace.shared.open(URL(fileURLWithPath: h.path, isDirectory: false)) }
+                            .onTapGesture { selected.click(h.id) }
                             .contextMenu {
-                                Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: h.path, isDirectory: false)) }
-                                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: h.path, isDirectory: false)]) }
+                                // The selection when this file is in it, else just this file.
+                                let open = selected.contains(h.id) ? hits.filter { selected.contains($0.id) } : [h]
+                                let urls = open.map { URL(fileURLWithPath: $0.path, isDirectory: false) }
+                                Button(open.count > 1 ? "Open \(open.count) Files" : "Open") {
+                                    openWindow.edit(open.map(\.path), faces: Dictionary(open.compactMap { h in h.faceId.map { (h.path, $0) } }, uniquingKeysWith: { a, _ in a }))
+                                }
+                                Button("Open With Default App") { urls.forEach { NSWorkspace.shared.open($0) } }
+                                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(urls) }
                             }
                     }
                 }
@@ -240,7 +251,7 @@ struct DeliveryRulesView: View {
         if let e = r.editRecipe {
             var edits: [String] = []
             if e.autoTone { edits.append("auto tone") }
-            if let a = e.aspect { edits.append(a.rawValue + " crop") }
+            if let c = e.cropDescription { edits.append(c) }
             if e.watermark != nil { edits.append("logo") }
             if let l = e.maxLongSide { edits.append("\(l) px") }
             if !edits.isEmpty { parts.append(edits.joined(separator: ", ")) }

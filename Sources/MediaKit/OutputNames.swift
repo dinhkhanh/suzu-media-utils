@@ -8,6 +8,14 @@ public final class OutputNames: @unchecked Sendable {
 
     public init() {}
 
+    /// Takes this exact name (writing over an earlier export of the same photo); false when this batch already gave it out.
+    public func claim(_ url: URL) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return taken.insert(Self.key(url)).inserted
+    }
+
+    static func key(_ url: URL) -> String { url.standardizedFileURL.path.precomposedStringWithCanonicalMapping.lowercased() }
+
     public func reserve(in dir: URL, base: String, ext: String) -> URL {
         lock.lock(); defer { lock.unlock() }
         var n = 1
@@ -15,7 +23,7 @@ public final class OutputNames: @unchecked Sendable {
             let stem = n == 1 ? base : "\(base) (\(n))"
             let url = dir.appendingPathComponent(stem, isDirectory: false).appendingPathExtension(ext)
             // Folder names compare case- and form-insensitively on macOS volumes.
-            let key = url.standardizedFileURL.path.precomposedStringWithCanonicalMapping.lowercased()
+            let key = Self.key(url)
             if !taken.contains(key), !FileManager.default.fileExists(atPath: url.path) {
                 taken.insert(key)
                 return url

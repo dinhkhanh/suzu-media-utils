@@ -26,6 +26,16 @@ struct SuZuMediaUtilsApp: App {
                 Button("Add Known-People Folder…") { faces.addFolder(kind: .reference) }
             }
         }
+        // Photos opened from the library: Batch Export with just them.
+        WindowGroup("Edit & Export", id: "edit", for: EditRequest.self) { $request in
+            EditWindow(request: request).environmentObject(faces)
+        }
+        // Files culled from the Files browser, full screen.
+        WindowGroup("Cull", id: "cull", for: CullRequest.self) { $request in
+            CullWindow(request: request).environmentObject(faces)
+        }
+        .defaultSize(width: 1400, height: 900)
+        .restorationBehavior(.disabled)
         Settings {
             TabView {
                 FaceGroupingSettings()

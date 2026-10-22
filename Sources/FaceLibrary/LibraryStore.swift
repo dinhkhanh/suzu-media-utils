@@ -189,6 +189,14 @@ public final class LibraryStore: @unchecked Sendable {
                     WHERE cs.kind = 'media' AND os.kind = 'media' AND cs.projectId IS NOT os.projectId)
                 """)
         }
+        m.registerMigration("v8-marks") { db in
+            // Culling marks (see Marks). Not in MediaRecord, so writing a record back never resets them.
+            try db.alter(table: "media") { t in
+                t.add(column: "rating", .integer).notNull().defaults(to: 0)  // 0-5 stars
+                t.add(column: "label", .text)  // ColorLabel
+                t.add(column: "flag", .integer).notNull().defaults(to: 0)  // PickFlag
+            }
+        }
         return m
     }
 }
