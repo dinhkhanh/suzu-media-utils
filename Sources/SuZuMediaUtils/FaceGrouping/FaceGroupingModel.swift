@@ -621,6 +621,9 @@ final class FaceGroupingModel: ObservableObject {
 
     func leaveTeam(_ id: Int64) { perform { try $0.teamSync.leave(id) } }
 
+    /// The team folder moved (new NAS address or mount name): same team, new path.
+    func relocateTeam(_ id: Int64, to folder: URL) { perform { try $0.teamSync.relocate(id, to: folder) } }
+
     func syncTeamNow() { service?.teamSync.syncSoon() }
 
     func setCover(_ personId: Int64, faceId: Int64?) { perform { try $0.setCover(personId, faceId: faceId) } }

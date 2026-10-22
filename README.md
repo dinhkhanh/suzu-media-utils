@@ -44,8 +44,10 @@ and one for landscapes — logo, text or banner watermark, resize — auto tone
   their own photo folders. From then on a person named on any Mac is recognised on every Mac (names, merges, session
   names and auto rules are shared; photos, faces and crops stay where they are), within seconds, with no account or
   server. Each Mac appends to its own log in the folder and reads the others', so a Mac that was offline catches up,
-  the newest change wins, and the same name given on two Macs becomes one person. The sidebar shows the team, its
-  Macs and when it last synced; Leave Team keeps the names and forgets the rest.
+  the newest change wins, and the same name given on two Macs becomes one person. Everyone named on a Mac travels
+  (a Known-People folder prepared before the event, people from earlier events), so one team folder per event is
+  enough and the next event's team knows them all. The sidebar shows the team, its Macs and when it last synced;
+  Locate Team Folder… points it at the folder's new place when the NAS address changes; Leave Team keeps the names.
 - **Video moments:** per person, a clip of each appearance (cut without re-encoding), a highlight reel of the best
   moments, or the best still frames.
 - **Web gallery:** export a self-contained gallery folder, or share a live gallery on the local network (secret link,
@@ -129,12 +131,25 @@ for m in ArcFaceR50 SFace; do xcrun coremlcompiler compile models/$m.mlpackage m
 ### Build and run
 
 ```sh
-scripts/build-app.sh          # -> dist/SuZu Media Utils.app (model and icon bundled)
+scripts/build-app.sh          # -> dist/SuZu Media Utils.app (model, icon and Sparkle bundled)
 open "dist/SuZu Media Utils.app"
 swift test                    # library tests (no model needed)
 ```
 
-To use it on another Mac, copy `dist/SuZu Media Utils.app` over (and `brew install ffmpeg` there for web video formats).
+To use it on another Mac, install the `.dmg` from the [latest release](https://github.com/dinhkhanh/suzu-media-utils/releases/latest)
+(drag to Applications; `brew install ffmpeg` there for web video formats). Installed apps check for updates once a
+day (Settings → Updates, or SuZu Media Utils → Check for Updates…) and install them with one click.
+
+### Releasing
+
+```sh
+VERSION=0.7.0 scripts/release.sh                 # signed, notarized zip + dmg + appcast.xml in dist/
+VERSION=0.7.0 NOTES=notes.md scripts/publish.sh  # tag, push, GitHub release with the three files
+```
+
+Installed apps read `releases/latest/download/appcast.xml`, so publishing the release is the update. Updates are
+signed with the Sparkle key in the login keychain (`generate_keys`; back it up with `generate_keys -x`); its public
+half is in `scripts/build-app.sh`. Notarization needs the `suzu-notary` keychain profile (see `scripts/release.sh`).
 
 ### Celebrity naming (optional)
 1. AWS console → IAM → Users → Create user (e.g. `suzu-media-utils`), inline policy allowing only

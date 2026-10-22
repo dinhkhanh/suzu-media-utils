@@ -335,3 +335,14 @@ and after every feature below; same 92 people.
   event photo, so a teammate's Mac grouped them unnamed; a Known-People enrolment now also publishes at once
   (`Processor.onReferenceEnrolled` → `pushSoon`). Summaries are checked every pass by a per-person face count and
   written when they changed (at most once a minute while faces keep arriving).
+
+## v0.6.3 (2026-10-23): updates, dmg, team folder moves, everyone travels
+- Sparkle 2 (SwiftPM binary) embedded by `build-app.sh` (framework in Contents/Frameworks, rpath added with
+  install_name_tool, nested XPC services/Autoupdate/Updater.app re-signed inside out with entitlements kept). Feed:
+  `releases/latest/download/appcast.xml` on the (now public) GitHub repo; `release.sh` also makes a notarized dmg and
+  the appcast (`generate_appcast`, EdDSA key in the login keychain); `publish.sh` tags and uploads all three.
+- Team folder relocation (`TeamSync.relocate`): same team uuid at a new path; another team's folder is refused. A
+  team folder is one event's: joining it from a second project is refused with an explanation.
+- Every named person on a Mac travels to its teams (not only the project's), so Known-People prepared before the
+  event and people from earlier events reach every Mac. Summary signatures are checked every 15 s, written at most
+  once a minute while faces keep arriving.

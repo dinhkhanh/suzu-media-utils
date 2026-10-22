@@ -4,6 +4,7 @@ import SwiftUI
 /// its detail views (see AppShell). Face Grouping is the first tool.
 struct SuZuMediaUtilsApp: App {
     @StateObject private var faces = FaceGroupingModel()
+    @StateObject private var updater = Updater()
 
     var body: some Scene {
         WindowGroup("SuZu Media Utils") {
@@ -12,6 +13,9 @@ struct SuZuMediaUtilsApp: App {
                 .frame(minWidth: 900, minHeight: 600)
         }
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { updater.check() }.disabled(!updater.canCheck)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New Project…") { faces.askNewProject = true }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
@@ -48,8 +52,11 @@ struct SuZuMediaUtilsApp: App {
                     .tabItem { Label("Watermarks", systemImage: "seal") }
                 SharingSettings()
                     .tabItem { Label("Sharing", systemImage: "network") }
+                UpdateSettings()
+                    .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
             }
             .environmentObject(faces)
+            .environmentObject(updater)
         }
     }
 }

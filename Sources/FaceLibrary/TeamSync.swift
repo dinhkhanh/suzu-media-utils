@@ -22,6 +22,7 @@ public final class TeamSync: @unchecked Sendable {
     let lock = NSLock()
     var statuses: [Int64: TeamStatus] = [:]
     var summariesWritten: [Int64: Date] = [:]
+    var summariesChecked: [Int64: Date] = [:]
     var wanted = false
     /// Per person: the signature of their faces when the centroid was computed.
     var centroids: [Int64: (signature: String, centroid: [Float], count: Int)] = [:]
@@ -31,6 +32,7 @@ public final class TeamSync: @unchecked Sendable {
     public var deviceName: String
     public static let passInterval: Double = 5
     public static let summaryInterval: Double = 60
+    public static let summaryCheckInterval: Double = 15
     public static let model = "ArcFaceR50"
 
     public struct Device: Hashable, Sendable {
@@ -59,12 +61,17 @@ public final class TeamSync: @unchecked Sendable {
 
     public enum TeamError: LocalizedError {
         case notATeamFolder, alreadyATeamFolder(String), projectAlreadyShared(String), folderUnreachable
+        case teamInUse(String), differentTeam(String, String)
         public var errorDescription: String? {
             switch self {
             case .notATeamFolder: "That folder has no team in it. Pick the folder a teammate shared, or create a team."
             case .alreadyATeamFolder(let n): "That folder already holds the team “\(n)”. Join it instead."
             case .projectAlreadyShared(let n): "This project is already shared with the team “\(n)”."
             case .folderUnreachable: "The folder can't be reached. Mount the share (or open Dropbox / iCloud Drive) and try again."
+            case .teamInUse(let n):
+                "This Mac already uses that team folder for the project “\(n)”. Each event has its own team folder; people and their names carry over to every team by themselves."
+            case .differentTeam(let found, let expected):
+                "That folder holds the team “\(found)”, not “\(expected)”. Pick the folder of this team at its new place."
             }
         }
     }
@@ -119,15 +126,17 @@ public final class TeamSync: @unchecked Sendable {
         guard let info = Self.readInfo(folder) else {
             throw FileManager.default.fileExists(atPath: folder.path) ? TeamError.notATeamFolder : TeamError.folderUnreachable
         }
-        if let project, let existing = try team(forProject: project) { throw TeamError.projectAlreadyShared(existing.name) }
         if let existing = try store.db.read({ db in try TeamRecord.filter(Column("uuid") == info.uuid).fetchOne(db) }) {
-            // Already joined (maybe from another path to the same share): just point at this folder.
-            try store.db.write { db in
-                try db.execute(sql: "UPDATE team SET folder = ? WHERE id = ?", arguments: [canonicalPath(folder), existing.id])
+            // Already joined for another project: a team folder belongs to one event (people carry over anyway).
+            if let project, project != existing.projectId {
+                let name = try store.db.read { db in try String.fetchOne(db, sql: "SELECT name FROM project WHERE id = ?", arguments: [existing.projectId]) }
+                throw TeamError.teamInUse(name ?? existing.name)
             }
-            syncSoon()
+            // Joined before, maybe from another path to the same share: just point at this folder.
+            try relocate(existing.id!, to: folder)
             return try store.db.read { db in try TeamRecord.fetchOne(db, key: existing.id)! }
         }
+        if let project, let existing = try team(forProject: project) { throw TeamError.projectAlreadyShared(existing.name) }
         let pid: Int64
         if let project { pid = project } else {
             var p = ProjectRecord(name: info.name)
@@ -143,6 +152,21 @@ public final class TeamSync: @unchecked Sendable {
         lock.withLock { statuses[t.id!] = TeamStatus(teamId: t.id!, reachable: true) }
         syncSoon()
         return t
+    }
+
+    /// The team folder moved (the NAS has a new address, the share is mounted under another name): point the team
+    /// at the same folder in its new place. Everything already read or published stays valid.
+    public func relocate(_ teamId: Int64, to folder: URL) throws {
+        guard let team = try store.db.read({ db in try TeamRecord.fetchOne(db, key: teamId) }) else { return }
+        guard let info = Self.readInfo(folder) else {
+            throw FileManager.default.fileExists(atPath: folder.path) ? TeamError.notATeamFolder : TeamError.folderUnreachable
+        }
+        guard info.uuid == team.uuid else { throw TeamError.differentTeam(info.name, team.name) }
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE team SET folder = ? WHERE id = ?", arguments: [canonicalPath(folder), teamId])
+        }
+        lock.withLock { statuses[teamId] = TeamStatus(teamId: teamId, reachable: true) }
+        syncSoon()
     }
 
     /// Leaves the team: forgets its folder and what teammates' Macs saw. People keep their names.
@@ -269,17 +293,12 @@ public final class TeamSync: @unchecked Sendable {
         var n: Int
     }
 
-    /// Named people of the team's project or of a Known-People folder (those are for every project), plus anyone
-    /// its rules name.
+    /// Everyone with a name on this Mac: people are shared by every project, so what one event taught travels to
+    /// the next event's team — a Mac joining its first team gets years of names and faces at once.
     func relevantPeople(_ team: TeamRecord) throws -> [(id: Int64, uuid: String, name: String, nameAt: Double?)] {
         try store.db.read { db in
-            try Row.fetchAll(db, sql: """
-                SELECT id, uuid, name, nameAt FROM person p WHERE name IS NOT NULL AND (
-                    EXISTS (SELECT 1 FROM face f JOIN media m ON m.id = f.mediaId JOIN source s ON s.id = m.sourceId
-                            WHERE f.personId = p.id AND (s.projectId = ? OR s.kind = 'reference'))
-                    OR id IN (SELECT personId FROM deliveryRule WHERE projectId = ? AND personId IS NOT NULL))
-                ORDER BY id
-                """, arguments: [team.projectId, team.projectId]).map { ($0["id"], $0["uuid"], $0["name"], $0["nameAt"]) }
+            try Row.fetchAll(db, sql: "SELECT id, uuid, name, nameAt FROM person WHERE name IS NOT NULL ORDER BY id")
+                .map { ($0["id"], $0["uuid"], $0["name"], $0["nameAt"]) }
         }
     }
 
@@ -380,6 +399,10 @@ public final class TeamSync: @unchecked Sendable {
     func publishSummaries(_ team: TeamRecord, people: [(id: Int64, uuid: String, name: String, nameAt: Double?)], state: [String: String], forced: Bool) throws -> Bool {
         let teamId = team.id!
         guard !people.isEmpty else { return false }
+        // Counting every named person's faces is an index scan: not every pass unless something just changed.
+        let checked = lock.withLock { summariesChecked[teamId] }
+        guard forced || checked == nil || Date().timeIntervalSince(checked!) >= Self.summaryCheckInterval else { return false }
+        lock.withLock { summariesChecked[teamId] = Date() }
         let ids = people.map { String($0.id) }.joined(separator: ",")
         let signatures = Dictionary(uniqueKeysWithValues: try store.db.read { db in
             try Row.fetchAll(db, sql: "SELECT personId, COUNT(*) AS n, MAX(id) AS last FROM face WHERE personId IN (\(ids)) GROUP BY personId")

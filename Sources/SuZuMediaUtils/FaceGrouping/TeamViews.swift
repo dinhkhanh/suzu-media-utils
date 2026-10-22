@@ -13,6 +13,12 @@ struct TeamBar: View {
             Menu {
                 Button("Sync Now") { model.syncTeamNow() }
                 Button("Show Team Folder in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: team.folder) }
+                // The NAS got a new address or the share a new mount name: same team, new path.
+                Button("Locate Team Folder…") {
+                    Panels.chooseFolder(prompt: "Use This Folder", start: URL(fileURLWithPath: team.folder).deletingLastPathComponent()) {
+                        model.relocateTeam(team.id!, to: $0)
+                    }
+                }
                 Button("Copy Team Folder Path") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(team.folder, forType: .string)
@@ -54,7 +60,7 @@ struct TeamBar: View {
 
     static func subtitle(_ status: TeamSync.TeamStatus?) -> String {
         guard let status else { return "Connecting…" }
-        if !status.reachable { return "Folder not reachable — will resume when it is back" }
+        if !status.reachable { return "Folder not reachable — resumes when it is back (moved? Locate Team Folder…)" }
         if let e = status.error { return e }
         let macs = status.devices.count
         let synced = status.lastSync.map { "synced \(ago($0))" } ?? "syncing…"

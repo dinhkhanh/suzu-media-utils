@@ -185,10 +185,10 @@ final class TeamSyncTests: XCTestCase {
         try a.store.db.write { db in try f.insert(db) }
         a.engine.peopleChanged([an]); a.settle()
 
-        try b.sync.join(folder: shared, project: b.project)
         for i in 1...3 { try b.photo("b\(i).jpg", person: nil, vector: v) }
         b.engine.reclusterNow(); b.settle()
         XCTAssertEqual(try b.people().map(\.name), [nil], "grouped before any name arrived")
+        try b.sync.join(folder: shared, project: b.project)
         exchange()
         XCTAssertEqual(try b.people().map(\.name), ["An"], "the group takes the name from A's Known-People folder")
         XCTAssertEqual(try b.people().first?.faces, 3)
@@ -326,6 +326,59 @@ final class TeamSyncTests: XCTestCase {
         exchange()
         XCTAssertEqual(try b.sync.status(team.id!)?.reachable, true)
         XCTAssertEqual(try b.people().map(\.name), ["An Lê"])
+    }
+
+    func testTeamFolderCanMoveAndIsOneEventsOnly() throws {
+        try a.sync.create(name: "Gala", folder: shared, project: a.project)
+        let team = try b.sync.join(folder: shared, project: b.project)
+        let an = try a.person("An")
+        try a.photo("a1.jpg", person: an, vector: vector(1))
+        exchange()
+        // The NAS got a new address: the folder is the same, its path is not.
+        let moved = tmp.appendingPathComponent("NAS2/Gala Team", isDirectory: true)
+        try FileManager.default.createDirectory(at: moved.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: shared, to: moved)
+        try a.rename(an, "An Lê", at: Date().timeIntervalSince1970 + 10)
+        exchange()
+        XCTAssertEqual(try b.sync.status(team.id!)?.reachable, false)
+        // A folder that holds another team is refused; the right one is accepted and nothing is re-read.
+        let other = tmp.appendingPathComponent("NAS2/Other", isDirectory: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        try JSONEncoder().encode(TeamSync.Info(uuid: "zzz", name: "Other", createdAt: 0, createdBy: "X")).write(to: TeamSync.infoURL(other))
+        XCTAssertThrowsError(try b.sync.relocate(team.id!, to: other))
+        try a.sync.relocate(try XCTUnwrap(try a.sync.team(forProject: a.project)).id!, to: moved)
+        try b.sync.relocate(team.id!, to: moved)
+        exchange()
+        XCTAssertEqual(try b.sync.status(team.id!)?.reachable, true)
+        XCTAssertEqual(try b.people().map(\.name), ["An Lê"])
+        XCTAssertEqual(try b.sync.teams().first?.folder, canonicalPath(moved))
+        // Joining the same folder again from the same project just relinks; from another project it is refused.
+        XCTAssertEqual(try b.sync.join(folder: moved, project: b.project).id, team.id)
+        var p2 = ProjectRecord(name: "Next event")
+        try b.store.db.write { db in try p2.insert(db) }
+        XCTAssertThrowsError(try b.sync.join(folder: moved, project: p2.id)) { e in
+            XCTAssertTrue(e.localizedDescription.contains("already uses"), e.localizedDescription)
+        }
+    }
+
+    func testEveryNamedPersonTravelsSoTheNextEventKnowsThem() throws {
+        // An was named at an earlier event (no faces in this project); B still learns An on joining.
+        try a.sync.create(name: "Gala", folder: shared, project: a.project)
+        var old = ProjectRecord(name: "Last year")
+        try a.store.db.write { db in try old.insert(db) }
+        var src = SourceRecord(path: tmp.appendingPathComponent("A/Old").path, projectId: old.id)
+        try a.store.db.write { db in try src.insert(db) }
+        let an = try a.person("An")
+        var m = MediaRecord(sourceId: src.id, path: tmp.appendingPathComponent("A/Old/1.jpg").path, kind: .photo, size: 10, mtime: 0, contentKey: "old1")
+        m.status = .done; m.width = 1500; m.height = 1000
+        try a.store.db.write { db in try m.insert(db) }
+        var f = FaceRecord(id: nil, mediaId: m.id!, x: 0.4, y: 0.4, w: 0.1, h: 0.1, quality: 0.8, time: nil,
+                           embedding: Vector.encode(Vector.normalized(vector(9))), track: nil, personId: an, assignment: .user, rejectedPersonId: nil)
+        try a.store.db.write { db in try f.insert(db) }
+        try b.sync.join(folder: shared, project: b.project)
+        exchange()
+        XCTAssertEqual(try b.people().map(\.name), ["An"])
+        XCTAssertEqual(try b.store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM personRemote") }, 1, "with An's faces, so B recognises them")
     }
 
     func testLeavingKeepsNamesAndForgetsSummaries() throws {

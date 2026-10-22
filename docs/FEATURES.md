@@ -1,4 +1,4 @@
-# Tính năng của SuZu Media Utils (v0.6.2)
+# Tính năng của SuZu Media Utils (v0.6.3)
 
 Ứng dụng macOS cho SuZu Media: nhận diện và nhóm khuôn mặt trong ảnh/video sự kiện, cùng các công cụ xử lý ảnh
 hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi tiếng qua Amazon, nếu bật).
@@ -92,6 +92,9 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Làm việc cùng lúc | Mỗi máy ghi vào nhật ký riêng của mình trong thư mục và đọc của máy khác, nên nhiều máy chạy cùng lúc không đụng nhau; máy mất mạng sẽ tự bắt kịp khi có lại. |
 | Thay đổi mới nhất thắng | Hai máy cùng sửa tên: tên sửa sau thắng. Cùng một tên đặt trên hai máy thì gộp thành một người. |
 | Trạng thái nhóm | Thanh bên hiện tên nhóm, số máy, lần đồng bộ gần nhất; thư mục không truy cập được thì báo và tự tiếp tục khi có lại. Sync Now, mở thư mục nhóm, Leave Team (giữ tên người). |
+| Đổi địa chỉ thư mục nhóm | NAS đổi địa chỉ hoặc share gắn tên khác: Locate Team Folder… trỏ nhóm sang chỗ mới của cùng thư mục, không mất gì. |
+| Người quen đi theo mọi sự kiện | Mọi người có tên trên một máy (thư mục Known People chuẩn bị trước sự kiện, người từ các sự kiện trước) đều được chia sẻ với nhóm, nên mỗi sự kiện một thư mục nhóm là đủ và máy mới tham gia biết hết. |
+| Cập nhật tự động | Ứng dụng tự kiểm tra bản mới mỗi ngày (Settings → Updates, hoặc menu SuZu Media Utils → Check for Updates…) và cài bằng một cú bấm. Cài lần đầu bằng file .dmg (kéo vào Applications). |
 | Quy tắc chạy trên mọi máy | Quy tắc tự động của dự án chia sẻ chạy trên từng máy với các file máy đó xử lý. Thư mục đích nên là đường dẫn giống nhau trên mọi máy (cùng share NAS). |
 | Khoảnh khắc video | Mỗi người: cắt từng đoạn xuất hiện (không nén lại), dựng video highlight, hoặc xuất khung hình đẹp nhất. |
 | Web gallery tĩnh | Xuất thư mục gallery có index.html, mở bằng trình duyệt hoặc chia sẻ qua Drive/NAS. |
