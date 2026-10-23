@@ -63,8 +63,10 @@ enum ToolWork {
         return max(1, busy ? cores / 2 : cores - 2)
     }
 
-    static func begin() { faces?.service?.processor.extrasPaused = true }
-    static func end() { faces?.service?.processor.extrasPaused = false }
+    /// Jobs under way (several cards can copy at once): the library's extras wait until the last one is done.
+    private static var active = 0
+    static func begin() { active += 1; faces?.service?.processor.extrasPaused = true }
+    static func end() { active = max(0, active - 1); if active == 0 { faces?.service?.processor.extrasPaused = false } }
 }
 
 /// One input to a batch tool: a file, and when it came from the library, who is in it and where.

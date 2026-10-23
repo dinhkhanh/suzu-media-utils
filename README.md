@@ -125,6 +125,8 @@ the next hand-over can go to whichever Mac is free, through any reader or adapte
 counts). A card pulled in the middle of a copy stops it at once: what landed is kept and recorded, nothing half
 written is left behind, and when the card is back the copy goes on in the same folder. New photos and new videos
 are counted apart, and videos can go to their own destination (an editor's drive), each with its own card folder.
+Several cards at once: each card can be sent to a folder of its own (one to the Mac, one to a portable SSD, one to
+the NAS; the card remembers it for its next hand-over), and the cards copy side by side, each disk at its own speed.
 
 ### Copy Verifier
 Checks that a copy (memory card → NAS, NAS → backup) is complete — missing, truncated or damaged files (contents are

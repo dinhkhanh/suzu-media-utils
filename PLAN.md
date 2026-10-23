@@ -463,3 +463,12 @@ and after every feature below; same 92 people.
   items from its own empty file list, wiping the photos `BatchExportTool(initial:)` was given from the library. It
   only rebuilds the items from files when some are chosen there. `SUZU_START_EDIT=/a.jpg:/b.jpg` (testing) opens
   the Edit & Export window on launch.
+
+## Cards: a destination per card, cards copying side by side
+- `CardCopyModel.ownDestinations` (UserDefaults `cardCopyOwnDestinations`, by volume UUID: this Mac's paths, not
+  part of the team's ledger): a card's own place instead of the screen's destination, picked from a folder menu in
+  its row and kept for its next hand-over. Videos still go to the screen's video destination when they have one.
+  Free space and the interrupted hand-over's folder are checked against the card's own place.
+- Copy New Files no longer waits for the other cards: cards to different disks copy at full speed side by side,
+  cards to the same disk share it. `ToolWork.begin/end` count the jobs under way so the library's extras stay paused
+  until the last one is done.

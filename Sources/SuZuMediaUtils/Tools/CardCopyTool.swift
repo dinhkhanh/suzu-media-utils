@@ -18,8 +18,11 @@ struct CardCopyTool: View {
 
     var destination: URL? { destinationPath.isEmpty ? nil : URL(fileURLWithPath: destinationPath, isDirectory: true) }
     var videoDestination: URL? { splitVideos && !videoDestinationPath.isEmpty ? URL(fileURLWithPath: videoDestinationPath, isDirectory: true) : nil }
-    /// Both places chosen (videos' too, when they have their own).
-    var ready: Bool { destination != nil && (!splitVideos || videoDestination != nil) }
+    /// Where this card's photos go: its own place when it has one (several cards copy side by side to different
+    /// disks at full speed), else the folder above.
+    func destination(for card: CardCopyModel.Card) -> URL? { model.ownDestination(card.id) ?? destination }
+    /// Both places chosen for this card (videos' too, when they have their own).
+    func ready(_ card: CardCopyModel.Card) -> Bool { destination(for: card) != nil && (!splitVideos || videoDestination != nil) }
 
     var body: some View {
         Form {
@@ -31,7 +34,8 @@ struct CardCopyTool: View {
                 }
                 Toggle("Videos go to their own folder", isOn: $splitVideos).toggleStyle(.checkbox)
                     .help("Photos to one place, videos to another (an editor's drive, say); a clip's XML goes with the clip")
-                Text("Each card gets its own folder here, named after the card.").font(.caption).foregroundStyle(.secondary)
+                Text("Each card gets its own folder here, named after the card. A card can go somewhere else instead (its row has a folder menu): cards copying to different disks run side by side at full speed.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 FlowLayout(spacing: 14) {
                     Toggle("Verify each copy", isOn: $verify).help("Reads every copy back and compares its SHA-256 with the original")
                     Toggle("A folder per hand-over", isOn: $perHandover).help("“2026-10-24 14.05” inside the card's folder, so each hand-over is its own session")
@@ -52,10 +56,10 @@ struct CardCopyTool: View {
                             .foregroundStyle(.secondary)
                     }
                 } else {
-                    let free = destination.flatMap { CardCopier.freeSpace(at: $0) }
-                    let videoFree = videoDestination.flatMap { CardCopier.freeSpace(at: $0) } ?? free
                     ForEach(model.cards) { card in
-                        CardRow(card: card, model: model, canCopy: ready, free: free, videoFree: videoFree) { copy(card) }
+                        let free = destination(for: card).flatMap { CardCopier.freeSpace(at: $0) }
+                        CardRow(card: card, model: model, canCopy: ready(card), free: free,
+                                videoFree: videoDestination.flatMap { CardCopier.freeSpace(at: $0) } ?? free) { copy(card) }
                     }
                 }
             } header: {
@@ -82,7 +86,7 @@ struct CardCopyTool: View {
     }
 
     func copy(_ card: CardCopyModel.Card) {
-        guard let destination, let store = faces.store else { return }
+        guard let destination = destination(for: card), let store = faces.store else { return }
         var o = CardCopier.Options(destination: destination)
         o.videoDestination = videoDestination
         o.verify = verify
@@ -190,13 +194,29 @@ struct CardRow: View {
                     }
                 }
                 Spacer()
+                destinationMenu
                 Button("Eject") { model.eject(card.id) }.controlSize(.small)
+                // Other cards may be copying meanwhile: to other disks at full speed, to the same one side by side.
                 Button("Copy New Files") { copy() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!canCopy || p.new.isEmpty || tooBig(p) || model.cards.contains { $0.copying })
+                    .disabled(!canCopy || p.new.isEmpty || tooBig(p))
                     .help(canCopy ? "" : "Choose a destination folder first")
             }
         }
+    }
+
+    /// Where this card goes: the folder above (the default) or one of its own, remembered for the card's next
+    /// hand-over too, so the SSD card keeps going to the SSD.
+    var destinationMenu: some View {
+        let own = model.ownDestination(card.id)
+        return Menu {
+            Button("The Folder Above") { model.setOwnDestination(card.id, nil) }.disabled(own == nil)
+            Button("Another Folder for This Card…") { Panels.chooseFolder { model.setOwnDestination(card.id, $0) } }
+        } label: {
+            Label(own.map { "Into \($0.lastPathComponent)" } ?? "Into the folder above", systemImage: "folder")
+        }
+        .menuStyle(.button).controlSize(.small).fixedSize()
+        .help(own.map { "This card copies into \($0.path)" } ?? "This card copies into the destination folder above. Pick another folder to copy this card to a different disk, side by side with the other cards.")
     }
 
     /// Saves a name typed in. An empty or unchanged field is left alone: a field ending its editing when the window
@@ -319,6 +339,8 @@ final class CardCopyModel: ObservableObject {
     @Published var cards: [Card] = []
     @Published var known: [CardCopier.KnownCard] = []
     @Published var looking = false
+    /// Cards with a destination of their own, by volume UUID (this Mac's paths: not part of the team's ledger).
+    @Published private(set) var ownDestinations: [String: String] = UserDefaults.standard.dictionary(forKey: "cardCopyOwnDestinations") as? [String: String] ?? [:]
     private var again = false
     private var observers: [NSObjectProtocol] = []
     private var cancels: [String: Cancel] = [:]
@@ -441,6 +463,13 @@ final class CardCopyModel: ObservableObject {
     }
 
     func cancel(_ id: String) { cancels[id]?.flag = true }
+
+    func ownDestination(_ uuid: String) -> URL? { ownDestinations[uuid].map { URL(fileURLWithPath: $0, isDirectory: true) } }
+
+    func setOwnDestination(_ uuid: String, _ url: URL?) {
+        ownDestinations[uuid] = url?.path
+        UserDefaults.standard.set(ownDestinations, forKey: "cardCopyOwnDestinations")
+    }
 
     func setLabel(_ uuid: String, _ label: String, store: LibraryStore?) {
         guard let store, let cardId = (cards.first { $0.id == uuid }?.plan?.card.id) ?? (known.first { $0.card.uuid == uuid }?.id) else { return }
