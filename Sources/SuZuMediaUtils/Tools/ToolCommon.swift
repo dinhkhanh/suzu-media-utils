@@ -89,6 +89,10 @@ struct ToolInputView: View {
     @State private var bestOfBurst = true
     @State private var search = ""
     @State private var resolving = false
+    /// When the chosen files were shot (EXIF, else the file's date, as the library reckons it), so a session picked
+    /// for the event narrows them too.
+    @State private var dates: [URL: Date] = [:]
+    @State private var dating = false
 
     var named: [PersonSummary] {
         faces.people.filter { $0.name != nil && (search.isEmpty || $0.displayName.localizedCaseInsensitiveContains(search)) }
@@ -103,15 +107,56 @@ struct ToolInputView: View {
             .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 320)
             if mode == 0 {
                 FileInputList(files: $files, kinds: kinds, label: label)
+                if let s = faces.currentSession, !files.isEmpty {
+                    Text(dating ? "Reading capture times…" : "\(items.count) of \(files.count) \(label) in \(faces.sessionTitle(s))")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .help("Only files shot during the session picked in the bar; choose Whole event for all of them")
+                }
             } else {
                 peoplePicker
             }
         }
-        .onChange(of: files) { if mode == 0 { items = files.map { ToolItem(url: $0) } } }
-        .onChange(of: mode) { mode == 0 ? (items = files.map { ToolItem(url: $0) }) : resolve() }
-        .task(id: "\(chosen.sorted())|\(topN ?? 0)|\(bestOfBurst)|\(faces.currentProject ?? 0)|\(faces.sessionRange.map { "\($0)" } ?? "")") { if mode == 1 { resolve() } }
+        .onChange(of: files) { if mode == 0 { items = fileItems() } }
+        .onChange(of: mode) { mode == 0 ? (items = fileItems()) : resolve() }
+        .task(id: "\(chosen.sorted())|\(topN ?? 0)|\(bestOfBurst)|\(faces.currentProject ?? 0)|\(faces.sessionRange.map { "\($0)" } ?? "")") {
+            if mode == 1 { resolve() } else { items = fileItems() }
+        }
+        .task(id: "\(files.hashValue)|\(faces.currentProject != nil && !faces.sessions.isEmpty)") { await readDates() }
         // People of another project aren't in this one.
         .onChange(of: faces.currentProject) { chosen = [] }
+    }
+
+    /// The chosen files as items: all of them, or, with a session picked, those shot during it (a file whose time
+    /// isn't read yet stays until it is).
+    func fileItems() -> [ToolItem] {
+        let range = faces.sessionRange
+        return files.compactMap { u in
+            let t = dates[u]
+            if let range, let t, !range.contains(t.timeIntervalSince1970) { return nil }
+            return ToolItem(url: u, takenAt: t)
+        }
+    }
+
+    /// Reads the capture times the session filter needs (only while a project with sessions is open), a few
+    /// milliseconds per file, off the main thread.
+    func readDates() async {
+        guard faces.currentProject != nil, !faces.sessions.isEmpty else { return }
+        let missing = files.filter { dates[$0] == nil }
+        guard !missing.isEmpty else { return }
+        dating = true
+        let found = await Task.detached(priority: .userInitiated) { () -> [URL: Date] in
+            var out: [URL: Date] = [:]
+            for u in missing {
+                if Task.isCancelled { break }
+                let exif = (try? ImageLoader.source(u)).flatMap { ImageLoader.captureDate($0.0) }
+                out[u] = exif ?? (try? FileManager.default.attributesOfItem(atPath: u.path)[.modificationDate] as? Date)
+            }
+            return out
+        }.value
+        guard !Task.isCancelled else { dating = false; return }
+        dates.merge(found) { _, new in new }
+        dating = false
+        if mode == 0 { items = fileItems() }
     }
 
     var peoplePicker: some View {

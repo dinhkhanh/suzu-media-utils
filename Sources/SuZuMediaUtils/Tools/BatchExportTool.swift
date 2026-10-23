@@ -8,10 +8,14 @@ import SwiftUI
 struct BatchExportTool: View {
     @State private var items: [ToolItem]
     var title = "Batch Export"
+    /// The event's session bar on top: a session can be exported on its own. Not for photos opened from the library
+    /// (the Edit & Export window), which are exactly the ones asked for.
+    var sessionBar = true
     /// `initial`: photos opened from the library (the Edit & Export window).
     init(initial: [ToolItem] = [], title: String = "Batch Export") {
         _items = State(initialValue: initial)
         self.title = title
+        sessionBar = initial.isEmpty
     }
 
     /// Photos unticked in the preview; everything else is exported.
@@ -47,6 +51,7 @@ struct BatchExportTool: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if sessionBar { SessionBar(divider: true) }
             HStack(spacing: 0) {
                 EditPreview(recipe: $recipe, samples: items, excluded: $excluded, notes: culled.mapValues(Self.label))
                     .frame(minWidth: 260, maxWidth: .infinity)

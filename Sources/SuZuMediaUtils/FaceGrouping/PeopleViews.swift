@@ -39,13 +39,7 @@ struct PeopleGrid: View {
                     PersonGridCell(person: p, selected: selected.contains(p.id), mergeCount: selected.count > 1 && selected.contains(p.id) ? selected.count : 0,
                                    known: model.knownPeople.filter { $0.id != p.id }, editing: editing == p.id, focus: $editing,
                                    open: { path.append(PersonRoute(id: p.id)) },
-                                   click: {
-                                       if NSEvent.modifierFlags.contains(.command) {
-                                           if selected.contains(p.id) { selected.remove(p.id) } else { selected.insert(p.id) }
-                                       } else {
-                                           selected = [p.id]
-                                       }
-                                   },
+                                   click: { selected.click(p.id, in: shown.map(\.id)) },
                                    mergeSelected: { model.merge(selected); selected = [] },
                                    thisIs: { model.mergeInto(p.id, $0) },
                                    rename: { commitName($0, for: p) })
@@ -56,7 +50,7 @@ struct PeopleGrid: View {
         }
         }
         .navigationTitle(model.currentSession.map { "People · \(model.sessionTitle($0))" } ?? "People")
-        .navigationSubtitle("\(shown.count) people · click a name to edit, double-click to open, ⌘-click to select several")
+        .navigationSubtitle("\(shown.count) people · click a name to edit, double-click to open, ⌘-click or ⇧-click to select several")
         .searchable(text: $search, prompt: "Search names")
         .sheet(isPresented: $suggesting) { CelebritySheet() }
         .sheet(item: $exportAll) { ExportSheet(scope: .all, mode: $0) }
@@ -217,6 +211,7 @@ struct PersonDetail: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            SessionBar(divider: true)
             header
             Divider()
             ScrollView {
@@ -387,7 +382,7 @@ struct PersonDetail: View {
                     }
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(selectedMedia.contains(item.id) ? Color.accentColor : .clear, lineWidth: 3))
                     .onTapGesture(count: 2) { NSWorkspace.shared.open(item.url) }
-                    .onTapGesture { selectedMedia.click(item.id) }
+                    .onTapGesture { selectedMedia.click(item.id, in: items.map(\.id)) }
                     .contextMenu {
                         // The selection when this photo is in it, else just this photo.
                         let open = selectedMedia.contains(item.id) ? items.filter { selectedMedia.contains($0.id) } : [item]
@@ -463,7 +458,9 @@ struct FaceGrid<Menu: View>: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(selection.contains(f.id) ? Color.accentColor : .clear, lineWidth: 3))
                     .onTapGesture {
-                        if selection.contains(f.id) { selection.remove(f.id) } else { selection.insert(f.id) }
+                        // A click ticks or unticks; ⇧-click ticks everything from the selection to here.
+                        if NSEvent.modifierFlags.contains(.shift) { selection.extend(to: f.id, in: faces.map(\.id)) }
+                        else if selection.contains(f.id) { selection.remove(f.id) } else { selection.insert(f.id) }
                     }
                     .onTapGesture(count: 2) { NSWorkspace.shared.open(URL(fileURLWithPath: f.path, isDirectory: false)) }
                     .contextMenu {
@@ -568,7 +565,7 @@ struct UnassignedView: View {
         }
         }
         .navigationTitle("Unassigned Faces")
-        .navigationSubtitle("Seen fewer than 3 times, or not matched yet. Right-click a face (or ⌘-click several) to name it.")
+        .navigationSubtitle("Seen fewer than 3 times, or not matched yet. Right-click a face (or click several, ⇧-click for a range) to name it.")
         .alert("New person", isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
             TextField("Name", text: $newName)
             Button("Create") {

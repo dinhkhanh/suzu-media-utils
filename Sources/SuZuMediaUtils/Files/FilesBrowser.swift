@@ -141,15 +141,18 @@ struct FilesBrowser: View {
     private struct Listing: Equatable {
         var folder: String?, filter: FileFilter, minRating: Int, flag: FlagFilter, label: String, people: Set<Int64>
         var sort: FileSort, ascending: Bool, subfolders: Bool, search: String
+        /// The event session picked in the bar (nil: the whole event).
+        var session: ClosedRange<Double>?
     }
     private var listing: Listing {
         Listing(folder: folder, filter: filter, minRating: minRating, flag: flagFilter, label: labelFilter, people: withPeople,
-                sort: sortKey, ascending: ascending, subfolders: subfolders, search: search)
+                sort: sortKey, ascending: ascending, subfolders: subfolders, search: search, session: model.sessionRange)
     }
     var marksFiltered: Bool { minRating > 0 || flagFilter != .all || !labelFilter.isEmpty }
 
     var body: some View {
         VStack(spacing: 0) {
+            SessionBar(divider: true)
             if !present.isEmpty {
                 PeopleFilterBar(present: present, selected: $withPeople)
                 Divider()
@@ -234,7 +237,7 @@ struct FilesBrowser: View {
                 ForEach(items) { item in
                     FileIcon(item: item, side: iconSize, selected: selection.contains(item.id))
                         .onTapGesture(count: 2) { open([item.id]) }
-                        .onTapGesture { selection.click(item.id); focused = true }
+                        .onTapGesture { selection.click(item.id, in: items.map(\.id)); focused = true }
                         .contextMenu { menu(for: selection.contains(item.id) ? selection : [item.id]) }
                 }
             }
@@ -486,9 +489,12 @@ struct FilesBrowser: View {
     /// Rebuilds what's shown from the files, the folder, the filters and the order.
     func relist() {
         let label = ColorLabel(rawValue: labelFilter)
-        // Everything in the folder and its subfolders: the people found there, and what a search or people filter covers.
+        // Everything in the folder and its subfolders (and in the session picked, when one is): the people found
+        // there, and what a search or people filter covers.
+        let session = model.sessionRange
         let scope = (folder.map { ProjectFiles.contents(of: $0, in: files, recursive: true).files } ?? files)
             .filter { f in filter == .all || f.kind == (filter == .photos ? .photo : .video) }
+            .filter { f in session.map { r in f.takenAt.map(r.contains) ?? false } ?? true }
         var counts: [Int64: Int] = [:]
         for f in scope { for p in f.personIds { counts[p, default: 0] += 1 } }
         present = counts.map { (id: $0.key, count: $0.value) }.sorted { $0.count != $1.count ? $0.count > $1.count : $0.id < $1.id }

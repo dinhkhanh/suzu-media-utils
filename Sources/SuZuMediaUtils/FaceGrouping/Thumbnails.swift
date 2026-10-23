@@ -81,13 +81,31 @@ struct FaceImage: View {
 }
 
 extension Set {
-    /// A click in a grid: ⌘-click adds or removes, a plain click selects just this one.
-    mutating func click(_ e: Element) {
-        if NSEvent.modifierFlags.contains(.command) {
+    /// A click in a grid: ⌘-click adds or removes, ⇧-click selects everything from the selection to this one (in
+    /// `order`, the grid's order; ⇧⌘-click adds that range), a plain click selects just this one.
+    mutating func click(_ e: Element, in order: [Element] = []) {
+        let mods = NSEvent.modifierFlags
+        if mods.contains(.shift), order.contains(e) {
+            if !mods.contains(.command), let range = rangeExtended(to: e, in: order) { self = Set(order[range]) } else { extend(to: e, in: order) }
+        } else if mods.contains(.command) || mods.contains(.shift) {
             if contains(e) { remove(e) } else { insert(e) }
         } else {
             self = [e]
         }
+    }
+
+    /// Adds the stretch of `order` between the selection and `e`: from the first selected item when `e` is inside or
+    /// after the selection, up to the last selected one when it comes before. Just `e` when nothing is selected.
+    mutating func extend(to e: Element, in order: [Element]) {
+        guard let range = rangeExtended(to: e, in: order) else { insert(e); return }
+        formUnion(order[range])
+    }
+
+    func rangeExtended(to e: Element, in order: [Element]) -> ClosedRange<Int>? {
+        guard let i = order.firstIndex(of: e) else { return nil }
+        let picked = order.indices.filter { contains(order[$0]) }
+        guard let lo = picked.min(), let hi = picked.max() else { return i...i }
+        return i < lo ? i...hi : lo...i
     }
 }
 

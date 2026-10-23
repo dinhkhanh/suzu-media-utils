@@ -407,3 +407,13 @@ and after every feature below; same 92 people.
   (`Equatable` on person, selection, known names, editing) so background updates during ingest don't rebuild
   their menus either; `ThisIsMenu` and `FaceAssignItems` take the known people as plain data instead of watching
   the model.
+
+## v0.6.8 (2026-10-23): session bar everywhere; ⇧-click ranges
+- `SessionBar` shows whenever the open project has capture times (one session included) and takes `divider:`.
+  It sits on Files, Search (not albums), person pages and Batch Export (not the Edit & Export window, whose photos
+  are the ones asked for). Files filters by `takenAt` within the session; the batch tools' Files & Folders source
+  reads capture times (EXIF, else mtime, as the library does) off the main thread and keeps only the session's files,
+  with a "n of m in <session>" line; People source already followed the session.
+- `Set.click(_:in:)` takes the grid's order: ⇧-click selects from the selection to the clicked item (⇧⌘ adds the
+  range), `extend(to:in:)` for the face grids whose plain click toggles. Used by People, person pages, Search, Files
+  (grid; the table has it natively) and face grids.

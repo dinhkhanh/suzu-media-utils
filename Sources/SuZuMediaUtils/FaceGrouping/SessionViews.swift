@@ -5,15 +5,28 @@ import SwiftUI
 /// what they're in. Sessions split wherever nobody shot for a while; right-click to name one.
 struct SessionBar: View {
     @EnvironmentObject var model: FaceGroupingModel
+    /// A rule under the bar (screens whose content starts right below it).
+    var divider = false
     @State private var renaming: EventSession?
     @State private var newName = ""
 
     var body: some View {
-        if model.currentProject != nil && model.sessions.count > 1 {
+        // Shown whenever the open project has capture times, even as one session, so every screen looks the same
+        // and a session can be named before the next one starts.
+        if model.currentProject != nil && !model.sessions.isEmpty {
+            VStack(spacing: 0) {
+                bar
+                if divider { Divider() }
+            }
+        }
+    }
+
+    var bar: some View {
             HStack(spacing: 8) {
                 ScrollView(.horizontal) {
                     HStack(spacing: 6) {
-                        chip(title: "Whole event", detail: "\(model.sessions.count) sessions", selected: model.currentSession == nil) {
+                        let n = model.sessions.count
+                        chip(title: "Whole event", detail: "\(n) session\(n == 1 ? "" : "s")", selected: model.currentSession == nil) {
                             model.sessionAnchor = nil
                         }
                         ForEach(model.sessions) { s in
@@ -48,7 +61,6 @@ struct SessionBar: View {
             } message: {
                 if let s = renaming { Text(model.sessionTime(s)) }
             }
-        }
     }
 
     func detail(_ s: EventSession) -> String {
@@ -80,7 +92,7 @@ struct SessionPicker: View {
     var allTitle = "Whole event"
 
     var body: some View {
-        if model.currentProject != nil && model.sessions.count > 1 {
+        if model.currentProject != nil && !model.sessions.isEmpty {
             Picker("", selection: Binding(get: { model.currentSession?.start }, set: { model.sessionAnchor = $0 })) {
                 Text(allTitle).tag(Double?.none)
                 ForEach(model.sessions) { s in

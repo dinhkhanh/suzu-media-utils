@@ -1,4 +1,4 @@
-# Tính năng của SuZu Media Utils (v0.6.7)
+# Tính năng của SuZu Media Utils (v0.6.8)
 
 Ứng dụng macOS cho SuZu Media: nhận diện và nhóm khuôn mặt trong ảnh/video sự kiện, cùng các công cụ xử lý ảnh
 hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi tiếng qua Amazon, nếu bật).
@@ -60,7 +60,8 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Tự chia phiên | Tự tách sự kiện thành các phiên (khai mạc, trận đấu, trao giải…) ở chỗ ngừng chụp 30 phút (chỉnh được 10–120 phút). |
 | Lọc người theo phiên | Bấm một phiên trên trang People để chỉ xem ai có mặt và số ảnh trong phiên đó. |
 | Đặt tên phiên | Chuột phải → Rename Session (vd. "Trao giải"); tên giữ nguyên khi có thêm file. |
-| Phiên áp dụng mọi nơi | Trang người, khuôn mặt chưa gán, tìm kiếm, Copy/Move và Batch Export đều theo phiên đang chọn. |
+| Phiên áp dụng mọi nơi | Thanh phiên hiện trên People, trang người, khuôn mặt chưa gán, Files, Search và Batch Export (kể cả khi chỉ có một phiên). Bấm một phiên để chỉ xem hoặc xuất ảnh của phiên đó; Copy/Move cũng theo phiên. Trong Batch Export, nguồn Files & Folders đọc giờ chụp của file để lọc theo phiên (dòng "n of m photos in …"). |
+| Chọn nhiều | Trong mọi lưới: ⌘-click thêm từng mục, ⇧-click chọn một dải từ mục đang chọn tới mục bấm. |
 
 ## Tìm kiếm và album
 

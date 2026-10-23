@@ -27,6 +27,8 @@ struct SearchView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // A search follows the session picked for the event; an album has its own dates.
+            if album == nil { SessionBar(divider: true) }
             filters
             Divider()
             ScrollView {
@@ -39,7 +41,7 @@ struct SearchView: View {
                                                          score: h.score, takenAt: h.takenAt, burstId: h.burstId), side: 170)
                             .overlay(RoundedRectangle(cornerRadius: 6).stroke(selected.contains(h.id) ? Color.accentColor : .clear, lineWidth: 3))
                             .onTapGesture(count: 2) { NSWorkspace.shared.open(URL(fileURLWithPath: h.path, isDirectory: false)) }
-                            .onTapGesture { selected.click(h.id) }
+                            .onTapGesture { selected.click(h.id, in: hits.map(\.id)) }
                             .contextMenu {
                                 // The selection when this file is in it, else just this file.
                                 let open = selected.contains(h.id) ? hits.filter { selected.contains($0.id) } : [h]
