@@ -13,13 +13,24 @@ struct CardCopyTool: View {
     @AppStorage("cardCopyPerHandover") private var perHandover = true
     @AppStorage("cardCopyKeepLayout") private var keepLayout = false
     @AppStorage("cardCopyAddToProject") private var addToProject = true
+    @AppStorage("cardCopySplitVideos") private var splitVideos = false
+    @AppStorage("cardCopyVideoDestination") private var videoDestinationPath = ""
 
     var destination: URL? { destinationPath.isEmpty ? nil : URL(fileURLWithPath: destinationPath, isDirectory: true) }
+    var videoDestination: URL? { splitVideos && !videoDestinationPath.isEmpty ? URL(fileURLWithPath: videoDestinationPath, isDirectory: true) : nil }
+    /// Both places chosen (videos' too, when they have their own).
+    var ready: Bool { destination != nil && (!splitVideos || videoDestination != nil) }
 
     var body: some View {
         Form {
             Section("Destination") {
-                FolderField(title: "Copy into", url: Binding(get: { destination }, set: { destinationPath = $0?.path ?? "" }))
+                FolderField(title: splitVideos ? "Copy photos into" : "Copy into", url: Binding(get: { destination }, set: { destinationPath = $0?.path ?? "" }))
+                if splitVideos {
+                    FolderField(title: "Copy videos into", url: Binding(get: { videoDestinationPath.isEmpty ? nil : URL(fileURLWithPath: videoDestinationPath, isDirectory: true) },
+                                                                        set: { videoDestinationPath = $0?.path ?? "" }))
+                }
+                Toggle("Videos go to their own folder", isOn: $splitVideos).toggleStyle(.checkbox)
+                    .help("Photos to one place, videos to another (an editor's drive, say); a clip's XML goes with the clip")
                 Text("Each card gets its own folder here, named after the card.").font(.caption).foregroundStyle(.secondary)
                 FlowLayout(spacing: 14) {
                     Toggle("Verify each copy", isOn: $verify).help("Reads every copy back and compares its SHA-256 with the original")
@@ -42,8 +53,9 @@ struct CardCopyTool: View {
                     }
                 } else {
                     let free = destination.flatMap { CardCopier.freeSpace(at: $0) }
+                    let videoFree = videoDestination.flatMap { CardCopier.freeSpace(at: $0) } ?? free
                     ForEach(model.cards) { card in
-                        CardRow(card: card, model: model, canCopy: destination != nil, free: free) { copy(card) }
+                        CardRow(card: card, model: model, canCopy: ready, free: free, videoFree: videoFree) { copy(card) }
                     }
                 }
             } header: {
@@ -72,15 +84,20 @@ struct CardCopyTool: View {
     func copy(_ card: CardCopyModel.Card) {
         guard let destination, let store = faces.store else { return }
         var o = CardCopier.Options(destination: destination)
+        o.videoDestination = videoDestination
         o.verify = verify
         o.perHandover = perHandover
         o.keepLayout = keepLayout
         // A hand-over interrupted (card pulled, destination gone, Cancel) goes on in its folder.
-        if let last = card.outcome, last.interruption != nil, last.folder.path.hasPrefix(destination.path + "/") { o.folder = last.folder }
+        if let last = card.outcome, last.interruption != nil, last.folder.path.hasPrefix(destination.path + "/") {
+            o.folder = last.folder
+            if let v = videoDestination, let lv = last.videoFolder, lv.path.hasPrefix(v.path + "/") { o.videoFolder = lv }
+        }
         let project = addToProject ? faces.currentProject : nil
         model.copy(card.id, options: o, store: store) { outcome in
             if let project, !outcome.copied.isEmpty || !outcome.skipped.isEmpty {
                 faces.addCopiedFolder(outcome.cardFolder, project: project)
+                if let v = outcome.videoCardFolder { faces.addCopiedFolder(v, project: project) }
             }
         }
     }
@@ -91,13 +108,29 @@ struct CardRow: View {
     let card: CardCopyModel.Card
     @ObservedObject var model: CardCopyModel
     let canCopy: Bool
-    /// Room at the destination, when it is known.
+    /// Room at the destinations, when known (videos' is the photos' when they share one).
     let free: Int64?
+    let videoFree: Int64?
     let copy: () -> Void
-    @State private var label = ""
+    @State private var label: String
     @EnvironmentObject var faces: FaceGroupingModel
 
-    func tooBig(_ p: CardCopier.Plan) -> Bool { free.map { p.newBytes > $0 } ?? false }
+    init(card: CardCopyModel.Card, model: CardCopyModel, canCopy: Bool, free: Int64?, videoFree: Int64?, copy: @escaping () -> Void) {
+        self.card = card
+        self.model = model
+        self.canCopy = canCopy
+        self.free = free
+        self.videoFree = videoFree
+        self.copy = copy
+        _label = State(initialValue: card.plan?.card.label ?? "")
+    }
+
+    func tooBig(_ p: CardCopier.Plan) -> Bool {
+        if videoFree != nil, videoFree != free {
+            return (free.map { p.newBytes(.photo) > $0 } ?? false) || (videoFree.map { p.newBytes(.video) > $0 } ?? false)
+        }
+        return free.map { p.newBytes > $0 } ?? false
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -106,7 +139,7 @@ struct CardRow: View {
                 Text(card.identity.volumeName).fontWeight(.semibold)
                 TextField("", text: $label, prompt: Text("Name this card, e.g. Nam R5 card 1"))
                     .labelsHidden().textFieldStyle(.roundedBorder).frame(maxWidth: 240)
-                    .onSubmit { model.setLabel(card.id, label, store: faces.store) }
+                    .onSubmit { rename(card.plan?.card.label) }
                     .help("A name for this card. The card itself is not renamed; it is known by its volume UUID.")
                 if let camera = card.plan?.card.camera ?? card.identity.cameraMake {
                     Text(camera + (card.identity.cameraSerial.map { " · \($0)" } ?? "")).foregroundStyle(.secondary).lineLimit(1)
@@ -122,7 +155,6 @@ struct CardRow: View {
             if let e = card.error { Text(e).foregroundStyle(.red).font(.callout) }
         }
         .padding(.vertical, 4)
-        .onAppear { label = card.plan?.card.label ?? "" }
         .onChange(of: card.plan?.card.label) { label = card.plan?.card.label ?? "" }
     }
 
@@ -167,9 +199,25 @@ struct CardRow: View {
         }
     }
 
+    /// Saves a name typed in. An empty or unchanged field is left alone: a field ending its editing when the window
+    /// closes must never wipe a name.
+    func rename(_ current: String?) {
+        let typed = label.trimmingCharacters(in: .whitespaces)
+        guard !typed.isEmpty, typed != (current ?? "") else { return }
+        model.setLabel(card.id, typed, store: faces.store)
+    }
+
     func summary(_ p: CardCopier.Plan) -> String {
         var parts: [String] = []
-        parts.append(p.new.isEmpty ? "Nothing new" : "\(p.new.count) new · \(p.newBytes.formatted(.byteCount(style: .file)))")
+        if p.new.isEmpty {
+            parts.append("Nothing new")
+        } else {
+            var what: [String] = []
+            if p.newPhotos > 0 { what.append("\(p.newPhotos) new photo\(p.newPhotos == 1 ? "" : "s")") }
+            if p.newVideos > 0 { what.append("\(p.newVideos) new video\(p.newVideos == 1 ? "" : "s")") }
+            if what.isEmpty { what.append("\(p.new.count) new") }
+            parts.append(what.joined(separator: ", ") + " · " + p.newBytes.formatted(.byteCount(style: .file)))
+        }
         if !p.copiedBefore.isEmpty {
             parts.append(p.copiedElsewhere == 0 ? "\(p.copiedBefore.count) copied before"
                          : p.copiedElsewhere == p.copiedBefore.count ? "\(p.copiedBefore.count) copied on a teammate's Mac"
@@ -202,7 +250,8 @@ struct CardRow: View {
             HStack {
                 Text(outcomeText(o)).foregroundStyle(o.failed.isEmpty ? Color.primary : Color.orange)
                 Spacer()
-                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([o.folder]) }.controlSize(.small)
+                Button(o.videoFolder == nil ? "Show in Finder" : "Show Photos") { NSWorkspace.shared.activateFileViewerSelecting([o.folder]) }.controlSize(.small)
+                if let v = o.videoFolder { Button("Show Videos") { NSWorkspace.shared.activateFileViewerSelecting([v]) }.controlSize(.small) }
             }
             if !o.failed.isEmpty {
                 DisclosureGroup("\(o.failed.count) files could not be copied (still on the card; try again)") {
@@ -219,7 +268,13 @@ struct KnownCardRow: View {
     let known: CardCopier.KnownCard
     @ObservedObject var model: CardCopyModel
     @EnvironmentObject var faces: FaceGroupingModel
-    @State private var label = ""
+    @State private var label: String
+
+    init(known: CardCopier.KnownCard, model: CardCopyModel) {
+        self.known = known
+        self.model = model
+        _label = State(initialValue: known.card.label ?? "")
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -227,14 +282,17 @@ struct KnownCardRow: View {
             Text(known.card.volumeName ?? "Card").fontWeight(.semibold)
             TextField("", text: $label, prompt: Text("Name this card"))
                 .labelsHidden().textFieldStyle(.roundedBorder).frame(maxWidth: 240)
-                .onSubmit { model.setLabel(known.card.uuid, label, store: faces.store) }
+                .onSubmit {
+                    let typed = label.trimmingCharacters(in: .whitespaces)
+                    if !typed.isEmpty, typed != (known.card.label ?? "") { model.setLabel(known.card.uuid, typed, store: faces.store) }
+                }
             if let c = known.card.camera { Text(c).foregroundStyle(.secondary).lineLimit(1) }
             Spacer()
             Text("\(known.files) files · \(known.bytes.formatted(.byteCount(style: .file)))" +
                  (known.card.lastCopiedAt.map { " · last \($0.formatted(date: .abbreviated, time: .shortened))" } ?? ""))
                 .font(.caption).foregroundStyle(.secondary)
         }
-        .onAppear { label = known.card.label ?? "" }
+        .onChange(of: known.card.label) { label = known.card.label ?? "" }
         .contextMenu {
             Button("Forget This Card") { model.forget(known.id, store: faces.store) }
         }

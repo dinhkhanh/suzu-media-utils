@@ -453,3 +453,7 @@ and after every feature below; same 92 people.
   path (a pulled card's mount point lingers for a moment), checked again after half a second on any error. The Cards
   screen keeps the pulled card's row with the result, and when the card is back `Options.folder` continues the same
   hand-over's folder instead of starting another.
+- Files on a card are photos or videos (`File.kind`); a sidecar (.xmp, .xml) takes the kind of the file it goes
+  with. The plan counts new photos and new videos apart; `Options.videoDestination` sends videos to their own
+  place (their own card folder and hand-over folder there, `Outcome.videoFolder`), the photos' destination
+  otherwise. Both card folders can join the project.

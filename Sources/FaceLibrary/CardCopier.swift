@@ -139,25 +139,32 @@ public enum CardCopier {
 
     // MARK: Files on the card
 
+    public enum Kind: String, Sendable { case photo, video }
+
     public struct File: Hashable, Sendable {
         public var relPath: String
         public var size: Int64
         public var mtime: Date
+        /// Photo or video; a sidecar takes the kind of the file it goes with.
+        public var kind: Kind = .photo
+        /// An XMP or XML that belongs to a photo or clip (not counted as one).
+        public var isSidecar = false
         public var name: String { (relPath as NSString).lastPathComponent }
     }
 
     /// Folders of thumbnails the camera keeps for its own screen (Sony THMBNL): not photos.
     static let skippedFolders: Set<String> = ["THMBNL", "THMBNL_"]
 
-    /// Every photo, video and sidecar on the card, by path relative to its root. A clip's XML (Sony C0001M01.XML,
-    /// Canon, Panasonic) goes with it: an .xml whose name starts with a media file's name in the same folder.
+    /// Every photo, video and sidecar on the card, by path relative to its root. A sidecar (a photo's .xmp, a clip's
+    /// .xml: Sony C0001M01.XML, Canon, Panasonic) goes with its file: one whose name starts with a media file's name
+    /// in the same folder, and it takes that file's kind.
     public static func listFiles(on root: URL) -> [File] {
         let base = root.standardizedFileURL.path
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey, .isDirectoryKey]
         guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles]) else { return [] }
         var out: [File] = []
-        var xmls: [File] = []
-        var mediaStems: [String: [String]] = [:]  // folder → media names without extension (upper-cased)
+        var sidecars: [File] = []
+        var media: [String: [(stem: String, kind: Kind)]] = [:]  // folder → media names without extension (upper-cased)
         for case let u as URL in e {
             guard let v = try? u.resourceValues(forKeys: keys) else { continue }
             if v.isDirectory == true {
@@ -166,18 +173,22 @@ public enum CardCopier {
             }
             guard v.isRegularFile == true else { continue }
             let rel = String(u.standardizedFileURL.path.dropFirst(base.count + 1))
-            let f = File(relPath: rel, size: Int64(v.fileSize ?? 0), mtime: v.contentModificationDate ?? .distantPast)
+            var f = File(relPath: rel, size: Int64(v.fileSize ?? 0), mtime: v.contentModificationDate ?? .distantPast)
             let ext = u.pathExtension.lowercased()
-            if ext == "xml" {
-                xmls.append(f)
-            } else if extensions.contains(ext) {
+            if ext == "xml" || ext == "xmp" {
+                f.isSidecar = true
+                sidecars.append(f)
+            } else if ImageLoader.extensions.contains(ext) || VideoSampler.extensions.contains(ext) {
+                f.kind = VideoSampler.extensions.contains(ext) ? .video : .photo
                 out.append(f)
-                mediaStems[(rel as NSString).deletingLastPathComponent, default: []].append(u.deletingPathExtension().lastPathComponent.uppercased())
+                media[(rel as NSString).deletingLastPathComponent, default: []].append((u.deletingPathExtension().lastPathComponent.uppercased(), f.kind))
             }
         }
-        for x in xmls {
+        for var x in sidecars {
             let stem = (x.name as NSString).deletingPathExtension.uppercased()
-            if mediaStems[(x.relPath as NSString).deletingLastPathComponent]?.contains(where: { stem.hasPrefix($0) }) == true { out.append(x) }
+            guard let owner = media[(x.relPath as NSString).deletingLastPathComponent]?.first(where: { stem.hasPrefix($0.stem) }) else { continue }
+            x.kind = owner.kind
+            out.append(x)
         }
         return out.sorted { $0.relPath.localizedStandardCompare($1.relPath) == .orderedAscending }
     }
@@ -203,6 +214,10 @@ public enum CardCopier {
         /// Content keys read while planning, reused by the copy.
         var keys: [String: String] = [:]
         public var newBytes: Int64 { new.reduce(0) { $0 + $1.size } }
+        /// New photos and videos (sidecars go with them, uncounted).
+        public var newPhotos: Int { new.filter { $0.kind == .photo && !$0.isSidecar }.count }
+        public var newVideos: Int { new.filter { $0.kind == .video && !$0.isSidecar }.count }
+        public func newBytes(_ kind: Kind) -> Int64 { new.filter { $0.kind == kind }.reduce(0) { $0 + $1.size } }
     }
 
     /// Looks at the card and decides what is new. Files whose path, size and time match a ledger entry are done
@@ -267,16 +282,21 @@ public enum CardCopier {
     // MARK: Copying
 
     public struct Options: Sendable {
+        /// Where photos go (and videos, unless they have their own place).
         public var destination: URL
+        /// Where videos go, when not with the photos.
+        public var videoDestination: URL?
         /// Read each copy back and compare its SHA-256 with the original's.
         public var verify = true
         /// A folder per hand-over ("2026-10-24 14.05") inside the card's folder.
         public var perHandover = true
         /// Keep the card's folders (DCIM/100CANON/…) instead of putting the files side by side.
         public var keepLayout = false
-        /// Go on in this hand-over's folder (one whose copy was interrupted) instead of starting a new one.
+        /// Go on in this hand-over's folders (one whose copy was interrupted) instead of starting a new one.
         public var folder: URL?
+        public var videoFolder: URL?
         public init(destination: URL) { self.destination = destination }
+        func root(for kind: Kind) -> URL { kind == .video ? (videoDestination ?? destination) : destination }
     }
 
     /// Why a copy stopped before the end. What landed is recorded; the rest stays new for the next time.
@@ -298,10 +318,13 @@ public enum CardCopier {
     }
 
     public struct Outcome: Sendable {
-        /// Where this hand-over's files went.
+        /// Where this hand-over's files went (the photos', when videos have their own place).
         public var folder: URL
         /// The card's folder: the one to watch in a project.
         public var cardFolder: URL
+        /// Where the videos went, when not with the photos.
+        public var videoFolder: URL?
+        public var videoCardFolder: URL?
         public var copied: [String] = []
         public var skipped: [String] = []
         public var failed: [(file: String, reason: String)] = []
@@ -334,9 +357,17 @@ public enum CardCopier {
     public static func copy(_ plan: Plan, options: Options, store: LibraryStore,
                             progress: (Progress) -> Void = { _ in }, isCancelled: () -> Bool = { false }) -> Outcome {
         let fm = FileManager.default
+        let stamp = handoverName(Date())
         let cardFolder = options.destination.appendingPathComponent(cardFolderName(plan.card), isDirectory: true)
-        let folder = options.folder ?? (options.perHandover ? cardFolder.appendingPathComponent(handoverName(Date()), isDirectory: true) : cardFolder)
+        let folder = options.folder ?? (options.perHandover ? cardFolder.appendingPathComponent(stamp, isDirectory: true) : cardFolder)
         var out = Outcome(folder: folder, cardFolder: cardFolder)
+        var videoFolder = folder
+        if let v = options.videoDestination {
+            let videoCard = v.appendingPathComponent(cardFolderName(plan.card), isDirectory: true)
+            videoFolder = options.videoFolder ?? (options.perHandover ? videoCard.appendingPathComponent(stamp, isDirectory: true) : videoCard)
+            out.videoFolder = videoFolder
+            out.videoCardFolder = videoCard
+        }
         var p = Progress(total: plan.new.count, bytesTotal: plan.newBytes)
         let cardId = plan.card.id!
         for (f, m) in plan.matched {
@@ -350,7 +381,8 @@ public enum CardCopier {
             let src = plan.identity.volume.appendingPathComponent(f.relPath)
             let srcKey = plan.keys[f.relPath] ?? ContentKey.compute(src, size: f.size) ?? "\(f.size)-"
             do {
-                let dir = options.keepLayout ? folder.appendingPathComponent((f.relPath as NSString).deletingLastPathComponent, isDirectory: true) : folder
+                let base = f.kind == .video ? videoFolder : folder
+                let dir = options.keepLayout ? base.appendingPathComponent((f.relPath as NSString).deletingLastPathComponent, isDirectory: true) : base
                 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
                 let dst = freeName(for: f.name, in: dir, sameAs: srcKey, size: f.size)
                 if fm.fileExists(atPath: dst.path) {
@@ -380,11 +412,12 @@ public enum CardCopier {
                 // A file that failed because the card or the destination is gone is not a failed file: it is
                 // still new, and the copy goes on when they are back. The system takes a moment to finish
                 // unmounting a pulled card, so look twice.
-                var gone = !plan.identity.isReachable, lost = !reachable(options.destination, volume: false)
+                let root = options.root(for: f.kind)
+                var gone = !plan.identity.isReachable, lost = !reachable(root, volume: false)
                 if !gone, !lost {
                     Thread.sleep(forTimeInterval: 0.5)
                     gone = !plan.identity.isReachable
-                    lost = !reachable(options.destination, volume: false)
+                    lost = !reachable(root, volume: false)
                 }
                 if gone { out.interruption = .cardRemoved; break }
                 if lost { out.interruption = .destinationLost; break }

@@ -214,4 +214,31 @@ final class CardCopierTests: XCTestCase {
         XCTAssertTrue(o.failed.isEmpty)
         XCTAssertEqual(try plan().new.count, 2)
     }
+    func testPhotosAndVideosAreCountedApartAndVideosCanGoToTheirOwnPlace() throws {
+        try shoot("IMG_0001.JPG", seed: 1)
+        try shoot("IMG_0001.xmp", bytes: 300, seed: 2)      // the photo's sidecar
+        try shoot("IMG_0002.CR3", seed: 3)
+        try FileManager.default.createDirectory(at: card.appendingPathComponent("PRIVATE/M4ROOT/CLIP"), withIntermediateDirectories: true)
+        for (name, seed) in [("C0001.MP4", 4), ("C0001M01.XML", 5), ("MEDIAPRO.XML", 6)] {
+            let u = card.appendingPathComponent("PRIVATE/M4ROOT/CLIP/\(name)")
+            try Data((0..<500).map { UInt8(truncatingIfNeeded: $0 &* seed) }).write(to: u)
+        }
+        let p = try plan()
+        XCTAssertEqual(p.newPhotos, 2)
+        XCTAssertEqual(p.newVideos, 1)
+        XCTAssertEqual(p.new.count, 5, "two photos, a clip, and their two sidecars; MEDIAPRO.XML belongs to no clip")
+        XCTAssertEqual(p.new.first { $0.name == "C0001M01.XML" }?.kind, .video)
+        XCTAssertEqual(p.new.first { $0.name == "IMG_0001.xmp" }?.kind, .photo)
+        XCTAssertEqual(p.newBytes(.video), 1000)
+
+        var o = options(perHandover: false)
+        o.videoDestination = tmp.appendingPathComponent("Videos", isDirectory: true)
+        let out = CardCopier.copy(p, options: o, store: store)
+        XCTAssertEqual(out.copied.count, 5)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: out.folder.path).sorted(), ["IMG_0001.JPG", "IMG_0001.xmp", "IMG_0002.CR3"])
+        let videos = try XCTUnwrap(out.videoFolder)
+        XCTAssertEqual(videos.deletingLastPathComponent(), o.videoDestination)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: videos.path).sorted(), ["C0001.MP4", "C0001M01.XML"])
+        XCTAssertTrue(try plan().new.isEmpty)
+    }
 }

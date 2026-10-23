@@ -123,7 +123,8 @@ project so faces are found as the files land. A card seen before can be forgotte
 In a team the ledger travels with the shared folder: a card copied on one Mac is known on every teammate's Mac, so
 the next hand-over can go to whichever Mac is free, through any reader or adapter (the card's own UUID is what
 counts). A card pulled in the middle of a copy stops it at once: what landed is kept and recorded, nothing half
-written is left behind, and when the card is back the copy goes on in the same folder.
+written is left behind, and when the card is back the copy goes on in the same folder. New photos and new videos
+are counted apart, and videos can go to their own destination (an editor's drive), each with its own card folder.
 
 ### Copy Verifier
 Checks that a copy (memory card → NAS, NAS → backup) is complete — missing, truncated or damaged files (contents are
