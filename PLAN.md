@@ -427,7 +427,7 @@ and after every feature below; same 92 people.
 - Picking a name in the known-name suggestions saves it at once (`knownNameSuggestions(for:onPick:)`): a change
   that replaces the text with a suggested name is a pick, typing one more letter is not.
 
-## v0.7.0 (2026-10-24): Copy from Cards
+## v0.7.0 / v0.7.1 (2026-10-24): Copy from Cards
 - `CardCopier` (FaceLibrary): a card is known by its volume UUID (a plain folder by a hidden `.suzu-card` marker,
   since its volume UUID would be the disk's); `card` rows carry label, volume name and the camera's make, model and
   body serial from the first photo's EXIF. `plan` lists the card's media and sidecars, marks files whose path, size
