@@ -1,9 +1,20 @@
 import CoreGraphics
 import Foundation
 import ImageIO
+import UniformTypeIdentifiers
 
 public enum ImageLoader {
-    public static let extensions: Set<String> = ["jpg", "jpeg", "heic", "heif", "png", "tif", "tiff"]
+    /// Camera RAW formats macOS can decode (Canon, Nikon, Sony, Fujifilm, Olympus, Panasonic, Pentax, Samsung,
+    /// Leica, Hasselblad, Phase One, Sigma and DNG).
+    public static let rawExtensions: Set<String> = ["cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "dng", "raf", "orf",
+                                                     "rw2", "pef", "srw", "3fr", "fff", "erf", "mrw", "x3f", "iiq", "rwl", "mef"]
+    public static let extensions: Set<String> = Set(["jpg", "jpeg", "heic", "heif", "png", "tif", "tiff"]).union(rawExtensions)
+
+    public static func isRaw(_ url: URL) -> Bool { rawExtensions.contains(url.pathExtension.lowercased()) }
+
+    /// The JPEG next to a RAW file from a camera shooting both: same folder, same name, another photo extension.
+    /// Case-insensitive, so IMG_0001.CR2 pairs with img_0001.jpg.
+    public static func pairKey(_ path: String) -> String { ((path as NSString).deletingPathExtension as String).lowercased() }
 
     /// Recursively lists image and video files under `root`, sorted by path. Skips hidden files and AppleDouble `._*` files.
     public static func enumerate(_ root: URL) -> [URL] {
@@ -22,9 +33,17 @@ public enum ImageLoader {
     /// Reads the whole file in one sequential read (one round trip on network shares), then decodes from memory.
     public static func source(_ url: URL) throws -> (CGImageSource, Int) {
         let data = try Data(contentsOf: url, options: .uncached)
-        guard let src = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary)
+        guard let src = CGImageSourceCreateWithData(data as CFData, sourceOptions(for: url) as CFDictionary)
         else { throw CocoaError(.fileReadCorruptFile) }
         return (src, data.count)
+    }
+
+    /// Options for decoding a file's bytes from memory. The type hint matters for RAW files: without it ImageIO
+    /// takes a Sony ARW (a TIFF container) for a plain TIFF and decodes nothing.
+    public static func sourceOptions(for url: URL) -> [CFString: Any] {
+        var opts: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        if let type = UTType(filenameExtension: url.pathExtension.lowercased()) { opts[kCGImageSourceTypeIdentifierHint] = type.identifier }
+        return opts
     }
 
     /// Long side of the image after EXIF orientation is applied.
@@ -35,8 +54,11 @@ public enum ImageLoader {
         return max(w, h)
     }
 
-    /// Upright decode with the long side capped at `maxPixel`. ImageIO uses JPEG DCT scaling when it can.
+    /// Upright decode with the long side capped at `maxPixel`. ImageIO uses JPEG DCT scaling when it can. A RAW
+    /// file's embedded preview (the camera's own JPEG) is used when it is big enough for `maxPixel`: developing the
+    /// RAW data takes seconds per photo and looks no better at these sizes.
     public static func decode(_ src: CGImageSource, maxPixel: Int) -> CGImage? {
+        if isRawSource(src), let preview = embeddedPreview(src, maxPixel: maxPixel) { return preview }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixel,
@@ -44,6 +66,41 @@ public enum ImageLoader {
             kCGImageSourceShouldCacheImmediately: true,
         ]
         return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
+    }
+
+    /// Upright decode of a file, long side capped at `maxPixel` (nil: the full size; a RAW file is then developed).
+    public static func decode(_ url: URL, maxPixel: Int?) -> CGImage? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        let long = pixelLongSide(src)
+        let side = maxPixel.map { long > 0 ? min($0, long) : $0 } ?? long
+        guard side > 0 else { return nil }
+        return decode(src, maxPixel: side)
+    }
+
+    public static func isRawSource(_ src: CGImageSource) -> Bool {
+        // com.canon.cr2-raw-image, com.nikon.raw-image, com.sony.arw-raw-image, com.adobe.raw-image (DNG)…
+        guard let type = CGImageSourceGetType(src) as String? else { return false }
+        return type == "public.camera-raw-image" || type.hasSuffix("raw-image")
+    }
+
+    /// The preview the camera wrote into a RAW file, if it is at least three quarters of the size wanted (or of the
+    /// photo itself, when that is smaller), scaled down to `maxPixel` when it is bigger.
+    static func embeddedPreview(_ src: CGImageSource, maxPixel: Int) -> CGImage? {
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ]
+        guard let p = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+        let long = max(p.width, p.height), wanted = min(maxPixel, max(1, pixelLongSide(src)))
+        guard Double(long) >= Double(wanted) * 0.75 else { return nil }
+        guard long > maxPixel else { return p }
+        let k = Double(maxPixel) / Double(long), w = Int(Double(p.width) * k), h = Int(Double(p.height) * k)
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: p.colorSpace ?? CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return p }
+        ctx.interpolationQuality = .high
+        ctx.draw(p, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return ctx.makeImage()
     }
 
     /// EXIF capture time (DateTimeOriginal + sub-seconds), if present.

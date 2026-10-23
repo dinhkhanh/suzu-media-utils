@@ -28,11 +28,7 @@ final class PreviewCache: @unchecked Sendable {
 
     func entry(_ url: URL) -> Entry? {
         if let e = lock.withLock({ entries[url.path] }) { return e }
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
-                                                                   kCGImageSourceThumbnailMaxPixelSize: 1600,
-                                                                   kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary)
-        else { return nil }
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil), let cg = ImageLoader.decode(src, maxPixel: 1600) else { return nil }
         let p = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
         var w = Double(p?[kCGImagePropertyPixelWidth] as? Int ?? cg.width), h = Double(p?[kCGImagePropertyPixelHeight] as? Int ?? cg.height)
         if let o = p?[kCGImagePropertyOrientation] as? Int, o >= 5 { swap(&w, &h) }

@@ -1,3 +1,4 @@
+import FaceCore
 import GRDB
 import ImageIO
 import MediaKit
@@ -576,5 +577,77 @@ extension LibraryTests {
         XCTAssertEqual(measures[all[2].url]?.featurePrint, [1, 0])
         XCTAssertEqual(measures[all[2].url]?.takenAt, Date(timeIntervalSince1970: 1000))
         XCTAssertNil(measures[all[0].url]?.featurePrint, "no print before the idle pass")
+    }
+}
+
+extension LibraryTests {
+    func testRawFilesPairWithTheirJPEGs() throws {
+        // Camera shooting RAW+JPEG: listed in either order, the RAW follows its JPEG. A lone RAW is a photo of its own.
+        try makeFile("r/IMG_0001.CR2", seed: 1)
+        try makeFile("r/IMG_0001.JPG", seed: 2)
+        try makeFile("r/zz_0002.jpg", seed: 3)
+        try makeFile("r/aa_0002.arw", seed: 4)   // different name: not a pair
+        try makeFile("r/DSC_0003.nef", seed: 5)  // RAW only
+        monitor().scan()
+        var all = try media()
+        XCTAssertEqual(all.map(\.url.lastPathComponent), ["DSC_0003.nef", "IMG_0001.CR2", "IMG_0001.JPG", "aa_0002.arw", "zz_0002.jpg"])
+        let jpg = all[2], raw = all[1]
+        XCTAssertEqual(raw.duplicateOf, jpg.id)
+        XCTAssertEqual(raw.status, .done, "a companion is never processed on its own")
+        XCTAssertEqual(jpg.status, .pending)
+        XCTAssertTrue([all[0], all[3], all[4]].allSatisfy { $0.duplicateOf == nil && $0.status == .pending })
+
+        // The RAW arrives first and waits; its JPEG arrives a moment later.
+        try makeFile("r/IMG_0004.cr3", seed: 6)
+        monitor().scan()
+        try makeFile("r/IMG_0004.jpg", seed: 7)
+        monitor().scan()
+        all = try media()
+        let late = all.first { $0.url.lastPathComponent == "IMG_0004.cr3" }!, lateJpg = all.first { $0.url.lastPathComponent == "IMG_0004.jpg" }!
+        XCTAssertEqual(late.duplicateOf, lateJpg.id)
+        XCTAssertEqual(late.status, .done)
+
+        // The RAW was already processed when its JPEG came: both stay as they are.
+        try makeFile("r/IMG_0005.dng", seed: 8)
+        monitor().scan()
+        let dng = try media().first { $0.url.lastPathComponent == "IMG_0005.dng" }!
+        _ = try addFace(mediaId: dng.id!, personId: nil)
+        try makeFile("r/IMG_0005.jpg", seed: 9)
+        monitor().scan()
+        all = try media()
+        XCTAssertNil(all.first { $0.url.lastPathComponent == "IMG_0005.dng" }!.duplicateOf)
+        XCTAssertEqual(all.first { $0.url.lastPathComponent == "IMG_0005.jpg" }!.status, .pending)
+
+        // Companions are left out of exports and searches, like copies.
+        XCTAssertTrue(ImageLoader.isRaw(raw.url))
+        XCTAssertEqual(ImageLoader.pairKey("/a/B/IMG_0001.CR2"), ImageLoader.pairKey("/a/B/img_0001.jpg"))
+        XCTAssertNotEqual(ImageLoader.pairKey("/a/IMG_0001.CR2"), ImageLoader.pairKey("/b/IMG_0001.jpg"))
+    }
+
+    func testQuerySkipsBlurryMainFacesAndReadsOldQueries() throws {
+        for i in 0..<3 { try makeFile("q/\(i).jpg", seed: UInt8(i + 1)) }
+        monitor().scan()
+        let all = try media()
+        let an = try newPerson("An")
+        var faces: [Int64] = []
+        for m in all { faces.append(try addFace(mediaId: m.id!, personId: an)) }
+        let tiny = try addFace(mediaId: all[1].id!, personId: nil)
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE face SET sharpness = 20 WHERE id = ?", arguments: [faces[0]])      // soft main face
+            try db.execute(sql: "UPDATE face SET sharpness = 500 WHERE id = ?", arguments: [faces[1]])     // crisp main face…
+            try db.execute(sql: "UPDATE face SET sharpness = 5, w = 0.02, h = 0.02 WHERE id = ?", arguments: [tiny])  // …with a soft tiny one behind
+            // faces[2]: no measurement
+        }
+        var q = MediaQuery()
+        q.people = [an]
+        XCTAssertEqual(try q.run(store).count, 3)
+        q.skipBlurry = true
+        XCTAssertEqual(Set(try q.run(store).map(\.id)), [all[1].id!, all[2].id!])
+
+        let old = try JSONDecoder().decode(MediaQuery.self, from: Data(#"{"people":[1],"match":"any","bestOnly":true,"bestThreshold":0.6,"crowd":"solo"}"#.utf8))
+        XCTAssertEqual(old.people, [1]); XCTAssertEqual(old.match, .any); XCTAssertTrue(old.bestOnly); XCTAssertEqual(old.crowd, .solo)
+        XCTAssertFalse(old.collapseBursts); XCTAssertFalse(old.skipBlurry)
+        let round = try JSONDecoder().decode(MediaQuery.self, from: try JSONEncoder().encode(q))
+        XCTAssertEqual(round, q)
     }
 }

@@ -206,6 +206,8 @@ struct SearchView: View {
             }
             Toggle("Best shots only", isOn: $query.bestOnly).toggleStyle(.checkbox).fixedSize()
             Toggle("Hide similar shots", isOn: $query.collapseBursts).toggleStyle(.checkbox).fixedSize()
+            Toggle("Hide blurry shots", isOn: $query.skipBlurry).toggleStyle(.checkbox).fixedSize()
+                .help("Photos whose main face is out of focus or moved")
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -278,6 +280,9 @@ struct RulesView: View {
             if !edits.isEmpty { parts.append(edits.joined(separator: ", ")) }
         }
         if r.folder != nil && r.writeNames { parts.append("names in metadata") }
+        let q = r.mediaQuery
+        if q.collapseBursts { parts.append("best of each burst") }
+        if q.skipBlurry { parts.append("no blurry shots") }
         parts.append("notification")
         return parts.joined(separator: " · ")
     }
@@ -342,6 +347,9 @@ struct RuleSheet: View {
                 .fixedSize()
                 Toggle("Best shots only", isOn: $query.bestOnly).toggleStyle(.checkbox).fixedSize()
                 Toggle("Skip similar shots", isOn: $query.collapseBursts).toggleStyle(.checkbox).fixedSize()
+                    .help("Of shots taken within a couple of seconds that look the same, only the best is handled; the rule waits until new photos' bursts are known")
+                Toggle("Skip blurry shots", isOn: $query.skipBlurry).toggleStyle(.checkbox).fixedSize()
+                    .help("Photos whose main face is out of focus or moved are not handled")
             }
             Picker("In", selection: $allProjects) {
                 Text(model.currentProject == nil ? "Any project" : "This project (\(model.projectName))").tag(false)

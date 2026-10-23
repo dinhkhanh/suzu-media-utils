@@ -1,4 +1,5 @@
 import AVKit
+import FaceCore
 import FaceLibrary
 import ImageIO
 import SwiftUI
@@ -318,19 +319,7 @@ struct CullWindow: View {
 
     /// The photo upright, its long side at most `maxPixel` (nil: full resolution).
     nonisolated static func decode(_ url: URL, maxPixel: Int?) async -> CGImage? {
-        await Task.detached(priority: .userInitiated) {
-            guard let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
-            let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
-            let long = max(props?[kCGImagePropertyPixelWidth] as? Int ?? 0, props?[kCGImagePropertyPixelHeight] as? Int ?? 0)
-            let side = maxPixel.map { long > 0 ? min($0, long) : $0 } ?? long
-            guard side > 0 else { return nil }
-            return CGImageSourceCreateThumbnailAtIndex(src, 0, [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true,
-                kCGImageSourceThumbnailMaxPixelSize: side,
-            ] as CFDictionary)
-        }.value
+        await Task.detached(priority: .userInitiated) { ImageLoader.decode(url, maxPixel: maxPixel) }.value
     }
 
     /// Faces big enough to judge, cut out with some room around them.

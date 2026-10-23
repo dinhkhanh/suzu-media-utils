@@ -35,7 +35,7 @@ and one for landscapes — logo, text or banner watermark, resize — auto tone
   turns on with crops and watermarks), Top N, best of each burst, skip blurry shots, and people's names written
   into the files (IPTC/XMP, read by Lightroom, Photo Mechanic, Bridge and Photos).
 - **Auto rules:** when new files match a smart-album-style query — photos of one person, everyone with a name, best
-  solo shots of anyone, group shots… — they are copied into a folder (on the NAS, or inside Google Drive or Dropbox
+  solo shots of anyone, group shots, skipping similar and blurry shots… — they are copied into a folder (on the NAS, or inside Google Drive or Dropbox
   to share automatically), either a folder per person or straight into one folder, optionally levelled, auto-toned,
   cropped, watermarked and resized, with names in the metadata and a notification on the Mac. Edit a rule any time.
   Runs only while no new file is waiting, so it never slows recognition.
@@ -71,6 +71,12 @@ JPEG or as lossless PNG (the photo's own colour space, 16-bit when the original 
 (a green tick on the thumbnail, the date in the preview): exporting a photo into a folder that already has it asks,
 photo by photo or for all, whether to skip it or overwrite it. Originals are never overwritten, and another camera's
 photo of the same name gets " (2)".
+
+Camera RAW files (Canon, Nikon, Sony, Fujifilm, Olympus, Panasonic, Pentax, Leica, Hasselblad, Phase One, Sigma, DNG…)
+are photos like any other: recognised, searched, exported and edited (an edited RAW comes out as a JPEG). The camera's
+embedded preview is used wherever it is big enough, so RAW files are not slower to process. A RAW file next to its
+JPEG (RAW+JPEG shooting, same name) is the JPEG's companion: it shows the JPEG's people and is never processed or
+exported on its own, so a person's folder gets one file per shot.
 
 Skip similar shots and Skip blurry shots (under the photos) check the photos before the export and untick the ones to
 leave out, with the reason on hover, so any can be ticked back. Similar shots are taken within a couple of seconds of

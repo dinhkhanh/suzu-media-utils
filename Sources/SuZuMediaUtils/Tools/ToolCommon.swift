@@ -228,8 +228,12 @@ struct FileInputList: View {
                 }
             }
             var seen: Set<String> = []
-            let result = out.filter { seen.insert($0.path).inserted }.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
-            await MainActor.run { files = result; scanning = false }
+            var result = out.filter { seen.insert($0.path).inserted }.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+            // A camera's RAW+JPEG pair is one photo: the JPEG stands for both.
+            let jpegs = Set(result.filter { !ImageLoader.isRaw($0) }.map { ImageLoader.pairKey($0.path) })
+            result.removeAll { ImageLoader.isRaw($0) && jpegs.contains(ImageLoader.pairKey($0.path)) }
+            let final = result
+            await MainActor.run { files = final; scanning = false }
         }
     }
 }

@@ -373,3 +373,18 @@ and after every feature below; same 92 people.
 - Whole-frame blur alone cannot tell a blurry subject from a sharp background (tested: no separation against face
   sharpness on 1,046 photos), hence the face-first rule.
 
+## v0.6.6 (2026-10-23): rules skip similar and blurry shots; RAW files
+- `MediaQuery.skipBlurry` (SQL: the biggest face ≥ 4% wide has sharpness < 60 → out; no measurement = in), with a
+  tolerant `init(from:)` so saved albums, rules and team logs without the newer keys still decode. The query's
+  existing `collapseBursts` is the rules' "skip similar"; `maintain()` now defers deliveries for such rules until
+  new photos have feature prints and bursts are regrouped, or every shot of a burst would be delivered.
+- RAW: `ImageLoader.rawExtensions` joins `extensions`; `decode` uses the RAW's embedded preview when it is at least
+  ¾ of the size wanted (else develops at that size, which ImageIO does at reduced resolution quickly). Edited RAW
+  exports develop at full size. `Metadata.rewrite` already refuses non-JPEG/HEIC/PNG/TIFF. Bytes read into memory
+  need `kCGImageSourceTypeIdentifierHint` (`ImageLoader.sourceOptions`): without it a Sony ARW decodes as an empty
+  TIFF. Checked on ILCE-7M4 ARW: preview decode 0.03 s, faces found, full-size edited export 0.5 s.
+- RAW+JPEG pairs (`ImageLoader.pairKey`: folder + stem, case-insensitive): the scan inserts JPEGs first and makes the
+  RAW `duplicateOf` its JPEG (status done, never processed); a RAW that arrived first is paired when its JPEG comes
+  if it is still pending; one already processed stays on its own. Batch Export's file list drops RAWs whose JPEG is
+  in the list.
+

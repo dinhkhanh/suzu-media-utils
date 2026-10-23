@@ -1,4 +1,4 @@
-# Tính năng của SuZu Media Utils (v0.6.5)
+# Tính năng của SuZu Media Utils (v0.6.6)
 
 Ứng dụng macOS cho SuZu Media: nhận diện và nhóm khuôn mặt trong ảnh/video sự kiện, cùng các công cụ xử lý ảnh
 hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi tiếng qua Amazon, nếu bật).
@@ -80,6 +80,7 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Ghi tên vào file | Ghi tên người vào metadata (IPTC/XMP) để Lightroom, Photo Mechanic, Bridge, Photos đọc được. |
 | Top N và bỏ ảnh trùng | Chỉ xuất N ảnh đẹp nhất mỗi người và ảnh đẹp nhất mỗi loạt. |
 | Quy tắc tự động (Auto Rules) | Khi có file mới khớp điều kiện kiểu album thông minh (ảnh của một người, mọi người có tên, ảnh đơn đẹp nhất của bất kỳ ai, ảnh nhóm, chỉ ảnh/chỉ video…), tự chép vào thư mục (NAS, Google Drive, Dropbox) — mỗi người một thư mục hoặc tất cả vào một thư mục — có thể kèm cân chỉnh thẳng, auto tone, cắt, watermark, đổi cỡ, ghi tên vào metadata, và báo trên Mac. Sửa quy tắc bất kỳ lúc nào. Thư mục đích chưa gắn hoặc lỗi chép thì tự thử lại sau. |
+| Quy tắc bỏ ảnh trùng, ảnh mờ | Trong điều kiện của quy tắc (và tìm kiếm, smart album) có "Skip similar shots" (chỉ ảnh đẹp nhất mỗi loạt; quy tắc chờ đến khi biết loạt của ảnh mới) và "Skip blurry shots" (bỏ ảnh mặt chính mất nét). |
 
 ## Nhóm làm việc (Team) — nhiều máy, nhiều sự kiện
 
@@ -128,6 +129,7 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Mở để chỉnh & xuất | Chuột phải → Open trên ảnh ở mọi màn hình (People, khuôn mặt, khuôn mặt chưa gán, tìm kiếm, smart album) mở cửa sổ "Edit & Export" giống Batch Export với đúng ảnh đó; ⌘-click chọn nhiều ảnh rồi Open để mở tất cả. Video mở bằng ứng dụng mặc định. |
 | Batch Export | Cân màu, cắt khung, watermark, đổi kích thước cho file/thư mục hoặc ảnh của những người đã chọn. Không bao giờ ghi đè: tên đã có thì thêm " (2)". |
 | Chọn ảnh để xuất | Tích/bỏ tích từng ảnh trên dải ảnh hoặc lưới (⇧-click chọn dải, Chọn tất cả / Bỏ chọn tất cả). |
+| File RAW | Nhận file RAW của máy ảnh (Canon, Nikon, Sony, Fujifilm, Olympus, Panasonic, Pentax, Leica, Hasselblad, Phase One, Sigma, DNG…) như ảnh thường: nhận diện, tìm kiếm, xuất, chỉnh (ảnh RAW đã chỉnh xuất ra JPEG). Dùng ảnh xem trước trong file nên không chậm hơn. Chụp RAW+JPEG: file RAW đi kèm JPEG cùng tên, hiện người của JPEG, không xử lý hay xuất riêng. |
 | Bỏ ảnh trùng, ảnh mờ | Tuỳ chọn "Skip similar shots" và "Skip blurry shots" trong Batch Export (file/thư mục): kiểm tra ảnh trước khi xuất rồi bỏ tích ảnh chụp liên tiếp giống nhau (giữ ảnh đẹp nhất) và ảnh mờ (mặt chính mất nét/rung; ảnh không có mặt thì xét cả khung). Rê chuột lên ảnh để xem lý do; tích lại nếu muốn giữ. Copy/Move cũng có "Skip blurry shots". |
 | Nguồn là người | Batch Export, Batch Rename, Video Tools nhận đầu vào là người: N ảnh đẹp nhất, bỏ ảnh trùng, mỗi người một thư mục. |
 | Batch Rename | Đổi tên theo mẫu `{event} {date} {time} {person} {people} {folder} {seq}` có xem trước; thư viện tự cập nhật đường dẫn. |

@@ -159,7 +159,7 @@ public final class SourceMonitor: @unchecked Sendable {
 
     // MARK: - Scan
 
-    struct Known { var id: Int64; var info: FileInfo; var contentKey: String?; var duplicateOf: Int64? }
+    struct Known { var id: Int64; var info: FileInfo; var contentKey: String?; var duplicateOf: Int64?; var status: String }
 
     /// Files registered per transaction: keeps the database writer free for the UI and the processor, and lets
     /// processing start while a big folder is still being registered.
@@ -179,11 +179,11 @@ public final class SourceMonitor: @unchecked Sendable {
         let files = list()
         if cancelled { return }
         guard let known = try? store.db.read({ db in
-            try Row.fetchAll(db, sql: "SELECT id, path, size, mtime, contentKey, duplicateOf FROM media WHERE sourceId = ?",
+            try Row.fetchAll(db, sql: "SELECT id, path, size, mtime, contentKey, duplicateOf, status FROM media WHERE sourceId = ?",
                              arguments: [sourceId])
         }).reduce(into: [String: Known](), { m, r in
             m[r["path"]] = Known(id: r["id"], info: FileInfo(size: r["size"], mtime: r["mtime"]),
-                                 contentKey: r["contentKey"], duplicateOf: r["duplicateOf"])
+                                 contentKey: r["contentKey"], duplicateOf: r["duplicateOf"], status: r["status"])
         }) else { return }
         // An empty listing of a non-empty source is almost always a share hiccup, not a mass delete.
         if files.isEmpty && !known.isEmpty { return }
@@ -249,12 +249,25 @@ public final class SourceMonitor: @unchecked Sendable {
                     WHERE m.duplicateOf IS NULL AND \(Self.sameGroup)
                     """, arguments: [sourceId, sourceId])
             })
+            // A camera shooting RAW+JPEG: the RAW file is its JPEG's companion (shown with the JPEG's faces, never
+            // processed or exported on its own), like a byte-identical copy. JPEGs go in first so a RAW finds its
+            // JPEG whichever order the files were listed in; a RAW whose JPEG arrives later is paired then, as long
+            // as it hasn't been processed on its own meanwhile.
+            var jpegByPair: [String: Int64] = [:]
+            var rawByPair: [String: Known] = [:]
+            for (path, k) in known where k.duplicateOf == nil {
+                let url = URL(fileURLWithPath: path, isDirectory: false)
+                guard !MediaAnalyzer.isVideo(url) else { continue }
+                if ImageLoader.isRaw(url) { rawByPair[ImageLoader.pairKey(path)] = k } else { jpegByPair[ImageLoader.pairKey(path)] = k.id }
+            }
+            let ordered = remaining.filter { !ImageLoader.isRaw(URL(fileURLWithPath: $0.0)) } + remaining.filter { ImageLoader.isRaw(URL(fileURLWithPath: $0.0)) }
             var start = 0
-            while start < remaining.count {
+            while start < ordered.count {
                 if cancelled { return }
-                let batch = remaining[start..<min(start + Self.batchSize, remaining.count)]
+                let batch = ordered[start..<min(start + Self.batchSize, ordered.count)]
                 start += batch.count
                 var rows: [MediaRecord] = []
+                var pairRaws: [(raw: Known, jpegPath: String)] = []
                 for (path, info) in batch {
                     let url = URL(fileURLWithPath: path, isDirectory: false)
                     var m = MediaRecord(sourceId: sourceId, path: path, kind: MediaAnalyzer.isVideo(url) ? .video : .photo,
@@ -264,13 +277,33 @@ public final class SourceMonitor: @unchecked Sendable {
                         m.contentKey = key
                         m.duplicateOf = original
                         m.status = .done
+                    } else if m.kind == .photo, !ImageLoader.isRaw(url), let raw = rawByPair[ImageLoader.pairKey(path)], raw.status == MediaStatus.pending.rawValue {
+                        pairRaws.append((raw, path))
                     }
                     rows.append(m)
                 }
+                var paired = 0
                 try store.db.write { db in
                     for var m in rows { try m.insert(db, onConflict: .ignore) }
+                    // New JPEGs by pair key (ids known now), then the batch's RAWs and the waiting RAWs find theirs.
+                    for m in rows where m.kind == .photo && m.duplicateOf == nil && !ImageLoader.isRaw(m.url) {
+                        if let id = try Int64.fetchOne(db, sql: "SELECT id FROM media WHERE path = ?", arguments: [m.path]) {
+                            jpegByPair[ImageLoader.pairKey(m.path)] = id
+                        }
+                    }
+                    for m in rows where m.kind == .photo && m.duplicateOf == nil && ImageLoader.isRaw(m.url) {
+                        guard let jpeg = jpegByPair[ImageLoader.pairKey(m.path)] else { continue }
+                        try db.execute(sql: "UPDATE media SET duplicateOf = ?, status = 'done' WHERE path = ? AND status = 'pending' AND duplicateOf IS NULL",
+                                       arguments: [jpeg, m.path])
+                        paired += 1
+                    }
+                    for (raw, jpegPath) in pairRaws {
+                        guard let jpegId = try Int64.fetchOne(db, sql: "SELECT id FROM media WHERE path = ?", arguments: [jpegPath]) else { continue }
+                        try db.execute(sql: "UPDATE media SET duplicateOf = ?, status = 'done' WHERE id = ? AND status = 'pending' AND duplicateOf IS NULL",
+                                       arguments: [jpegId, raw.id])
+                    }
                 }
-                if rows.contains(where: { $0.status == .pending }) { onChange(true, []) }
+                if rows.filter({ $0.status == .pending }).count > paired { onChange(true, []) }
             }
 
             for chunk in stride(from: 0, to: settledChanged.count, by: Self.batchSize).map({ Array(settledChanged[$0..<min($0 + Self.batchSize, settledChanged.count)]) }) {

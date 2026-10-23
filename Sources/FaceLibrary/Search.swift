@@ -1,3 +1,4 @@
+import FaceCore
 import Foundation
 import GRDB
 
@@ -17,12 +18,31 @@ public struct MediaQuery: Codable, Hashable, Sendable {
     public var bestThreshold = 0.6
     /// Only the best photo of each burst.
     public var collapseBursts = false
+    /// Leave out photos whose main face is soft (out of focus or moved).
+    public var skipBlurry = false
     /// Solo = exactly one clear face; group = two or more.
     public var crowd = Crowd.any
     /// Only this project's files (nil = every project).
     public var project: Int64?
 
     public init() {}
+
+    /// Queries saved by older versions (smart albums, rules, team logs) lack the newer keys: those keep their defaults.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        people = try c.decodeIfPresent([Int64].self, forKey: .people) ?? []
+        match = try c.decodeIfPresent(PeopleMatch.self, forKey: .match) ?? .all
+        kind = try c.decodeIfPresent(MediaKind.self, forKey: .kind)
+        from = try c.decodeIfPresent(Date.self, forKey: .from)
+        to = try c.decodeIfPresent(Date.self, forKey: .to)
+        sourceId = try c.decodeIfPresent(Int64.self, forKey: .sourceId)
+        bestOnly = try c.decodeIfPresent(Bool.self, forKey: .bestOnly) ?? false
+        bestThreshold = try c.decodeIfPresent(Double.self, forKey: .bestThreshold) ?? 0.6
+        collapseBursts = try c.decodeIfPresent(Bool.self, forKey: .collapseBursts) ?? false
+        skipBlurry = try c.decodeIfPresent(Bool.self, forKey: .skipBlurry) ?? false
+        crowd = try c.decodeIfPresent(Crowd.self, forKey: .crowd) ?? .any
+        project = try c.decodeIfPresent(Int64.self, forKey: .project)
+    }
 }
 
 public struct MediaHit: Identifiable, Hashable, Sendable {
@@ -50,6 +70,13 @@ extension MediaQuery {
             conds.append(match == .all
                 ? "m.id IN (SELECT mediaId FROM face WHERE personId IN (\(ids)) GROUP BY mediaId HAVING COUNT(DISTINCT personId) = \(people.count))"
                 : "m.id IN (SELECT mediaId FROM face WHERE personId IN (\(ids)))")
+        }
+        if skipBlurry {
+            // The biggest face, when big enough to be the subject, decides; no measurement = not blurry.
+            conds.append("""
+                COALESCE((SELECT sf.sharpness FROM face sf WHERE sf.mediaId = m.id AND sf.time IS NULL AND sf.w >= \(ShotCuller.minFaceWidth)
+                          ORDER BY sf.w * sf.h DESC LIMIT 1), 1e9) >= \(ShotCuller.softFaceBelow)
+                """)
         }
         switch crowd {
         case .any: break

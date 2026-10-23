@@ -48,18 +48,20 @@ public final class LibraryService: @unchecked Sendable {
     public func maintain() -> Bool {
         guard processor.queuedCount == 0, (try? pendingCount()) == 0 else { return false }
         if processor.backgroundCount > 0 { return false }
+        let (old, noPrint, wantBursts) = (try? store.db.read { db in
+            (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'done' AND duplicateOf IS NULL AND analysisVersion < ?",
+                              arguments: [BestShot.analysisVersion]) ?? 0,
+             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'done' AND duplicateOf IS NULL AND kind = 'photo' AND featurePrint IS NULL") ?? 0,
+             try DeliveryService.rules(db).contains { $0.enabled && $0.mediaQuery.collapseBursts })
+        }) ?? (0, 0, false)
         // Deliveries first: they're what people are waiting for. Grouping settles ~30 s after a batch, so files
-        // are only delivered once their faces are named.
+        // are only delivered once their faces are named. A rule that skips similar shots waits until the new
+        // photos' bursts are known, or it would deliver every shot of a burst.
         engine.waitUntilIdle()
-        if let report = try? delivery.run(), !report.newFiles.isEmpty {
+        if !(wantBursts && (noPrint > 0 || burstsDirty)), let report = try? delivery.run(), !report.newFiles.isEmpty {
             onDelivered?(report)
             if report.remaining > 0 { return false }
         }
-        let (old, noPrint) = (try? store.db.read { db in
-            (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'done' AND duplicateOf IS NULL AND analysisVersion < ?",
-                              arguments: [BestShot.analysisVersion]) ?? 0,
-             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'done' AND duplicateOf IS NULL AND kind = 'photo' AND featurePrint IS NULL") ?? 0)
-        }) ?? (0, 0)
         if processor.extrasPaused { return false }
         if old > 0 { processor.enqueueUpgrades(limit: 40); burstsDirty = true; return false }
         if noPrint > 0 { processor.enqueueFeaturePrints(limit: 100); burstsDirty = true; return false }

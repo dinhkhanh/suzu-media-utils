@@ -29,7 +29,7 @@ public enum EditPipeline {
         // One read per file (a network share would otherwise send it twice), then decode only as many pixels as the
         // output needs: a 1350 px Instagram crop doesn't need all 33 megapixels.
         guard let data = try? Data(contentsOf: url, options: .uncached),
-              let src = CGImageSourceCreateWithData(data as CFData, nil) else {
+              let src = CGImageSourceCreateWithData(data as CFData, ImageLoader.sourceOptions(for: url) as CFDictionary) else {
             throw Failure.unreadable(url.lastPathComponent)
         }
         let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
@@ -79,6 +79,13 @@ public enum EditPipeline {
                                              kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceShouldCacheImmediately: true]
                 if let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) { return CIImage(cgImage: cg) }
             }
+        }
+        // A RAW file is developed here (seconds per photo, done only for full-size exports); Core Image can't read
+        // its bytes directly.
+        if ImageLoader.isRawSource(src), let long = [w, h].max(), long > 0 {
+            let opts: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: Int(long),
+                                         kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceShouldCacheImmediately: true]
+            return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary).map { CIImage(cgImage: $0) }
         }
         return CIImage(data: data, options: [.applyOrientationProperty: true])
     }
