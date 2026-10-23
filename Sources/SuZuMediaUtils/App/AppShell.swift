@@ -16,6 +16,7 @@ struct AppShell: View {
     @State private var route: AppRoute? = AppShell.startRoute
     @State private var path = NavigationPath()
     @EnvironmentObject var faces: FaceGroupingModel
+    @Environment(\.openWindow) private var openWindow
 
     /// SUZU_START_ROUTE=people | unassigned | search | rules | album.<id> | tool.<name> (testing): open the app on that screen.
     static var startRoute: AppRoute {
@@ -56,6 +57,13 @@ struct AppShell: View {
         .onChange(of: faces.currentProject) {
             path = NavigationPath()
             if case .faces(let r) = route, r != .people, r != .unassigned, r != .search, r != .rules { route = .faces(.people) }
+        }
+        // SUZU_START_EDIT=/a.jpg:/b.jpg (testing): open those photos in the Edit & Export window at once.
+        .task {
+            if let p = ProcessInfo.processInfo.environment["SUZU_START_EDIT"], !p.isEmpty {
+                try? await Task.sleep(for: .seconds(1))
+                openWindow.edit(p.split(separator: ":").map(String.init))
+            }
         }
         .sheet(isPresented: $faces.askNewProject) { NewProjectSheet() }
         .sheet(isPresented: $faces.askShareTeam) { ShareTeamSheet() }

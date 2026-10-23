@@ -122,7 +122,9 @@ struct ToolInputView: View {
         .onChange(of: files) { if mode == 0 { items = fileItems() } }
         .onChange(of: mode) { mode == 0 ? (items = fileItems()) : resolve() }
         .task(id: "\(chosen.sorted())|\(topN ?? 0)|\(bestOfBurst)|\(faces.currentProject ?? 0)|\(faces.sessionRange.map { "\($0)" } ?? "")") {
-            if mode == 1 { resolve() } else { items = fileItems() }
+            // Runs on appear too: with no files chosen here, the items are the ones handed in (photos opened from
+            // the library) and stay.
+            if mode == 1 { resolve() } else if !files.isEmpty { items = fileItems() }
         }
         .task(id: "\(files.hashValue)|\(faces.currentProject != nil && !faces.sessions.isEmpty)") { await readDates() }
         // People of another project aren't in this one.
