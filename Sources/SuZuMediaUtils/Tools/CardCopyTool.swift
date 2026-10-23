@@ -75,6 +75,8 @@ struct CardCopyTool: View {
         o.verify = verify
         o.perHandover = perHandover
         o.keepLayout = keepLayout
+        // A hand-over interrupted (card pulled, destination gone, Cancel) goes on in its folder.
+        if let last = card.outcome, last.interruption != nil, last.folder.path.hasPrefix(destination.path + "/") { o.folder = last.folder }
         let project = addToProject ? faces.currentProject : nil
         model.copy(card.id, options: o, store: store) { outcome in
             if let project, !outcome.copied.isEmpty || !outcome.skipped.isEmpty {
@@ -126,7 +128,10 @@ struct CardRow: View {
 
     @ViewBuilder
     var status: some View {
-        if card.planning {
+        if card.gone {
+            Text(card.copying ? "The card was removed." : card.outcome?.interruption == nil ? "The card was removed." : "The card was removed. Put it back to go on.")
+                .foregroundStyle(.orange)
+        } else if card.planning {
             HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Looking at the card…").foregroundStyle(.secondary) }
         } else if card.copying {
             VStack(alignment: .leading, spacing: 4) {
@@ -178,10 +183,17 @@ struct CardRow: View {
     func outcomeText(_ o: CardCopier.Outcome) -> String {
         let took = Int(o.finished.timeIntervalSince(o.started).rounded())
         let time = took >= 60 ? "\(took / 60) min \(took % 60) s" : "\(took) s"
-        var s = o.cancelled ? "Stopped: copied " : "Copied "
+        var s = switch o.interruption {
+        case .cancelled: "Stopped: copied "
+        case .cardRemoved: "The card was removed in the middle of the copy: "
+        case .destinationLost: "The destination went away in the middle of the copy: "
+        case nil: "Copied "
+        }
         s += "\(o.copied.count) files (\(o.bytes.formatted(.byteCount(style: .file))))"
         if !o.skipped.isEmpty { s += ", \(o.skipped.count) already there" }
-        return s + " in \(time)"
+        s += " in \(time)"
+        if o.interruption != nil, o.interruption != .cancelled { s += ". Those are safe; the rest is still new and goes on in the same folder." }
+        return s
     }
 
     @ViewBuilder
@@ -241,6 +253,8 @@ final class CardCopyModel: ObservableObject {
         var progress = CardCopier.Progress()
         var outcome: CardCopier.Outcome?
         var error: String?
+        /// Unmounted while it was being copied, or after an interrupted copy: kept on screen so the result shows.
+        var gone = false
         var id: String { identity.uuid }
     }
 
@@ -291,10 +305,25 @@ final class CardCopyModel: ObservableObject {
                 sync?.syncNow()
                 return Self.volumes.compactMap { CardCopier.identify($0) }
             }.value
-            // Cards being copied keep their state; the others start over.
+            // Cards being copied keep their state; the others start over, keeping an interrupted copy's result so
+            // the next copy goes on in its folder. A card pulled in the middle of its copy stays on screen.
             var next: [Card] = []
             for id in found {
-                if busy.contains(id.uuid), let c = cards.first(where: { $0.id == id.uuid }) { next.append(c) } else { next.append(Card(identity: id)) }
+                if busy.contains(id.uuid), let c = cards.first(where: { $0.id == id.uuid }) {
+                    var kept = c
+                    kept.gone = false
+                    next.append(kept)
+                } else {
+                    var c = Card(identity: id)
+                    if let before = cards.first(where: { $0.id == id.uuid })?.outcome, before.interruption != nil { c.outcome = before }
+                    next.append(c)
+                }
+            }
+            for c in cards where !found.contains(where: { $0.uuid == c.id }) && (c.copying || c.outcome != nil) {
+                var g = c
+                g.gone = true
+                g.planning = false
+                next.append(g)
             }
             cards = next
             known = (try? CardCopier.knownCards(store: store)) ?? []
@@ -344,7 +373,12 @@ final class CardCopyModel: ObservableObject {
             cards[i].copying = false
             cards[i].outcome = outcome
             done(outcome)
-            plan(id, store: store)
+            if outcome.interruption == .cardRemoved || cards[i].gone || !cards[i].identity.isReachable {
+                cards[i].gone = true
+                cards[i].plan = nil
+            } else {
+                plan(id, store: store)
+            }
         }
     }
 

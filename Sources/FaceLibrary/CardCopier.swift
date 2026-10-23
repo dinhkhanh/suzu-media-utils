@@ -62,7 +62,13 @@ public enum CardCopier {
         public var cameraMake: String?
         public var cameraModel: String?
         public var cameraSerial: String?
+        /// A mounted volume (a card), as against a folder standing in for one.
+        public var isVolume = false
         public init(uuid: String, volume: URL, volumeName: String) { self.uuid = uuid; self.volume = volume; self.volumeName = volumeName }
+
+        /// Still there? A pulled card's mount point can linger as an empty folder for a moment, so a volume counts
+        /// as reachable only while something is mounted at it.
+        public var isReachable: Bool { CardCopier.reachable(volume, volume: isVolume) }
     }
 
     /// Mounted removable or ejectable volumes that look like camera cards (a DCIM or PRIVATE folder, or media files
@@ -109,6 +115,7 @@ public enum CardCopier {
         }
         guard let uuid else { return nil }
         var id = Identity(uuid: uuid, volume: root, volumeName: (isMountRoot ? v?.volumeName : nil) ?? root.lastPathComponent)
+        id.isVolume = isMountRoot
         id.capacity = v?.volumeTotalCapacity.map(Int64.init)
         id.available = v?.volumeAvailableCapacity.map(Int64.init)
         if let photo = firstPhoto(on: root), let src = try? ImageLoader.source(photo).0,
@@ -267,7 +274,18 @@ public enum CardCopier {
         public var perHandover = true
         /// Keep the card's folders (DCIM/100CANON/…) instead of putting the files side by side.
         public var keepLayout = false
+        /// Go on in this hand-over's folder (one whose copy was interrupted) instead of starting a new one.
+        public var folder: URL?
         public init(destination: URL) { self.destination = destination }
+    }
+
+    /// Why a copy stopped before the end. What landed is recorded; the rest stays new for the next time.
+    public enum Interruption: Sendable, Equatable {
+        case cancelled
+        /// The card was pulled, or its reader unplugged, in the middle of the copy.
+        case cardRemoved
+        /// The destination (a NAS share, an external disk) went away.
+        case destinationLost
     }
 
     public struct Progress: Sendable {
@@ -288,7 +306,8 @@ public enum CardCopier {
         public var skipped: [String] = []
         public var failed: [(file: String, reason: String)] = []
         public var bytes: Int64 = 0
-        public var cancelled = false
+        public var interruption: Interruption?
+        public var cancelled: Bool { interruption == .cancelled }
         public var started = Date()
         public var finished = Date()
     }
@@ -309,12 +328,14 @@ public enum CardCopier {
     /// `verify` read back and compared), given the original's modification time and then its final name, and
     /// recorded in the ledger as it lands. A file that already sits at the destination with the same contents is
     /// recorded, not copied again; one with the same name and other contents gets a numbered name. Files matched
-    /// by contents while planning are recorded too, so the next look at the card is quick.
+    /// by contents while planning are recorded too, so the next look at the card is quick. A card pulled in the
+    /// middle, or a destination that goes away, stops the copy at once (`interruption`): the files that landed are
+    /// recorded, the rest stays new, and the next copy can go on in the same folder (`Options.folder`).
     public static func copy(_ plan: Plan, options: Options, store: LibraryStore,
                             progress: (Progress) -> Void = { _ in }, isCancelled: () -> Bool = { false }) -> Outcome {
         let fm = FileManager.default
         let cardFolder = options.destination.appendingPathComponent(cardFolderName(plan.card), isDirectory: true)
-        let folder = options.perHandover ? cardFolder.appendingPathComponent(handoverName(Date()), isDirectory: true) : cardFolder
+        let folder = options.folder ?? (options.perHandover ? cardFolder.appendingPathComponent(handoverName(Date()), isDirectory: true) : cardFolder)
         var out = Outcome(folder: folder, cardFolder: cardFolder)
         var p = Progress(total: plan.new.count, bytesTotal: plan.newBytes)
         let cardId = plan.card.id!
@@ -322,7 +343,8 @@ public enum CardCopier {
             try? record(f, key: m.key, sha: nil, to: m.to, cardId: cardId, store: store)
         }
         for f in plan.new {
-            if isCancelled() { out.cancelled = true; break }
+            if isCancelled() { out.interruption = .cancelled; break }
+            if !plan.identity.isReachable { out.interruption = .cardRemoved; break }
             p.current = f.name
             progress(p)
             let src = plan.identity.volume.appendingPathComponent(f.relPath)
@@ -352,9 +374,20 @@ public enum CardCopier {
                     out.bytes += size
                 }
             } catch CopyError.cancelled {
-                out.cancelled = true
+                out.interruption = .cancelled
                 break
             } catch {
+                // A file that failed because the card or the destination is gone is not a failed file: it is
+                // still new, and the copy goes on when they are back. The system takes a moment to finish
+                // unmounting a pulled card, so look twice.
+                var gone = !plan.identity.isReachable, lost = !reachable(options.destination, volume: false)
+                if !gone, !lost {
+                    Thread.sleep(forTimeInterval: 0.5)
+                    gone = !plan.identity.isReachable
+                    lost = !reachable(options.destination, volume: false)
+                }
+                if gone { out.interruption = .cardRemoved; break }
+                if lost { out.interruption = .destinationLost; break }
                 out.failed.append((f.relPath, error.localizedDescription))
             }
             p.done += 1
@@ -368,6 +401,15 @@ public enum CardCopier {
         }
         out.finished = Date()
         return out
+    }
+
+    /// Whether the card (or the destination) is still there. A volume is there while something is mounted at its
+    /// path; a folder (a destination, or a folder standing in for a card) while it exists and its volume answers.
+    static func reachable(_ url: URL, volume: Bool) -> Bool {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue,
+              let v = try? url.resourceValues(forKeys: [.volumeURLKey]), let mount = v.volume else { return false }
+        return !volume || mount.standardizedFileURL.path == url.standardizedFileURL.path
     }
 
     enum CopyError: LocalizedError {

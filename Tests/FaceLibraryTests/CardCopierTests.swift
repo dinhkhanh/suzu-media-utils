@@ -176,4 +176,42 @@ final class CardCopierTests: XCTestCase {
         XCTAssertEqual(left.count, o.copied.count)
         XCTAssertEqual(try plan().new.count, 5 - o.copied.count)
     }
+    func testACardPulledInTheMiddleStopsTheCopyAndTheRestGoesOnInTheSameFolderLater() throws {
+        for i in 1...5 { try shoot("IMG_000\(i).JPG", seed: UInt8(i)) }
+        let parked = tmp.appendingPathComponent("PARKED")
+        let first = CardCopier.copy(try plan(), options: options(), store: store, progress: { p in
+            // Pulled after the second file landed.
+            if p.done == 2, FileManager.default.fileExists(atPath: card.path) { try? FileManager.default.moveItem(at: card, to: parked) }
+        })
+        XCTAssertEqual(first.interruption, .cardRemoved)
+        XCTAssertFalse(first.cancelled)
+        XCTAssertEqual(first.copied.count, 2)
+        XCTAssertTrue(first.failed.isEmpty, "a missing card is not a list of failed files")
+        let left = try FileManager.default.contentsOfDirectory(atPath: first.folder.path)
+        XCTAssertEqual(left.sorted(), ["IMG_0001.JPG", "IMG_0002.JPG"])
+        XCTAssertEqual(try CardCopier.knownCards(store: store).first?.files, 2)
+
+        // Back in the reader: the rest is new, and goes on in the same hand-over's folder.
+        try FileManager.default.moveItem(at: parked, to: card)
+        let again = try plan()
+        XCTAssertEqual(again.new.map(\.name), ["IMG_0003.JPG", "IMG_0004.JPG", "IMG_0005.JPG"])
+        var o = options()
+        o.folder = first.folder
+        let second = CardCopier.copy(again, options: o, store: store)
+        XCTAssertNil(second.interruption)
+        XCTAssertEqual(second.folder, first.folder)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: first.folder.path).count, 5)
+        XCTAssertTrue(try plan().new.isEmpty)
+    }
+
+    func testADestinationThatGoesAwayStopsTheCopy() throws {
+        for i in 1...3 { try shoot("IMG_000\(i).JPG", seed: UInt8(i)) }
+        let o = CardCopier.copy(try plan(), options: options(), store: store, progress: { p in
+            if p.done == 1 { try? FileManager.default.removeItem(at: dest) }
+        })
+        XCTAssertEqual(o.interruption, .destinationLost)
+        XCTAssertEqual(o.copied.count, 1)
+        XCTAssertTrue(o.failed.isEmpty)
+        XCTAssertEqual(try plan().new.count, 2)
+    }
 }

@@ -447,3 +447,9 @@ and after every feature below; same 92 people.
   destination's free space, and can add the card's folder to the open project (`addCopiedFolder`, skipped when a
   library folder already holds it). Cards seen before can be named or forgotten. `SUZU_CARD_VOLUMES=/a:/b` stands
   folders in for cards when testing.
+- A card pulled in the middle of a copy (or a destination that goes away) stops the copy at once
+  (`Outcome.interruption`): the file under way is dropped with its temporary name, what landed is recorded, the rest
+  stays new, and nothing is listed as failed. A volume counts as reachable only while something is mounted at its
+  path (a pulled card's mount point lingers for a moment), checked again after half a second on any error. The Cards
+  screen keeps the pulled card's row with the result, and when the card is back `Options.folder` continues the same
+  hand-over's folder instead of starting another.

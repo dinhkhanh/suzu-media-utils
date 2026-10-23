@@ -122,7 +122,8 @@ streamed through SHA-256 and read back, keep the original's times, and the card'
 project so faces are found as the files land. A card seen before can be forgotten (right-click) to copy it all again.
 In a team the ledger travels with the shared folder: a card copied on one Mac is known on every teammate's Mac, so
 the next hand-over can go to whichever Mac is free, through any reader or adapter (the card's own UUID is what
-counts).
+counts). A card pulled in the middle of a copy stops it at once: what landed is kept and recorded, nothing half
+written is left behind, and when the card is back the copy goes on in the same folder.
 
 ### Copy Verifier
 Checks that a copy (memory card → NAS, NAS → backup) is complete — missing, truncated or damaged files (contents are
