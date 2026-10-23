@@ -22,6 +22,8 @@ public struct CardRecord: Codable, FetchableRecord, MutablePersistableRecord, Id
     public var firstSeenAt: Date
     public var lastCopiedAt: Date?
     public var lastCopiedTo: String?
+    /// When the label was given (the newest wins between teammates' Macs).
+    public var labelAt: Double?
     public mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
 
     /// What to call the card: its label, else the volume name, else the camera.
@@ -137,17 +139,38 @@ public enum CardCopier {
         public var name: String { (relPath as NSString).lastPathComponent }
     }
 
-    /// Every photo, video and sidecar on the card, by path relative to its root.
+    /// Folders of thumbnails the camera keeps for its own screen (Sony THMBNL): not photos.
+    static let skippedFolders: Set<String> = ["THMBNL", "THMBNL_"]
+
+    /// Every photo, video and sidecar on the card, by path relative to its root. A clip's XML (Sony C0001M01.XML,
+    /// Canon, Panasonic) goes with it: an .xml whose name starts with a media file's name in the same folder.
     public static func listFiles(on root: URL) -> [File] {
         let base = root.standardizedFileURL.path
-        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey, .isDirectoryKey]
         guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles]) else { return [] }
         var out: [File] = []
+        var xmls: [File] = []
+        var mediaStems: [String: [String]] = [:]  // folder → media names without extension (upper-cased)
         for case let u as URL in e {
-            guard extensions.contains(u.pathExtension.lowercased()),
-                  let v = try? u.resourceValues(forKeys: keys), v.isRegularFile == true else { continue }
+            guard let v = try? u.resourceValues(forKeys: keys) else { continue }
+            if v.isDirectory == true {
+                if skippedFolders.contains(u.lastPathComponent.uppercased()) { e.skipDescendants() }
+                continue
+            }
+            guard v.isRegularFile == true else { continue }
             let rel = String(u.standardizedFileURL.path.dropFirst(base.count + 1))
-            out.append(File(relPath: rel, size: Int64(v.fileSize ?? 0), mtime: v.contentModificationDate ?? .distantPast))
+            let f = File(relPath: rel, size: Int64(v.fileSize ?? 0), mtime: v.contentModificationDate ?? .distantPast)
+            let ext = u.pathExtension.lowercased()
+            if ext == "xml" {
+                xmls.append(f)
+            } else if extensions.contains(ext) {
+                out.append(f)
+                mediaStems[(rel as NSString).deletingLastPathComponent, default: []].append(u.deletingPathExtension().lastPathComponent.uppercased())
+            }
+        }
+        for x in xmls {
+            let stem = (x.name as NSString).deletingPathExtension.uppercased()
+            if mediaStems[(x.relPath as NSString).deletingLastPathComponent]?.contains(where: { stem.hasPrefix($0) }) == true { out.append(x) }
         }
         return out.sorted { $0.relPath.localizedStandardCompare($1.relPath) == .orderedAscending }
     }
@@ -161,8 +184,11 @@ public enum CardCopier {
         public var files: [File] = []
         /// Not copied yet, from any card, and not in the library either.
         public var new: [File] = []
-        /// Copied from this or another card before (same path, size and time; else same contents).
+        /// Copied from this or another card before (same path, size and time; else same contents), here or on a
+        /// teammate's Mac.
         public var copiedBefore: [File] = []
+        /// How many of those were copied on a teammate's Mac (the ledger came through the team).
+        public var copiedElsewhere = 0
         /// Not in the ledger, but the library has a file with the same contents: copied by hand some other way.
         public var inLibrary: [File] = []
         /// Matched by contents rather than by path and time: recorded on the next copy so the quick check finds them.
@@ -179,11 +205,11 @@ public enum CardCopier {
         let card = try store.db.write { db in try upsert(identity, db: db) }
         var plan = Plan(card: card, identity: identity)
         plan.files = listFiles(on: identity.volume)
-        struct Known { var size: Int64; var mtime: Double; var key: String }
+        struct Known { var size: Int64; var mtime: Double; var key: String; var elsewhere: Bool }
         let known: [String: Known] = try store.db.read { db in
             var out: [String: Known] = [:]
-            for r in try Row.fetchAll(db, sql: "SELECT relPath, size, mtime, contentKey FROM cardFile WHERE cardId = ?", arguments: [card.id]) {
-                out[r["relPath"]] = Known(size: r["size"], mtime: r["mtime"], key: r["contentKey"])
+            for r in try Row.fetchAll(db, sql: "SELECT relPath, size, mtime, contentKey, device FROM cardFile WHERE cardId = ?", arguments: [card.id]) {
+                out[r["relPath"]] = Known(size: r["size"], mtime: r["mtime"], key: r["contentKey"], elsewhere: (r["device"] as String?) != nil)
             }
             return out
         }
@@ -191,17 +217,19 @@ public enum CardCopier {
             if isCancelled() { break }
             if let k = known[f.relPath], k.size == f.size, abs(k.mtime - f.mtime.timeIntervalSince1970) <= mtimeTolerance {
                 plan.copiedBefore.append(f)
+                if k.elsewhere { plan.copiedElsewhere += 1 }
                 continue
             }
             guard let key = ContentKey.compute(identity.volume.appendingPathComponent(f.relPath), size: f.size) else { plan.new.append(f); continue }
             plan.keys[f.relPath] = key
-            let (ledger, library): (String?, String?) = try store.db.read { db in
-                let l = try Row.fetchOne(db, sql: "SELECT copiedTo FROM cardFile WHERE contentKey = ? ORDER BY copiedAt DESC LIMIT 1", arguments: [key])
+            let (ledger, elsewhere, library): (String?, Bool, String?) = try store.db.read { db in
+                let l = try Row.fetchOne(db, sql: "SELECT copiedTo, device FROM cardFile WHERE contentKey = ? ORDER BY copiedAt DESC LIMIT 1", arguments: [key])
                 let m = try String.fetchOne(db, sql: "SELECT path FROM media WHERE contentKey = ? LIMIT 1", arguments: [key])
-                return (l.map { ($0["copiedTo"] as String?) ?? "" }, m)
+                return (l.map { ($0["copiedTo"] as String?) ?? "" }, (l?["device"] as String?) != nil, m)
             }
             if let ledger {
                 plan.copiedBefore.append(f)
+                if elsewhere { plan.copiedElsewhere += 1 }
                 plan.matched[f] = (key, ledger.isEmpty ? nil : ledger)
             } else if let library {
                 plan.inLibrary.append(f)
@@ -420,7 +448,9 @@ public enum CardCopier {
 
     public static func setLabel(_ label: String, card id: Int64, store: LibraryStore) throws {
         let l = label.trimmingCharacters(in: .whitespaces)
-        try store.db.write { db in try db.execute(sql: "UPDATE card SET label = ? WHERE id = ?", arguments: [l.isEmpty ? nil : l, id]) }
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE card SET label = ?, labelAt = ? WHERE id = ?", arguments: [l.isEmpty ? nil : l, Date().timeIntervalSince1970, id])
+        }
     }
 
     /// Forgets the card and everything copied from it: the next hand-over copies all of it again.

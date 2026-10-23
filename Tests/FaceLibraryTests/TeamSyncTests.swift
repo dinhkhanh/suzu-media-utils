@@ -450,6 +450,53 @@ final class TeamSyncTests: XCTestCase {
         XCTAssertEqual(try b.store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM personRemote") }, 0)
         XCTAssertEqual(try b.sync.teams().count, 0)
     }
+
+    /// A card copied on one Mac is known on the teammates' Macs: handed over to another Mac next time, only what
+    /// was shot since is copied; names given to cards travel too.
+    func testACardCopiedOnOneMacIsKnownOnTheOthers() throws {
+        try a.sync.create(name: "SuZu", folder: shared, project: a.project)
+        try joinAsTeammate()
+        let card = tmp.appendingPathComponent("CARD", isDirectory: true)
+        try FileManager.default.createDirectory(at: card.appendingPathComponent("DCIM/100CANON"), withIntermediateDirectories: true)
+        func shoot(_ name: String, seed: UInt8) throws {
+            try Data((0..<2000).map { UInt8(truncatingIfNeeded: $0 &* Int(seed) &+ Int(seed)) }).write(to: card.appendingPathComponent("DCIM/100CANON/\(name)"))
+        }
+        try shoot("IMG_0001.JPG", seed: 1); try shoot("IMG_0002.JPG", seed: 2)
+        let identity = try XCTUnwrap(CardCopier.identify(card))
+        let planA = try CardCopier.plan(identity, store: a.store)
+        XCTAssertEqual(planA.new.count, 2)
+        let outA = CardCopier.copy(planA, options: CardCopier.Options(destination: tmp.appendingPathComponent("A-dest")), store: a.store)
+        XCTAssertEqual(outA.copied.count, 2)
+        try CardCopier.setLabel("Nam R5", card: planA.card.id!, store: a.store)
+        exchange()
+
+        // The card goes to B next time, with one more photo on it.
+        try shoot("IMG_0003.JPG", seed: 3)
+        let planB = try CardCopier.plan(identity, store: b.store)
+        XCTAssertEqual(planB.new.map(\.name), ["IMG_0003.JPG"])
+        XCTAssertEqual(planB.copiedBefore.count, 2)
+        XCTAssertEqual(planB.copiedElsewhere, 2)
+        XCTAssertEqual(planB.card.displayName, "Nam R5")
+        let outB = CardCopier.copy(planB, options: CardCopier.Options(destination: tmp.appendingPathComponent("B-dest")), store: b.store)
+        XCTAssertEqual(outB.copied.count, 1)
+        XCTAssertEqual(outB.cardFolder.lastPathComponent, "Nam R5")
+        exchange()
+
+        // And back to A: nothing new; B's entry came through the team, not an echo of A's own.
+        let again = try CardCopier.plan(identity, store: a.store)
+        XCTAssertTrue(again.new.isEmpty)
+        XCTAssertEqual(again.copiedBefore.count, 3)
+        XCTAssertEqual(again.copiedElsewhere, 1)
+        let mineOnA = try a.store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM cardFile WHERE device IS NULL")! }
+        let mineOnB = try b.store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM cardFile WHERE device IS NULL")! }
+        XCTAssertEqual(mineOnA, 2)
+        XCTAssertEqual(mineOnB, 1)
+        // A rename on B wins on A, being newer.
+        try CardCopier.setLabel("Nam R5 card 1", card: planB.card.id!, store: b.store)
+        exchange()
+        XCTAssertEqual(try CardCopier.knownCards(store: a.store).first?.card.displayName, "Nam R5 card 1")
+    }
+
 }
 
 /// Rules with smart-album triggers (any file, solo shots, best shots…) and flat or per-person folders.

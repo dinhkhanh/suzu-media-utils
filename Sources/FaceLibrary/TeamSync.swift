@@ -311,6 +311,27 @@ public final class TeamSync: @unchecked Sendable {
         var count: Int?
         /// session, rule: the project's stable id (older logs: none = the team's first project).
         var project: String?
+        /// card: a memory card (uuid = its volume UUID, name = its label, at = when the label was given).
+        var card: CardPayload?
+        /// cardFile: one file copied from a card (uuid = the card's, at = when it was copied).
+        var file: CardFilePayload?
+    }
+
+    struct CardPayload: Codable {
+        var volume: String?
+        var make: String?
+        var model: String?
+        var serial: String?
+        var seen: Double
+    }
+
+    struct CardFilePayload: Codable {
+        var path: String
+        var size: Int64
+        var mtime: Double
+        var key: String
+        var sha: String?
+        var to: String?
     }
 
     struct RulePayload: Codable {
@@ -407,6 +428,30 @@ public final class TeamSync: @unchecked Sendable {
                 updates["pub:rule:\(rule.uuid)"] = value
             }
         }
+        // Memory cards and what was copied from them, so a card handed to a teammate's Mac next time is known there.
+        for c in try store.db.read({ db in try CardRecord.fetchAll(db) }) {
+            let at = c.labelAt ?? c.firstSeenAt.timeIntervalSince1970
+            let value = "\(at)|\(c.label ?? "")|\(c.volumeName ?? "")|\(c.camera ?? "")|\(c.cameraSerial ?? "")"
+            if state["pub:card:\(c.uuid)"] != value {
+                ops.append(Op(t: "card", at: at, uuid: c.uuid, name: c.label,
+                              card: CardPayload(volume: c.volumeName, make: c.cameraMake, model: c.cameraModel, serial: c.cameraSerial,
+                                                seen: c.firstSeenAt.timeIntervalSince1970)))
+                updates["pub:card:\(c.uuid)"] = value
+            }
+        }
+        let fileCursor = Int64(state["pub:cardFiles"] ?? "0") ?? 0
+        let files = try store.db.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT f.id, c.uuid, f.relPath, f.size, f.mtime, f.contentKey, f.sha256, f.copiedAt, f.copiedTo FROM cardFile f
+                JOIN card c ON c.id = f.cardId WHERE f.device IS NULL AND f.id > ? ORDER BY f.id
+                """, arguments: [fileCursor])
+        }
+        for r in files {
+            let copiedAt: Date = r["copiedAt"]
+            ops.append(Op(t: "cardFile", at: copiedAt.timeIntervalSince1970, uuid: r["uuid"],
+                          file: CardFilePayload(path: r["relPath"], size: r["size"], mtime: r["mtime"], key: r["contentKey"], sha: r["sha256"], to: r["copiedTo"])))
+        }
+        if let last = files.last { updates["pub:cardFiles"] = String(last["id"] as Int64) }
         var wrote = false
         if !ops.isEmpty {
             try append(ops, to: Self.devicesURL(team.url).appendingPathComponent("\(deviceId).jsonl"))
@@ -731,6 +776,43 @@ public final class TeamSync: @unchecked Sendable {
                 try rule.update(db)
                 if rule.deletedAt != nil { try db.execute(sql: "DELETE FROM delivery WHERE ruleId = ?", arguments: [rule.id]) }
             }
+            return .applied(people: [], remote: [])
+
+        case "card":
+            guard let uuid = op.uuid, let p = op.card else { return .ignored }
+            if let c = try CardRecord.filter(Column("uuid") == uuid).fetchOne(db) {
+                var changed = false
+                var card = c
+                if card.volumeName == nil, let v = p.volume { card.volumeName = v; changed = true }
+                if card.cameraMake == nil, let v = p.make { card.cameraMake = v; changed = true }
+                if card.cameraModel == nil, let v = p.model { card.cameraModel = v; changed = true }
+                if card.cameraSerial == nil, let v = p.serial { card.cameraSerial = v; changed = true }
+                if op.at > (card.labelAt ?? 0), op.name != card.label { card.label = op.name; card.labelAt = op.at; changed = true }
+                guard changed else { return .ignored }
+                try card.update(db)
+                return .applied(people: [], remote: [])
+            }
+            var card = CardRecord(uuid: uuid, label: op.name, volumeName: p.volume, cameraMake: p.make, cameraModel: p.model,
+                                  cameraSerial: p.serial, firstSeenAt: Date(timeIntervalSince1970: p.seen))
+            card.labelAt = op.name == nil ? nil : op.at
+            try card.insert(db)
+            return .applied(people: [], remote: [])
+
+        case "cardFile":
+            guard let uuid = op.uuid, let f = op.file else { return .ignored }
+            let cardId: Int64
+            if let id = try Int64.fetchOne(db, sql: "SELECT id FROM card WHERE uuid = ?", arguments: [uuid]) {
+                cardId = id
+            } else {
+                var card = CardRecord(uuid: uuid, firstSeenAt: Date(timeIntervalSince1970: op.at))
+                try card.insert(db)
+                cardId = card.id!
+            }
+            // A copy made here of the same file keeps its own entry (and stays published).
+            try db.execute(sql: """
+                INSERT INTO cardFile (cardId, relPath, size, mtime, contentKey, sha256, copiedAt, copiedTo, device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cardId, relPath, contentKey) DO NOTHING
+                """, arguments: [cardId, f.path, f.size, f.mtime, f.key, f.sha, Date(timeIntervalSince1970: op.at), f.to, device])
             return .applied(people: [], remote: [])
 
         case "summary":

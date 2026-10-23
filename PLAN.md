@@ -437,7 +437,11 @@ and after every feature below; same 92 people.
   `verify`), keeps the mtime, renames it, and records it as it lands; same-name-other-contents gets `_1`, same
   contents already there is recorded, not copied; files matched by contents while planning are recorded too.
   Destination: `<dest>/<card name>/<yyyy-MM-dd HH.mm>/` (a folder per hand-over, optional), flat or with the card's
-  folders. The ledger is per Mac (not team-synced).
+  folders. The ledger travels with the team: `TeamSync` publishes `card` ops (label, volume name, camera; newest
+  label wins by `labelAt`) and `cardFile` ops for entries made here (`device IS NULL`, past the `pub:cardFiles`
+  cursor); a teammate's entries are inserted with their `device`, so they are counted ("copied on a teammate's
+  Mac") but never republished. The Cards screen runs a sync pass before planning, so a card copied on another Mac
+  a minute ago is known here.
 - `CardCopyTool` lists mounted removable/ejectable volumes with DCIM/PRIVATE (or media at the root), looks again on
   mount/unmount, plans each card off the main thread, copies one card at a time with progress and Cancel, checks the
   destination's free space, and can add the card's folder to the open project (`addCopiedFolder`, skipped when a

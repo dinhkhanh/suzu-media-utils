@@ -120,6 +120,9 @@ hand, are matched by contents and not copied twice. Each card gets its own folde
 "Nam R5 card 1"; the camera and body serial come from EXIF), with a folder per hand-over if you like; copies are
 streamed through SHA-256 and read back, keep the original's times, and the card's folder can be added to the open
 project so faces are found as the files land. A card seen before can be forgotten (right-click) to copy it all again.
+In a team the ledger travels with the shared folder: a card copied on one Mac is known on every teammate's Mac, so
+the next hand-over can go to whichever Mac is free, through any reader or adapter (the card's own UUID is what
+counts).
 
 ### Copy Verifier
 Checks that a copy (memory card → NAS, NAS → backup) is complete — missing, truncated or damaged files (contents are

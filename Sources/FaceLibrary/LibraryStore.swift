@@ -331,6 +331,12 @@ public final class LibraryStore: @unchecked Sendable {
                 t.uniqueKey(["cardId", "relPath", "contentKey"])
             }
         }
+        m.registerMigration("v13-cards-sync") { db in
+            /// The ledger travels with the team: `device` is the teammate's Mac an entry came from (nil = copied
+            /// here, and so published); `labelAt` lets the newest name win.
+            try db.execute(sql: "ALTER TABLE cardFile ADD COLUMN device TEXT")
+            try db.execute(sql: "ALTER TABLE card ADD COLUMN labelAt DOUBLE")
+        }
         return m
     }
 }

@@ -50,7 +50,7 @@ struct CardCopyTool: View {
                 HStack {
                     Text("Cards")
                     Spacer()
-                    Button("Look Again") { model.refresh(store: faces.store) }.controlSize(.small).disabled(model.looking)
+                    Button("Look Again") { model.refresh(store: faces.store, sync: faces.service?.teamSync) }.controlSize(.small).disabled(model.looking)
                 }
             }
             let others = model.known.filter { k in !model.cards.contains { $0.identity.uuid == k.card.uuid } }
@@ -65,8 +65,8 @@ struct CardCopyTool: View {
         .formStyle(.grouped)
         .navigationTitle("Copy from Cards")
         .navigationSubtitle("Only what was shot since the last hand-over")
-        .task { model.refresh(store: faces.store) }
-        .onChange(of: faces.store == nil) { model.refresh(store: faces.store) }
+        .task { model.refresh(store: faces.store, sync: faces.service?.teamSync) }
+        .onChange(of: faces.store == nil) { model.refresh(store: faces.store, sync: faces.service?.teamSync) }
     }
 
     func copy(_ card: CardCopyModel.Card) {
@@ -165,7 +165,11 @@ struct CardRow: View {
     func summary(_ p: CardCopier.Plan) -> String {
         var parts: [String] = []
         parts.append(p.new.isEmpty ? "Nothing new" : "\(p.new.count) new · \(p.newBytes.formatted(.byteCount(style: .file)))")
-        if !p.copiedBefore.isEmpty { parts.append("\(p.copiedBefore.count) copied before") }
+        if !p.copiedBefore.isEmpty {
+            parts.append(p.copiedElsewhere == 0 ? "\(p.copiedBefore.count) copied before"
+                         : p.copiedElsewhere == p.copiedBefore.count ? "\(p.copiedBefore.count) copied on a teammate's Mac"
+                         : "\(p.copiedBefore.count) copied before (\(p.copiedElsewhere) on a teammate's Mac)")
+        }
         if !p.inLibrary.isEmpty { parts.append("\(p.inLibrary.count) already in the library") }
         if p.files.isEmpty { parts = ["No photos or videos on the card"] }
         return parts.joined(separator: " · ")
@@ -247,6 +251,7 @@ final class CardCopyModel: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var cancels: [String: Cancel] = [:]
     private var pending: LibraryStore?
+    private var pendingSync: TeamSync?
 
     final class Cancel: @unchecked Sendable { var flag = false }
 
@@ -254,7 +259,7 @@ final class CardCopyModel: ObservableObject {
         let nc = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
             observers.append(nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.refresh(store: self?.pending) }
+                Task { @MainActor in self?.refresh(store: self?.pending, sync: self?.pendingSync) }
             })
         }
     }
@@ -271,8 +276,11 @@ final class CardCopyModel: ObservableObject {
         return CardCopier.mountedCards()
     }
 
-    func refresh(store: LibraryStore?) {
+    /// Looks for cards and what is new on them. With a team, the teammates' logs are read first, so a card copied
+    /// on another Mac minutes ago is known here.
+    func refresh(store: LibraryStore?, sync: TeamSync? = nil) {
         pending = store
+        pendingSync = sync
         guard let store else { return }
         // A card mounted while the last look was under way: look once more when it is done.
         if looking { again = true; return }
@@ -280,7 +288,8 @@ final class CardCopyModel: ObservableObject {
         let busy = Set(cards.filter(\.copying).map(\.id))
         Task {
             let found = await Task.detached(priority: .userInitiated) { () -> [CardCopier.Identity] in
-                Self.volumes.compactMap { CardCopier.identify($0) }
+                sync?.syncNow()
+                return Self.volumes.compactMap { CardCopier.identify($0) }
             }.value
             // Cards being copied keep their state; the others start over.
             var next: [Card] = []
@@ -291,7 +300,7 @@ final class CardCopyModel: ObservableObject {
             known = (try? CardCopier.knownCards(store: store)) ?? []
             looking = false
             for id in found where !busy.contains(id.uuid) { plan(id.uuid, store: store) }
-            if again { again = false; refresh(store: store) }
+            if again { again = false; refresh(store: store, sync: sync) }
         }
     }
 
