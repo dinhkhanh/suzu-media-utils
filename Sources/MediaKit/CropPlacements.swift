@@ -23,8 +23,14 @@ public final class CropPlacements: @unchecked Sendable {
         public var shape: CropShape?
         /// Degrees to turn this photo (0: not at all), instead of the export's straightening.
         public var rotation: Double?
-        public var isEmpty: Bool { center == nil && shape == nil && rotation == nil }
+        /// How far the crop is zoomed in (1…`maxZoom`): the crop is 1/zoom of the largest that fits, so the edges are
+        /// trimmed even when the photo keeps its shape.
+        public var zoom: Double?
+        public var isEmpty: Bool { center == nil && shape == nil && rotation == nil && zoom == nil }
     }
+
+    /// The furthest a crop can zoom in (a quarter of each side).
+    public static let maxZoom = 4.0
 
     private static let key = "cropEdits"
     private let lock = NSLock()
@@ -45,21 +51,37 @@ public final class CropPlacements: @unchecked Sendable {
     public func center(for url: URL) -> CGPoint? { edit(for: url)?.center }
     public func shape(for url: URL) -> CropShape? { edit(for: url)?.shape }
     public func rotation(for url: URL) -> Double? { edit(for: url)?.rotation }
+    public func zoom(for url: URL) -> Double? { edit(for: url)?.zoom }
 
     /// nil goes back to the automatic placement.
     public func set(_ center: CGPoint?, for url: URL) { update(url) { $0.center = center } }
+    /// nil (or 1) goes back to the largest crop that fits. Clamped to 1…`maxZoom`, to a hundredth.
+    public func set(zoom: Double?, for url: URL) { update(url) { $0.zoom = Self.clamp(zoom) } }
+    /// Both at once (a pinch zooms about a point): the crop as zoomed and placed.
+    public func set(zoom: Double?, center: CGPoint?, for url: URL) { update(url) { $0.zoom = Self.clamp(zoom); $0.center = center } }
+    /// Back to the automatic crop: placement and zoom (the shape and turn stay).
+    public func resetPlacement(for url: URL) { update(url) { $0.center = nil; $0.zoom = nil } }
+
+    static func clamp(_ zoom: Double?) -> Double? {
+        guard let zoom else { return nil }
+        let z = (min(max(zoom, 1), maxZoom) * 100).rounded() / 100
+        return z <= 1 ? nil : z
+    }
     /// nil goes back to the export's crop shape.
     public func set(shape: CropShape?, for url: URL) { update(url) { $0.shape = shape } }
     /// nil goes back to the export's straightening.
     public func set(rotation: Double?, for url: URL) { update(url) { $0.rotation = rotation } }
 
     private func update(_ url: URL, _ change: (inout Edit) -> Void) {
-        lock.withLock {
-            var e = edits[url.path] ?? Edit()
+        let changed = lock.withLock {
+            let old = edits[url.path]
+            var e = old ?? Edit()
             change(&e)
-            edits[url.path] = e.isEmpty ? nil : e
+            let new: Edit? = e.isEmpty ? nil : e
+            edits[url.path] = new
+            return new != old
         }
-        save()
+        if changed { save() }
     }
 
     private func save() {
@@ -68,11 +90,13 @@ public final class CropPlacements: @unchecked Sendable {
         DispatchQueue.main.async { NotificationCenter.default.post(name: Self.changed, object: nil) }
     }
 
-    /// The crop focus for this file: the hand-placed centre when there is one (faces are then not needed), else `given`.
+    /// The crop focus for this file: the hand-placed centre and zoom when there are any (with a centre, faces are not
+    /// needed; with only a zoom, the faces still place the smaller crop), else `given`.
     public func focus(for url: URL, given: FocusHint?) -> FocusHint? {
-        guard let c = center(for: url) else { return given }
+        guard let e = edit(for: url), e.center != nil || e.zoom != nil else { return given }
         var f = given ?? FocusHint(primary: nil)
-        f.center = c
+        f.center = e.center
+        f.zoom = e.zoom
         return f
     }
 

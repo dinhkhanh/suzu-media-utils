@@ -198,7 +198,10 @@ final class FaceGroupingModel: ObservableObject {
         let n = service.processor.processedCount
         let now = Date()
         if now.timeIntervalSince(lastTick) >= 1 {
-            rate = Double(n - lastProcessed) / now.timeIntervalSince(lastTick)
+            // Published only when it changes: every published change redraws every screen, and a redraw while a
+            // right-click menu is open rebuilds the menu (its submenus flash or close).
+            let r = Double(n - lastProcessed) / now.timeIntervalSince(lastTick)
+            if r != rate { rate = r }
             lastProcessed = n
             lastTick = now
         }

@@ -97,6 +97,60 @@ final class EditPipelineTests: XCTestCase {
         XCTAssertEqual(EditPipeline.cropRect(imageSize: CGSize(width: 6000, height: 4000), ratio: 0.8, focus: placed).maxX, 6000)
     }
 
+    func testZoomShrinksTheCropAndCropsToThePhotosOwnShapeWithoutAPreset() throws {
+        // Zoomed in twice about a hand-placed centre: half of each side.
+        let placed = FocusHint(primary: nil, center: CGPoint(x: 0.5, y: 0.5), zoom: 2)
+        XCTAssertEqual(EditPipeline.cropRect(imageSize: CGSize(width: 6000, height: 4000), ratio: 1.5, focus: placed),
+                       CGRect(x: 1500, y: 1000, width: 3000, height: 2000))
+        // Without a preset, only a zoomed photo is cropped, to its own shape; a preset's shape still wins.
+        var recipe = EditRecipe()
+        let size = CGSize(width: 6000, height: 4000)
+        XCTAssertNil(EditPipeline.cropRatio(recipe, size: size, focus: FocusHint(primary: nil, center: CGPoint(x: 0.5, y: 0.5))))
+        XCTAssertNil(EditPipeline.cropRatio(recipe, size: size, focus: nil))
+        XCTAssertEqual(EditPipeline.cropRatio(recipe, size: size, focus: placed), 1.5)
+        recipe.aspect = .square
+        XCTAssertEqual(EditPipeline.cropRatio(recipe, size: size, focus: placed), 1)
+        // Only zoomed: the faces place the smaller crop, with headroom, inside the photo.
+        let faces = FocusHint(primary: CGRect(x: 0.7, y: 0.2, width: 0.05, height: 0.08), zoom: 2)
+        let f = EditPipeline.cropRect(imageSize: size, ratio: 1.5, focus: faces)
+        XCTAssertEqual(f.size, CGSize(width: 3000, height: 2000))
+        XCTAssertEqual(f.midX, 4350, accuracy: 1)
+        XCTAssertEqual(f.minY, 160, accuracy: 1)
+        // Through the pipeline, a zoomed photo without a preset comes out half as big in its own shape.
+        let out = try EditPipeline.apply(EditRecipe(), to: CIImage(color: .gray).cropped(to: CGRect(x: 0, y: 0, width: 3000, height: 2000)), focus: placed)
+        XCTAssertEqual(out.extent.size, CGSize(width: 1500, height: 1000))
+    }
+
+    func testZoomIsClampedAndTheLargestCropMeansNone() {
+        XCTAssertNil(CropPlacements.clamp(nil))
+        XCTAssertNil(CropPlacements.clamp(1))
+        XCTAssertNil(CropPlacements.clamp(0.5))
+        XCTAssertEqual(CropPlacements.clamp(1.234), 1.23)
+        XCTAssertEqual(CropPlacements.clamp(9), CropPlacements.maxZoom)
+    }
+
+    func testRenderHonoursThePhotosOwnZoomAndDecodesOnlyWhatItNeeds() throws {
+        let photo = try makeJPEG("zoomed.jpg", w: 3000, h: 2000)
+        CropPlacements.shared.set(zoom: 2, center: CGPoint(x: 0.5, y: 0.5), for: photo)
+        defer { CropPlacements.shared.resetPlacement(for: photo) }
+        XCTAssertEqual(CropPlacements.shared.zoom(for: photo), 2)
+        var recipe = EditRecipe()
+        recipe.maxLongSide = 1000
+        let out = tmp.appendingPathComponent("zoomed-out.jpg")
+        try EditPipeline.render(photo, recipe: recipe, focus: nil, to: out)
+        let s = size(out)
+        XCTAssertEqual(s.width, 1000)
+        XCTAssertEqual(s.height, 667, accuracy: 1)
+        // Full size: the middle half of each side.
+        recipe.maxLongSide = nil
+        try EditPipeline.render(photo, recipe: recipe, focus: nil, to: out)
+        XCTAssertEqual(size(out), CGSize(width: 1500, height: 1000))
+        // Back to the largest crop: untouched.
+        CropPlacements.shared.resetPlacement(for: photo)
+        try EditPipeline.render(photo, recipe: recipe, focus: nil, to: out)
+        XCTAssertEqual(size(out), CGSize(width: 3000, height: 2000))
+    }
+
     func testCropAddsPeopleNearestFirstWhenNotAllFit() {
         // Main person in the middle, one neighbour close by, another at the far edge: the crop can't hold all three.
         let r = EditPipeline.cropRect(imageSize: CGSize(width: 6000, height: 4000), ratio: 0.8,

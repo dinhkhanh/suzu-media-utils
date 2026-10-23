@@ -36,24 +36,20 @@ struct PeopleGrid: View {
             }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 16)], spacing: 18) {
                 ForEach(shown) { p in
-                    PersonCell(person: p, selected: selected.contains(p.id), editing: $editing) { name in
-                        commitName(name, for: p)
-                    }
-                        .onTapGesture(count: 2) { path.append(PersonRoute(id: p.id)) }
-                        .onTapGesture {
-                            if NSEvent.modifierFlags.contains(.command) {
-                                if selected.contains(p.id) { selected.remove(p.id) } else { selected.insert(p.id) }
-                            } else {
-                                selected = [p.id]
-                            }
-                        }
-                        .contextMenu {
-                            Button("Open") { path.append(PersonRoute(id: p.id)) }
-                            if selected.count > 1 && selected.contains(p.id) {
-                                Button("Merge \(selected.count) People") { model.merge(selected); selected = [] }
-                            }
-                            ThisIsMenu(person: p)
-                        }
+                    PersonGridCell(person: p, selected: selected.contains(p.id), mergeCount: selected.count > 1 && selected.contains(p.id) ? selected.count : 0,
+                                   known: model.knownPeople.filter { $0.id != p.id }, editing: editing == p.id, focus: $editing,
+                                   open: { path.append(PersonRoute(id: p.id)) },
+                                   click: {
+                                       if NSEvent.modifierFlags.contains(.command) {
+                                           if selected.contains(p.id) { selected.remove(p.id) } else { selected.insert(p.id) }
+                                       } else {
+                                           selected = [p.id]
+                                       }
+                                   },
+                                   mergeSelected: { model.merge(selected); selected = [] },
+                                   thisIs: { model.mergeInto(p.id, $0) },
+                                   rename: { commitName($0, for: p) })
+                        .equatable()
                 }
             }
             .padding(20)
@@ -105,6 +101,41 @@ extension PeopleGrid {
             ?? list.first { $0.name == nil && $0.id != person.id }
         if !name.isEmpty && name != person.name { model.rename(person.id, to: name) }
         editing = person.name == nil && !name.isEmpty ? next?.id : nil
+    }
+}
+
+/// One person in the grid, with its clicks and right-click menu. Equatable on its data alone, so the model's
+/// background updates (counts, progress) don't redraw it, and don't rebuild its menu while that is open: a menu
+/// rebuilt under the mouse flashes, and its "This Is ▸ name" submenu can't be clicked.
+struct PersonGridCell: View, Equatable {
+    let person: PersonSummary
+    let selected: Bool
+    /// How many people the selection holds when this one is part of it (0: no merge item).
+    let mergeCount: Int
+    /// Everyone named, in any project, other than this person.
+    let known: [PersonSummary]
+    /// This person's name is being edited.
+    let editing: Bool
+    var focus: FocusState<Int64?>.Binding
+    let open: () -> Void
+    let click: () -> Void
+    let mergeSelected: () -> Void
+    let thisIs: (Int64) -> Void
+    let rename: (String) -> Void
+
+    static func == (a: PersonGridCell, b: PersonGridCell) -> Bool {
+        a.person == b.person && a.selected == b.selected && a.mergeCount == b.mergeCount && a.known == b.known && a.editing == b.editing
+    }
+
+    var body: some View {
+        PersonCell(person: person, selected: selected, editing: focus, onRename: rename)
+            .onTapGesture(count: 2, perform: open)
+            .onTapGesture(perform: click)
+            .contextMenu {
+                Button("Open", action: open)
+                if mergeCount > 1 { Button("Merge \(mergeCount) People", action: mergeSelected) }
+                ThisIsMenu(others: known, merge: thisIs)
+            }
     }
 }
 
@@ -494,20 +525,20 @@ struct MoveFacesMenu: View {
 /// "New Person…" and "Move to ▸ <name>" as menu items, for a right-click menu (which can't show the name alert
 /// itself: `newPerson` asks for the name).
 struct FaceAssignItems: View {
-    @EnvironmentObject var model: FaceGroupingModel
     let faces: Set<Int64>
+    /// Anyone named in any project (plain data, so the model's updates don't rebuild the open menu).
+    let known: [PersonSummary]
     let newPerson: () -> Void
-    let done: () -> Void
+    let assign: (Int64) -> Void
 
     var body: some View {
         Button(faces.count > 1 ? "New Person from \(faces.count) Faces…" : "New Person…", action: newPerson)
         Menu(faces.count > 1 ? "Move \(faces.count) Faces to" : "Move to") {
-            // Anyone named in any project.
-            ForEach(model.knownPeople) { p in
-                Button(p.displayName) { model.assign(faces, to: p.id); done() }
+            ForEach(known) { p in
+                Button(p.displayName) { assign(p.id) }
             }
         }
-        .disabled(model.knownPeople.isEmpty)
+        .disabled(known.isEmpty)
     }
 }
 
@@ -531,7 +562,8 @@ struct UnassignedView: View {
             FaceGrid(faces: faces, selection: $selection) { faceId in
                 // The selected faces when this one is selected, else just this one.
                 let targets = selection.contains(faceId) ? selection : [faceId]
-                FaceAssignItems(faces: targets, newPerson: { naming = targets }, done: { selection.subtract(targets) })
+                FaceAssignItems(faces: targets, known: model.knownPeople, newPerson: { naming = targets },
+                                assign: { model.assign(targets, to: $0); selection.subtract(targets) })
             }
         }
         }
@@ -562,17 +594,17 @@ struct UnassignedView: View {
     }
 }
 
-/// "This Is ▸ <name>": the group is someone already named (in this or an earlier project); merges into them.
+/// "This Is ▸ <name>": the group is someone already named (in this or an earlier project); merges into them. Takes
+/// the names as plain data rather than watching the model, so the open menu isn't rebuilt by its updates.
 struct ThisIsMenu: View {
-    @EnvironmentObject var model: FaceGroupingModel
-    let person: PersonSummary
+    let others: [PersonSummary]
+    let merge: (Int64) -> Void
 
     var body: some View {
-        let others = model.knownPeople.filter { $0.id != person.id }
         if !others.isEmpty {
             Menu("This Is…") {
                 ForEach(others) { k in
-                    Button(k.displayName) { model.mergeInto(person.id, k.id) }
+                    Button(k.displayName) { merge(k.id) }
                 }
             }
         }

@@ -93,10 +93,11 @@ final class PreviewCache: @unchecked Sendable {
         var out = input, level = input
         var crop: CGRect?, angle: Double?
         let autoAngle = r.straighten == true || r.rotation != nil ? tilt(item.url).map { -$0 } : nil
+        let zoom = CropPlacements.shared.zoom(for: item.url)
         if !original {
             // Levelled first, as in the export: the crop, and the photo dragged under it, are of the levelled photo.
             let placed = CropPlacements.shared.center(for: item.url)
-            var faces = r.aspect(for: input.extent.size) != nil && placed == nil ? self.focus(item.url, given: item.focus) : nil
+            var faces = (r.aspect(for: input.extent.size) != nil || zoom != nil) && placed == nil ? self.focus(item.url, given: item.focus) : nil
             if let a = r.rotation ?? (r.straighten == true ? autoAngle : nil), abs(a) >= 0.01 {
                 angle = a
                 (level, faces) = EditPipeline.rotate(input, degrees: a, focus: faces)
@@ -104,10 +105,12 @@ final class PreviewCache: @unchecked Sendable {
             r.straighten = nil
             r.rotation = nil
             var focus: FocusHint?
-            if let a = r.aspect(for: level.extent.size) {
-                // A crop placed by hand needs no faces.
-                focus = placed.map { FocusHint(primary: nil, center: $0) } ?? faces
-                let size = level.extent.size, c = EditPipeline.cropRect(imageSize: size, ratio: a.ratio, focus: focus)
+            if let ratio = EditPipeline.cropRatio(r, size: level.extent.size, focus: FocusHint(primary: nil, zoom: zoom)) {
+                // A crop placed by hand needs no faces; one only zoomed by hand is placed by the faces.
+                var f = placed.map { FocusHint(primary: nil, center: $0) } ?? faces ?? FocusHint(primary: nil)
+                f.zoom = zoom
+                focus = f
+                let size = level.extent.size, c = EditPipeline.cropRect(imageSize: size, ratio: ratio, focus: focus)
                 crop = CGRect(x: c.minX / size.width, y: c.minY / size.height, width: c.width / size.width, height: c.height / size.height)
             }
             do { out = try EditPipeline.apply(r, to: level, focus: focus) } catch {
@@ -117,19 +120,21 @@ final class PreviewCache: @unchecked Sendable {
             }
         }
         guard let cg = Self.context.createCGImage(out, from: out.extent) else { return nil }
+        // The whole (levelled) photo, for dragging and zooming the crop; a photo without a crop yet can be zoomed into one.
         var full: NSImage?
-        if crop != nil {
+        if !original {
             if angle == nil { full = NSImage(cgImage: e.image, size: .zero) }
             else if let l = Self.context.createCGImage(level, from: level.extent) { full = NSImage(cgImage: l, size: .zero) }
         }
-        return Rendered(image: NSImage(cgImage: cg, size: .zero), outputSize: Self.outputSize(e.pixelSize, recipe: recipe, angle: angle), warning: warning,
-                        crop: crop, full: full, pixelSize: e.pixelSize, angle: angle, autoAngle: autoAngle)
+        return Rendered(image: NSImage(cgImage: cg, size: .zero), outputSize: Self.outputSize(e.pixelSize, recipe: recipe, angle: angle, zoom: zoom ?? 1),
+                        warning: warning, crop: crop, full: full, pixelSize: e.pixelSize, angle: angle, autoAngle: autoAngle)
     }
 
-    static func outputSize(_ size: CGSize, recipe: EditRecipe, angle: Double? = nil) -> CGSize {
+    static func outputSize(_ size: CGSize, recipe: EditRecipe, angle: Double? = nil, zoom: Double = 1) -> CGSize {
         var w = size.width, h = size.height
         if let angle { let k = EditPipeline.rotatedScale(size, degrees: angle); w *= k; h *= k }
         if let a = recipe.aspect(for: size) { let cw = min(w, h * a.ratio), ch = min(h, w / a.ratio); w = cw; h = ch }
+        if zoom > 1 { w /= zoom; h /= zoom }
         if let long = recipe.maxLongSide, Double(long) < max(w, h) {
             let s = Double(long) / max(w, h); w *= s; h *= s
         }
@@ -162,11 +167,18 @@ struct EditPreview: View {
     @State private var hovering = false
     /// How far the photo has been dragged under the crop, while dragging.
     @State private var drag: CGSize?
+    /// The pinch in progress (its magnification), zooming the crop.
+    @State private var pinch: Double?
     /// Bumped when a photo's crop is edited or reset, to render again.
     @State private var placements = 0
     /// The current photo's latest export, for the info bar.
     @State private var lastExport: ExportHistory.Record?
     @State private var exports = 0
+    /// Arrow keys step through the photos (Space ticks or unticks, Return opens a grid photo large) while the
+    /// preview has the keyboard focus, which a click on it or on the strip gives it.
+    @FocusState private var focused: Bool
+    /// How many thumbnails the grid fits in a row (for ↑ and ↓).
+    @State private var gridColumns = 1
 
     var current: ToolItem? { samples.isEmpty ? nil : samples[min(index, samples.count - 1)] }
 
@@ -176,6 +188,26 @@ struct EditPreview: View {
             if excluded != nil && samples.count > 1 { selectionBar }
             if filmstrip && samples.count > 1 && !showGrid { strip }
         }
+        .focusable()
+        .focusEffectDisabled()
+        .focused($focused)
+        .onKeyPress(.leftArrow) { step(-1) }
+        .onKeyPress(.rightArrow) { step(1) }
+        .onKeyPress(.upArrow) { step(showGrid ? -gridColumns : -1) }
+        .onKeyPress(.downArrow) { step(showGrid ? gridColumns : 1) }
+        .onKeyPress(.home) { step(-samples.count) }
+        .onKeyPress(.end) { step(samples.count) }
+        .onKeyPress(.space) {
+            guard excluded != nil, !samples.isEmpty else { return .ignored }
+            tick(min(index, samples.count - 1))
+            return .handled
+        }
+        .onKeyPress(.return) {
+            guard showGrid else { return .ignored }
+            gridMode = false
+            return .handled
+        }
+        .onAppear { if samples.count > 1 { focused = true } }
         .onChange(of: samples.count) { if index >= samples.count { index = 0 } }
         .onChange(of: samples.count > 1) { if samples.count > 1, ProcessInfo.processInfo.environment["SUZU_TOOL_SAMPLES"] == "grid" { gridMode = true } }
         .task(id: "\(recipe.hashValue)|\(current?.url.path ?? "")|\(showOriginal)|\(placements)") { await render() }
@@ -185,6 +217,14 @@ struct EditPreview: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: CropPlacements.changed)) { _ in placements += 1 }
         .onReceive(NotificationCenter.default.publisher(for: ExportHistory.changed)) { _ in exports += 1 }
+    }
+
+    /// Moves to another photo with the keyboard (no wrapping at the ends); the strip or grid scrolls to it.
+    func step(_ by: Int) -> KeyPress.Result {
+        guard samples.count > 1 else { return .ignored }
+        let i = min(max(min(index, samples.count - 1) + by, 0), samples.count - 1)
+        if i != index { index = i }
+        return .handled
     }
 
     var previewArea: some View {
@@ -206,35 +246,51 @@ struct EditPreview: View {
             }
             if rendering { ProgressView().controlSize(.small).tint(.white).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).padding(12) }
         }
-        .overlay(alignment: .topLeading) {
-            if perPhotoCrop && !showOriginal, let current, let r = rendered {
-                HStack(spacing: 0) {
-                    cropMenu(current, r)
-                    LevelButton(url: current.url, rendered: r, straighten: recipe.straighten == true)
-                }
+        .overlay(alignment: .top) {
+            // The photo's own crop tools on the left, the before/after switch on the right; in a narrow preview the
+            // switch drops to a second row instead of covering the tools.
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 0) { cropTools; Spacer(minLength: 8); compareSwitch }
+                VStack(alignment: .trailing, spacing: 0) { HStack(spacing: 0) { cropTools; Spacer(minLength: 0) }; compareSwitch }
             }
-        }
-        .overlay(alignment: .topTrailing) {
-            Picker("", selection: $showOriginal) {
-                Text("Edited").tag(false)
-                Text("Original").tag(true)
-            }
-            .pickerStyle(.segmented).labelsHidden().fixedSize().padding(10)
-            .help("Compare with the original photo")
         }
         .overlay(alignment: .bottom) { infoBar }
         .clipped()
         .environment(\.colorScheme, .dark)
+        .simultaneousGesture(TapGesture().onEnded { focused = true })
+    }
+
+    @ViewBuilder
+    var cropTools: some View {
+        if perPhotoCrop && !showOriginal, let current, let r = rendered {
+            HStack(spacing: 0) {
+                cropMenu(current, r)
+                ZoomButton(url: current.url)
+                LevelButton(url: current.url, rendered: r, straighten: recipe.straighten == true)
+            }
+        }
+    }
+
+    var compareSwitch: some View {
+        Picker("", selection: $showOriginal) {
+            Text("Edited").tag(false)
+            Text("Original").tag(true)
+        }
+        .pickerStyle(.segmented).labelsHidden().fixedSize().padding(10)
+        .help("Compare with the original photo")
     }
 
     /// Thirds overlay while hovering with a watermark on; a click puts the watermark in that ninth. With a crop,
-    /// dragging moves the photo under it (the whole photo shows, dimmed outside the crop, while dragging).
+    /// dragging moves the photo under it, and a pinch zooms the crop in or out (the whole photo shows, dimmed outside
+    /// the crop, meanwhile). A pinch on a photo without a crop zooms into one of the photo's own shape.
     @ViewBuilder
     var placementLayer: some View {
-        if (recipe.watermark != nil || (perPhotoCrop && rendered?.crop != nil)) && !showOriginal {
+        if (recipe.watermark != nil || perPhotoCrop) && !showOriginal {
             GeometryReader { g in
                 ZStack {
-                    if let t = drag, let r = rendered, let n = r.crop, let full = r.full { dragView(full, crop: n, moved: moved(n, by: t, in: g.size), size: g.size) }
+                    if drag != nil || pinch != nil, let r = rendered, let full = r.full {
+                        dragView(full, moved: adjusted(frame(r), in: g.size).rect, size: g.size)
+                    }
                     if hovering && drag == nil && recipe.watermark != nil {
                         Path { p in
                             for i in 1...2 {
@@ -254,19 +310,60 @@ struct EditPreview: View {
                         .gesture(DragGesture(minimumDistance: 4)
                             .onChanged { if perPhotoCrop && rendered?.crop != nil { drag = $0.translation } }
                             .onEnded { v in
-                                if perPhotoCrop, let n = rendered?.crop, let item = current {
-                                    let m = moved(n, by: v.translation, in: g.size)
-                                    CropPlacements.shared.set(CGPoint(x: m.midX, y: m.midY), for: item.url)
+                                if perPhotoCrop && rendered?.crop != nil {
                                     // Stays on screen until the new crop is rendered.
                                     drag = v.translation
+                                    commit(in: g.size)
                                 } else { drag = nil }
-                            })
+                            }
+                            .simultaneously(with: MagnifyGesture(minimumScaleDelta: 0.02)
+                                .onChanged { if perPhotoCrop { pinch = $0.magnification } }
+                                .onEnded { v in
+                                    guard perPhotoCrop else { return }
+                                    pinch = v.magnification
+                                    commit(in: g.size)
+                                }))
                 }
             }
             .onHover { hovering = $0 }
-            .help(rendered?.crop == nil ? "Click where the watermark should go"
-                  : recipe.watermark == nil ? "Drag the photo to move the crop" : "Drag the photo to move the crop; click where the watermark should go")
+            .help(help)
         }
+    }
+
+    var help: String {
+        var parts: [String] = []
+        if perPhotoCrop { parts.append(rendered?.crop == nil ? "Pinch to zoom in on part of the photo" : "Drag the photo to move the crop, pinch to zoom it") }
+        if recipe.watermark != nil { parts.append("click where the watermark should go") }
+        return parts.joined(separator: "; ")
+    }
+
+    /// The current crop (normalized), or the whole photo when it has none yet.
+    func frame(_ r: PreviewCache.Rendered) -> CGRect { r.crop ?? CGRect(x: 0, y: 0, width: 1, height: 1) }
+
+    /// The crop as the gesture in progress leaves it: zoomed about its centre by the pinch (never wider than the
+    /// photo, never past `CropPlacements.maxZoom`), then moved the other way to the photo's drag, kept inside the
+    /// photo. `zoom` is the crop's resulting zoom.
+    func adjusted(_ n: CGRect, in size: CGSize) -> (rect: CGRect, zoom: Double) {
+        let current = current.flatMap { CropPlacements.shared.zoom(for: $0.url) } ?? 1
+        let zoom = min(max(current * (pinch ?? 1), 1), CropPlacements.maxZoom)
+        let s = current / zoom
+        var r = CGRect(x: n.midX - n.width * s / 2, y: n.midY - n.height * s / 2, width: n.width * s, height: n.height * s)
+        if let t = drag {
+            r.origin.x -= t.width * r.width / size.width
+            r.origin.y -= t.height * r.height / size.height
+        }
+        r.origin.x = min(max(r.minX, 0), 1 - r.width)
+        r.origin.y = min(max(r.minY, 0), 1 - r.height)
+        return (r, zoom)
+    }
+
+    /// Saves the gesture's crop as this photo's own: its zoom (after a pinch) and where it sits.
+    func commit(in size: CGSize) {
+        guard let item = current, let r = rendered else { return }
+        let (m, zoom) = adjusted(frame(r), in: size)
+        let center = CGPoint(x: m.midX, y: m.midY)
+        if pinch != nil { CropPlacements.shared.set(zoom: zoom, center: center, for: item.url) }
+        else { CropPlacements.shared.set(center, for: item.url) }
     }
 
     /// This photo's crop shape: the export's (for its orientation), or its own.
@@ -290,21 +387,13 @@ struct EditPreview: View {
         .padding(.horizontal, 10).padding(.vertical, 5)
         .background(.black.opacity(0.55), in: Capsule())
         .padding(10)
-        .help("This photo's crop shape. Drag the photo to move the crop.")
+        .help("This photo's crop shape. Drag the photo to move the crop, pinch to zoom it.")
     }
 
-    /// The crop after dragging the photo by `t` in a preview `size` points big: the photo moves, so the crop moves the
-    /// other way, and never past the photo's edges.
-    func moved(_ n: CGRect, by t: CGSize, in size: CGSize) -> CGRect {
-        var r = n
-        r.origin.x = min(max(n.minX - t.width * n.width / size.width, 0), 1 - n.width)
-        r.origin.y = min(max(n.minY - t.height * n.height / size.height, 0), 1 - n.height)
-        return r
-    }
-
-    /// The whole photo at the preview's scale, placed under the crop as dragged: bright inside the crop, dimmed outside.
-    func dragView(_ full: NSImage, crop n: CGRect, moved m: CGRect, size: CGSize) -> some View {
-        let w = size.width / n.width, h = size.height / n.height
+    /// The whole photo at the scale that fills the preview with the crop `m` (normalized), placed under it as dragged
+    /// and zoomed: bright inside the crop, dimmed outside.
+    func dragView(_ full: NSImage, moved m: CGRect, size: CGSize) -> some View {
+        let w = size.width / m.width, h = size.height / m.height
         let photo = Image(nsImage: full).resizable().frame(width: w, height: h).offset(x: -m.minX * w, y: -m.minY * h)
         return ZStack(alignment: .topLeading) {
             Color(nsColor: NSColor(white: 0.13, alpha: 1)).frame(width: size.width, height: size.height)
@@ -326,9 +415,9 @@ struct EditPreview: View {
             if let current { Text(current.url.lastPathComponent).lineLimit(1).truncationMode(.middle) }
             if let s = rendered?.outputSize, !showOriginal { Text("→ \(Int(s.width)) × \(Int(s.height)) px \(recipe.outputFormat.label)").monospacedDigit() }
             if let w = rendered?.warning { Label(w, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.yellow) }
-            if let current, rendered?.crop != nil, !showOriginal, CropPlacements.shared.center(for: current.url) != nil {
-                Button { CropPlacements.shared.set(nil, for: current.url) } label: { Label("Reset crop", systemImage: "arrow.uturn.backward") }
-                    .help("This crop was placed by hand: go back to the automatic one, which keeps the people in frame")
+            if let current, rendered?.crop != nil, !showOriginal, let e = CropPlacements.shared.edit(for: current.url), e.center != nil || e.zoom != nil {
+                Button { CropPlacements.shared.resetPlacement(for: current.url) } label: { Label("Reset crop", systemImage: "arrow.uturn.backward") }
+                    .help("This crop was \(e.zoom != nil ? "zoomed and " : "")placed by hand: go back to the automatic one, which keeps the people in frame")
             }
             if let e = lastExport {
                 Label("Exported \(e.date.formatted(date: .abbreviated, time: .shortened))", systemImage: "checkmark.circle.fill")
@@ -352,7 +441,8 @@ struct EditPreview: View {
                     // Long lists only show their start; the arrows still step through all of them.
                     ForEach(Array(samples.prefix(300).enumerated()), id: \.offset) { i, item in
                         // Click previews; the circle (or ⌘-click) ticks or unticks; ⇧-click ticks a range.
-                        StripThumb(url: item.url, selected: i == index, checked: isChecked(item), onCheck: { tick(i) }, onTap: {
+                        StripThumb(url: item.url, selected: i == index, checked: isChecked(item), onCheck: { focused = true; tick(i) }, onTap: {
+                            focused = true
                             let mods = NSEvent.modifierFlags
                             if mods.contains(.shift) || mods.contains(.command) { tick(i) } else { clickedInStrip = true; index = i }
                         })
@@ -365,6 +455,7 @@ struct EditPreview: View {
             .frame(height: 112)
             .background(Color(nsColor: NSColor(white: 0.09, alpha: 1)))
             .environment(\.colorScheme, .dark)
+            .help(excluded == nil ? "← → step through the photos" : "← → step through the photos; Space ticks or unticks the shown one")
             .onChange(of: index) {
                 if clickedInStrip { clickedInStrip = false } else { withAnimation { proxy.scrollTo(index, anchor: .center) } }
             }
@@ -410,22 +501,29 @@ struct EditPreview: View {
         .environment(\.colorScheme, .dark)
     }
 
-    /// Every photo, bigger: click to tick or untick (⇧-click for a range), double-click to preview it large.
+    /// Every photo, bigger: click to tick or untick (⇧-click for a range), double-click to preview it large. Arrow
+    /// keys move the highlight, Space ticks it, Return opens it large.
     var grid: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], spacing: 8) {
                     ForEach(Array(samples.enumerated()), id: \.offset) { i, item in
                         StripThumb(url: item.url, selected: i == index, checked: isChecked(item), side: 150,
-                                   onCheck: { tick(i) }, onTap: { tick(i) }, onDoubleTap: { index = i; gridMode = false })
+                                   onCheck: { focused = true; tick(i) }, onTap: { focused = true; index = i; tick(i) },
+                                   onDoubleTap: { index = i; gridMode = false })
                             .id(i)
                             .help("\(item.url.lastPathComponent)\(item.personName.map { " · \($0)" } ?? "")\(notes[item].map { " · \($0)" } ?? "")")
                     }
                 }
                 .padding(12)
+                .background(GeometryReader { g in
+                    // As many 150 px thumbnails (8 px apart) as the row holds, for ↑ and ↓.
+                    Color.clear.onChange(of: g.size.width, initial: true) { gridColumns = max(1, Int((g.size.width - 24 + 8) / 158)) }
+                })
             }
             .background(Color(nsColor: NSColor(white: 0.13, alpha: 1)))
             .onAppear { proxy.scrollTo(index, anchor: .center) }
+            .onChange(of: index) { withAnimation { proxy.scrollTo(index, anchor: .center) } }
         }
         .environment(\.colorScheme, .dark)
     }
@@ -442,7 +540,58 @@ struct EditPreview: View {
         rendering = false
         if let result { rendered = result }
         drag = nil
+        pinch = nil
     }
+}
+
+/// This photo's crop zoom: a slider from the largest crop that fits to four times closer, so the edges of an event
+/// photo can be trimmed away without changing its shape. The faces place the zoomed crop until it's dragged.
+struct ZoomButton: View {
+    let url: URL
+    @State private var open = false
+    @State private var value = 1.0
+
+    var own: Double? { CropPlacements.shared.zoom(for: url) }
+    var title: String { own.map { String(format: "Zoom %.1f×", $0) } ?? "Zoom" }
+
+    var body: some View {
+        Button { value = own ?? 1; open = true } label: { Label(title, systemImage: "plus.magnifyingglass") }
+            .buttonStyle(.borderless)
+            .font(.caption)
+            .foregroundStyle(own == nil ? .white.opacity(0.85) : Color.accentColor)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(.black.opacity(0.55), in: Capsule())
+            .padding(.vertical, 10)
+            .help("Zoom this photo's crop in, to trim its edges (or pinch on the photo)")
+            .popover(isPresented: $open, arrowEdge: .bottom) { panel }
+    }
+
+    var panel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Zoom this photo's crop").font(.headline)
+            HStack {
+                Button { nudge(-0.1) } label: { Image(systemName: "minus.magnifyingglass") }.help("Zoom out a little")
+                Slider(value: Binding(get: { value }, set: { value = $0; save() }), in: 1...CropPlacements.maxZoom)
+                Button { nudge(0.1) } label: { Image(systemName: "plus.magnifyingglass") }.help("Zoom in a little")
+                Text(String(format: "%.2f×", value)).monospacedDigit().frame(width: 52, alignment: .trailing)
+            }
+            HStack {
+                Button("Largest Crop") { value = 1; save() }.disabled(own == nil)
+                Spacer()
+            }
+            .controlSize(.small)
+            Text(own != nil ? "Keeps the middle \(Int((100 / (own ?? 1)).rounded()))% of each side. Drag the photo in the preview to choose which part."
+                 : "The crop is as large as the photo allows. Zoom in to trim the edges; the people stay in frame.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(width: 320)
+        .environment(\.colorScheme, NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light)
+    }
+
+    func nudge(_ d: Double) { value = min(CropPlacements.maxZoom, max(1, ((value + d) * 10).rounded() / 10)); save() }
+
+    func save() { CropPlacements.shared.set(zoom: value, for: url) }
 }
 
 struct StripThumb: View {

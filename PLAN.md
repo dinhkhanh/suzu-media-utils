@@ -388,3 +388,22 @@ and after every feature below; same 92 people.
   if it is still pending; one already processed stays on its own. Batch Export's file list drops RAWs whose JPEG is
   in the list.
 
+
+## v0.6.7 (2026-10-23): zoomable crops
+- `CropPlacements.Edit.zoom` (1…`maxZoom` = 4, to a hundredth; 1 is stored as nil): the crop is 1/zoom of the largest
+  that fits. It rides along in `FocusHint.zoom`; `EditPipeline.cropRatio` crops a zoomed photo without a preset to its
+  own shape, `cropRect` shrinks the crop, and `decode` keeps `zoom` times less detail. A focus with only a zoom (no
+  faces, no centre) means the faces are unknown: `apply` detects them, so a zoomed crop still keeps the people in.
+- Preview: pinch (MagnifyGesture) zooms about the crop's centre and saves zoom + centre; the Zoom button's slider saves
+  the zoom only, so the faces place the smaller crop until it is dragged. The drag/zoom overlay scales the whole photo
+  by the gesture's crop, so a pinch shows live. The top overlays wrap in narrow previews (ViewThatFits) instead of the
+  before/after switch covering the crop tools.
+- Keyboard in the preview: the whole EditPreview is `.focusable()` (focus taken on appear with several photos, and on
+  any click on the preview, strip or grid); ← → ↑ ↓ step (↑ ↓ by a row in the grid, from the grid's measured width),
+  Home/End jump, Space ticks or unticks the shown photo, Return opens a grid photo large. No wrapping at the ends.
+- Right-click menus flashing: `tick()` published `rate` every second even when unchanged (every published change
+  redraws every screen, and a redraw while a context menu is open rebuilds the menu, so its "This Is ▸ name"
+  submenu couldn't be clicked). Now published only on change. The People grid's cells are `PersonGridCell`
+  (`Equatable` on person, selection, known names, editing) so background updates during ingest don't rebuild
+  their menus either; `ThisIsMenu` and `FaceAssignItems` take the known people as plain data instead of watching
+  the model.

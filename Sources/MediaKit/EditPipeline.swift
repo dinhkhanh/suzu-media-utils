@@ -33,9 +33,12 @@ public enum EditPipeline {
             throw Failure.unreadable(url.lastPathComponent)
         }
         let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
-        guard var image = decode(src, data: data, recipe: recipe, properties: props) else { throw Failure.unreadable(url.lastPathComponent) }
+        let focus = CropPlacements.shared.focus(for: url, given: focus)
+        guard var image = decode(src, data: data, recipe: recipe, properties: props, zoom: focus?.magnification ?? 1) else {
+            throw Failure.unreadable(url.lastPathComponent)
+        }
         let sourceSpace = image.colorSpace
-        image = try apply(recipe, to: image, focus: CropPlacements.shared.focus(for: url, given: focus))
+        image = try apply(recipe, to: image, focus: focus)
         let deep = (props?[kCGImagePropertyDepth] as? Int ?? 8) > 8
         guard let cg = pixels(image, format: recipe.outputFormat, sourceSpace: sourceSpace, deep: deep) else {
             throw Failure.write(dest.lastPathComponent)
@@ -60,8 +63,9 @@ public enum EditPipeline {
         return ctx.makeImage()
     }
 
-    /// Upright image at the resolution the recipe needs (full size when it keeps the original size).
-    static func decode(_ src: CGImageSource, data: Data, recipe: EditRecipe, properties p: [CFString: Any]?) -> CIImage? {
+    /// Upright image at the resolution the recipe needs (full size when it keeps the original size). `zoom`: the
+    /// photo's own crop zoom, which keeps a smaller part of it.
+    static func decode(_ src: CGImageSource, data: Data, recipe: EditRecipe, properties p: [CFString: Any]?, zoom: Double = 1) -> CIImage? {
         var w = Double(p?[kCGImagePropertyPixelWidth] as? Int ?? 0), h = Double(p?[kCGImagePropertyPixelHeight] as? Int ?? 0)
         if let o = p?[kCGImagePropertyOrientation] as? Int, o >= 5 { swap(&w, &h) }
         if let target = recipe.maxLongSide, w > 0, h > 0 {
@@ -71,6 +75,7 @@ public enum EditPipeline {
                 let cw = min(w, h * a.ratio), ch = min(h, w / a.ratio)
                 keep = max(cw, ch) / max(w, h)
             }
+            keep /= max(1, zoom)
             // Straightening trims up to about 15% (at 10°).
             let turn = recipe.straighten == true || recipe.rotation != nil ? 1 / 0.85 : 1
             let needed = Int((Double(target) / keep * 1.05 * turn).rounded(.up))
@@ -95,10 +100,16 @@ public enum EditPipeline {
         var image = input, focus = focus
         if recipe.autoTone { image = autoTone(image, strength: recipe.autoToneStrength) }
         if let degrees = rotation(recipe, image) { (image, focus) = rotate(image, degrees: degrees, focus: focus) }
-        if let aspect = recipe.aspect(for: image.extent.size) {
-            let size = image.extent.size
-            let hint = focus ?? detectFaces(image)
-            let r = cropRect(imageSize: size, ratio: aspect.ratio, focus: hint)
+        let size = image.extent.size
+        // Cropped to the export's shape, or, zoomed in by hand, to the photo's own shape.
+        if let ratio = cropRatio(recipe, size: size, focus: focus) {
+            var hint = focus
+            // Nothing known about the faces (none given, or only a zoom set by hand): find them, so the zoomed crop
+            // keeps the people in frame too.
+            if hint == nil || (hint!.hasNoFaces && hint!.center == nil) {
+                hint = detectFaces(image).map { var d = $0; d.zoom = focus?.zoom; return d } ?? hint
+            }
+            let r = cropRect(imageSize: size, ratio: ratio, focus: hint)
             // Core Image is bottom-left origin.
             image = image.cropped(to: CGRect(x: image.extent.minX + r.minX, y: image.extent.minY + size.height - r.maxY,
                                              width: r.width, height: r.height))
@@ -184,13 +195,23 @@ public enum EditPipeline {
 
     // MARK: - Crop
 
-    /// Largest rect of the given aspect ratio that fits, placed so the main face sits a little above centre
-    /// (headroom), with everyone else in the shot in frame too: faces at least half the main face's height (smaller ones
-    /// are people in the background), nearest first, as many as fit. Top-left origin, pixels.
+    /// Width / height of the crop a photo of this size gets: the recipe's shape, else (zoomed in by hand) its own;
+    /// nil when it isn't cropped at all.
+    public static func cropRatio(_ recipe: EditRecipe, size: CGSize, focus: FocusHint?) -> Double? {
+        if let a = recipe.aspect(for: size) { return a.ratio }
+        guard (focus?.magnification ?? 1) > 1, size.height > 0 else { return nil }
+        return size.width / size.height
+    }
+
+    /// Largest rect of the given aspect ratio that fits (1/zoom of it when zoomed in by hand), placed so the main face
+    /// sits a little above centre (headroom), with everyone else in the shot in frame too: faces at least half the main
+    /// face's height (smaller ones are people in the background), nearest first, as many as fit. Top-left origin, pixels.
     public static func cropRect(imageSize: CGSize, ratio: Double, focus: FocusHint?) -> CGRect {
         let W = imageSize.width, H = imageSize.height
         var cw = W, ch = W / ratio
         if ch > H { ch = H; cw = H * ratio }
+        let zoom = focus?.magnification ?? 1
+        cw /= zoom; ch /= zoom
         func px(_ r: CGRect) -> CGRect { CGRect(x: r.minX * W, y: r.minY * H, width: r.width * W, height: r.height * H) }
         if let c = focus?.center {
             let x = min(max(c.x * W - cw / 2, 0), W - cw), y = min(max(c.y * H - ch / 2, 0), H - ch)

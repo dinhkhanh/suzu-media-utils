@@ -64,9 +64,11 @@ and one for landscapes — logo, text or banner watermark, resize — auto tone
 
 ### Batch Export
 Auto tone, face-aware social crops, watermark and resize for any photos or people's photos: a large preview of the
-result (film strip, before/after, click the photo to place the watermark, drag it to move the crop — remembered per
-photo for every screen, with Reset crop to go back to the automatic one) with the settings beside it. Tick or untick
-photos in the strip or in a grid of all of them (⇧-click for a range, Select All / None) to export only some; save as
+result (film strip, before/after, click the photo to place the watermark, drag it to move the crop, pinch or use Zoom
+to crop in closer — even on a photo that keeps its shape, to trim the edges of an event shot — remembered per photo
+for every screen, with Reset crop to go back to the automatic one) with the settings beside it. Tick or untick
+photos in the strip or in a grid of all of them (⇧-click for a range, Select All / None; arrow keys step through them,
+Space ticks the shown one, Return opens a grid photo large) to export only some; save as
 JPEG or as lossless PNG (the photo's own colour space, 16-bit when the original is). It remembers what it exported
 (a green tick on the thumbnail, the date in the preview): exporting a photo into a folder that already has it asks,
 photo by photo or for all, whether to skip it or overwrite it. Originals are never overwritten, and another camera's

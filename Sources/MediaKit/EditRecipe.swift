@@ -190,5 +190,14 @@ public struct FocusHint: Sendable {
     public var others: [CGRect]
     /// Crop centre placed by hand (normalized); wins over the faces.
     public var center: CGPoint?
-    public init(primary: CGRect?, others: [CGRect] = [], center: CGPoint? = nil) { self.primary = primary; self.others = others; self.center = center }
+    /// Zoom set by hand: the crop is 1/zoom of the largest one that fits (1 or nil: the largest). Trims the edges
+    /// of a photo even when it keeps its shape.
+    public var zoom: Double?
+    public init(primary: CGRect?, others: [CGRect] = [], center: CGPoint? = nil, zoom: Double? = nil) {
+        self.primary = primary; self.others = others; self.center = center; self.zoom = zoom
+    }
+    /// Nothing known about the people in the photo (only a hand-set crop, if that).
+    public var hasNoFaces: Bool { primary == nil && others.isEmpty }
+    /// The crop's magnification, at least 1.
+    public var magnification: Double { max(1, zoom ?? 1) }
 }

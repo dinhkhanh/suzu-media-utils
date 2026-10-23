@@ -1,4 +1,4 @@
-# Tính năng của SuZu Media Utils (v0.6.6)
+# Tính năng của SuZu Media Utils (v0.6.7)
 
 Ứng dụng macOS cho SuZu Media: nhận diện và nhóm khuôn mặt trong ảnh/video sự kiện, cùng các công cụ xử lý ảnh
 hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi tiếng qua Amazon, nếu bật).
@@ -111,6 +111,7 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Cắt khung mạng xã hội | 1:1, 4:5, 9:16, 16:9, 1.91:1; giữ mọi người trong ảnh vào khung (người gần người chính trước, bỏ qua người nhỏ ở hậu cảnh). |
 | Cắt khung theo hướng ảnh | Bấm một khung để áp dụng cho mọi ảnh; ⌘-click khung thứ hai, vd. 4:5 và 16:9: ảnh dọc cắt 4:5, ảnh ngang (và vuông) cắt 16:9, tự nhận biết từng ảnh. Chọn một khung + "Original" để chỉ cắt một loại, loại kia giữ khung gốc. Chọn một khung thì áp dụng cho mọi ảnh như trước. Mũi tên cạnh nút Export → "Export Each Photo in Both Shapes": mỗi ảnh xuất cả hai khung (tên file thêm "_4x5", "_16x9"). |
 | Chỉnh vị trí cắt bằng tay | Kéo ảnh trong khung xem trước để đặt vị trí cắt; ghi nhớ theo từng ảnh, dùng cho mọi khung và mọi màn hình xuất. Nút "Reset crop" để quay lại tự động. |
+| Phóng to vùng cắt (cắt bớt rìa) | Nút "Zoom" trên ảnh xem trước (hoặc chụm hai ngón trên bàn di chuột): thu nhỏ vùng cắt tới 4 lần (giữ phần giữa 25% mỗi cạnh) để bỏ phần thừa ở rìa ảnh sự kiện, kể cả khi ảnh giữ nguyên khung gốc. Khuôn mặt tự đặt vào vùng cắt đã phóng; kéo ảnh để chọn phần giữ lại. Ghi nhớ theo từng ảnh; "Reset crop" trả về vùng cắt lớn nhất. |
 | Khung riêng cho từng ảnh | Menu "Crop" góc trên bên trái ảnh xem trước: chọn khung riêng cho ảnh đó (hoặc "Same as the others"). Ảnh đã chỉnh có biểu tượng khung cắt trên ảnh nhỏ. |
 | Không xuất trùng | Ghi nhớ ảnh nào đã xuất ra file nào (dấu ✓ xanh trên ảnh nhỏ, ngày xuất ở thanh thông tin). Khi xuất lại vào cùng thư mục, hỏi từng ảnh: Skip / Overwrite, có ô "Apply to all". Không bao giờ ghi đè ảnh gốc; hai ảnh khác nhau trùng tên vẫn được thêm " (2)". |
 | Watermark logo hoặc chữ | Logo PNG hoặc dòng chữ (vd. "© SuZu Media") có bóng đổ; chỉnh vị trí, kích thước, độ mờ, khoảng cách lề. |
@@ -129,6 +130,7 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Mở để chỉnh & xuất | Chuột phải → Open trên ảnh ở mọi màn hình (People, khuôn mặt, khuôn mặt chưa gán, tìm kiếm, smart album) mở cửa sổ "Edit & Export" giống Batch Export với đúng ảnh đó; ⌘-click chọn nhiều ảnh rồi Open để mở tất cả. Video mở bằng ứng dụng mặc định. |
 | Batch Export | Cân màu, cắt khung, watermark, đổi kích thước cho file/thư mục hoặc ảnh của những người đã chọn. Không bao giờ ghi đè: tên đã có thì thêm " (2)". |
 | Chọn ảnh để xuất | Tích/bỏ tích từng ảnh trên dải ảnh hoặc lưới (⇧-click chọn dải, Chọn tất cả / Bỏ chọn tất cả). |
+| Điều hướng bằng bàn phím | Phím ← → (và ↑ ↓ trên lưới, theo hàng) chuyển ảnh trong dải ảnh/lưới; Home/End về đầu/cuối; Space tích hoặc bỏ tích ảnh đang xem; Return mở ảnh trên lưới ra xem lớn. Bấm vào ảnh xem trước hoặc dải ảnh để lấy tiêu điểm bàn phím. |
 | File RAW | Nhận file RAW của máy ảnh (Canon, Nikon, Sony, Fujifilm, Olympus, Panasonic, Pentax, Leica, Hasselblad, Phase One, Sigma, DNG…) như ảnh thường: nhận diện, tìm kiếm, xuất, chỉnh (ảnh RAW đã chỉnh xuất ra JPEG). Dùng ảnh xem trước trong file nên không chậm hơn. Chụp RAW+JPEG: file RAW đi kèm JPEG cùng tên, hiện người của JPEG, không xử lý hay xuất riêng. |
 | Bỏ ảnh trùng, ảnh mờ | Tuỳ chọn "Skip similar shots" và "Skip blurry shots" trong Batch Export (file/thư mục): kiểm tra ảnh trước khi xuất rồi bỏ tích ảnh chụp liên tiếp giống nhau (giữ ảnh đẹp nhất) và ảnh mờ (mặt chính mất nét/rung; ảnh không có mặt thì xét cả khung). Rê chuột lên ảnh để xem lý do; tích lại nếu muốn giữ. Copy/Move cũng có "Skip blurry shots". |
 | Nguồn là người | Batch Export, Batch Rename, Video Tools nhận đầu vào là người: N ảnh đẹp nhất, bỏ ảnh trùng, mỗi người một thư mục. |
