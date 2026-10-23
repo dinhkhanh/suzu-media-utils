@@ -193,6 +193,8 @@ struct FileInputList: View {
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary, style: StrokeStyle(lineWidth: 1, dash: [5])))
+        // SUZU_TOOL_FOLDER=/path (testing): start with that folder's files.
+        .task { if files.isEmpty, let p = ProcessInfo.processInfo.environment["SUZU_TOOL_FOLDER"] { add([URL(fileURLWithPath: p)]) } }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             for p in providers {
                 _ = p.loadObject(ofClass: URL.self) { url, _ in

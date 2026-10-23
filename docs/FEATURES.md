@@ -1,4 +1,4 @@
-# Tính năng của SuZu Media Utils (v0.6.4)
+# Tính năng của SuZu Media Utils (v0.6.5)
 
 Ứng dụng macOS cho SuZu Media: nhận diện và nhóm khuôn mặt trong ảnh/video sự kiện, cùng các công cụ xử lý ảnh
 hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi tiếng qua Amazon, nếu bật).
@@ -128,6 +128,7 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Mở để chỉnh & xuất | Chuột phải → Open trên ảnh ở mọi màn hình (People, khuôn mặt, khuôn mặt chưa gán, tìm kiếm, smart album) mở cửa sổ "Edit & Export" giống Batch Export với đúng ảnh đó; ⌘-click chọn nhiều ảnh rồi Open để mở tất cả. Video mở bằng ứng dụng mặc định. |
 | Batch Export | Cân màu, cắt khung, watermark, đổi kích thước cho file/thư mục hoặc ảnh của những người đã chọn. Không bao giờ ghi đè: tên đã có thì thêm " (2)". |
 | Chọn ảnh để xuất | Tích/bỏ tích từng ảnh trên dải ảnh hoặc lưới (⇧-click chọn dải, Chọn tất cả / Bỏ chọn tất cả). |
+| Bỏ ảnh trùng, ảnh mờ | Tuỳ chọn "Skip similar shots" và "Skip blurry shots" trong Batch Export (file/thư mục): kiểm tra ảnh trước khi xuất rồi bỏ tích ảnh chụp liên tiếp giống nhau (giữ ảnh đẹp nhất) và ảnh mờ (mặt chính mất nét/rung; ảnh không có mặt thì xét cả khung). Rê chuột lên ảnh để xem lý do; tích lại nếu muốn giữ. Copy/Move cũng có "Skip blurry shots". |
 | Nguồn là người | Batch Export, Batch Rename, Video Tools nhận đầu vào là người: N ảnh đẹp nhất, bỏ ảnh trùng, mỗi người một thư mục. |
 | Batch Rename | Đổi tên theo mẫu `{event} {date} {time} {person} {people} {folder} {seq}` có xem trước; thư viện tự cập nhật đường dẫn. |
 | Copy Verifier | So sánh thư mục gốc và bản sao (mặc định so cả nội dung bằng SHA-256), tìm file thiếu hoặc lỗi và sửa lại; bản sửa được kiểm tra trước khi thay bản hỏng. |

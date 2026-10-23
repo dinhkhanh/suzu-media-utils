@@ -1,4 +1,5 @@
 import CoreGraphics
+import FaceCore
 import Foundation
 import GRDB
 
@@ -55,9 +56,9 @@ public enum ProjectFiles {
     /// Eye openness below which a face counts as blinking (BestShot treats it as closed too).
     public static let eyesClosedBelow = 0.35
     /// Face sharpness (variance of the Laplacian) below which it counts as soft; ~40 is blurry, ~1000 crisp.
-    public static let softBelow = 60.0
+    public static let softBelow = ShotCuller.softFaceBelow
     /// Faces narrower than this share of the frame (crowds, background) don't raise hints.
-    public static let hintMinFaceWidth = 0.04
+    public static let hintMinFaceWidth = ShotCuller.minFaceWidth
 
     /// Every file of the project's photo & video folders (every project's for nil), copies included, by path; or
     /// just the files `ids`, wherever they are.

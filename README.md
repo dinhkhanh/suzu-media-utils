@@ -32,8 +32,8 @@ groups them by person, keeps up as new files arrive, and files each person's med
 - **Export:** Copy/Move to Folder per person or Export All (`<folder>/<Person Name>/`, never overwriting). Optional
   edits (auto tone, face-aware social crop 1:1 · 4:5 · 9:16 · 16:9 · 1.91:1 — one for every photo, or one for portraits
 and one for landscapes — logo, text or banner watermark, resize — auto tone
-  turns on with crops and watermarks), Top N, best of each burst, and people's names written into the files
-  (IPTC/XMP, read by Lightroom, Photo Mechanic, Bridge and Photos).
+  turns on with crops and watermarks), Top N, best of each burst, skip blurry shots, and people's names written
+  into the files (IPTC/XMP, read by Lightroom, Photo Mechanic, Bridge and Photos).
 - **Auto rules:** when new files match a smart-album-style query — photos of one person, everyone with a name, best
   solo shots of anyone, group shots… — they are copied into a folder (on the NAS, or inside Google Drive or Dropbox
   to share automatically), either a folder per person or straight into one folder, optionally levelled, auto-toned,
@@ -71,6 +71,12 @@ JPEG or as lossless PNG (the photo's own colour space, 16-bit when the original 
 (a green tick on the thumbnail, the date in the preview): exporting a photo into a folder that already has it asks,
 photo by photo or for all, whether to skip it or overwrite it. Originals are never overwritten, and another camera's
 photo of the same name gets " (2)".
+
+Skip similar shots and Skip blurry shots (under the photos) check the photos before the export and untick the ones to
+leave out, with the reason on hover, so any can be ticked back. Similar shots are taken within a couple of seconds of
+each other and look the same (the library's burst rule); the best one stays. A photo is blurry when its main face is
+soft (out of focus or moved) or, without a usable face, when the whole frame is smeared. Photos the library has
+processed are judged from what it already measured; others are read on the spot, about a tenth of a second each.
 
 Straighten tilted photos (Look) levels photos turned 0.3°–10° off by their vertical lines — pillars, door frames, screen
 and banner edges — and trims the corners; it only turns a photo when many lines agree (on event photos turned ±3°, it

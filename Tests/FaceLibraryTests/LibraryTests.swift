@@ -543,3 +543,38 @@ struct LibraryServiceStub {
         try LibraryService.deleteSourceContents(id, store: store)
     }
 }
+
+extension LibraryTests {
+    func testExportSkipsBlurryMainFacesAndMeasuresKnownFiles() throws {
+        for i in 0..<3 { try makeFile("b/\(i).jpg", seed: UInt8(i + 1)) }
+        monitor().scan()
+        let all = try media()
+        let an = try newPerson("An")
+        var faceIds: [Int64] = []
+        for m in all { faceIds.append(try addFace(mediaId: m.id!, personId: an)) }
+        // Photo 0: soft main face. Photo 1: a tiny soft face in the background plus a crisp main face. Photo 2: crisp.
+        let small = try addFace(mediaId: all[1].id!, personId: nil)
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE face SET sharpness = 20 WHERE id = ?", arguments: [faceIds[0]])
+            try db.execute(sql: "UPDATE face SET sharpness = 500, score = 0.7 WHERE id = ?", arguments: [faceIds[1]])
+            try db.execute(sql: "UPDATE face SET sharpness = 10, w = 0.02, h = 0.02 WHERE id = ?", arguments: [small])
+            try db.execute(sql: "UPDATE face SET sharpness = 400 WHERE id = ?", arguments: [faceIds[2]])
+            try db.execute(sql: "UPDATE media SET takenAt = 1000, featurePrint = ? WHERE id = ?", arguments: [Vector.encode([1, 0]), all[2].id])
+        }
+        var opts = Exporter.Options()
+        opts.skipBlurry = true
+        let plan = try Exporter(store: store).plan(personId: an, name: "An", base: nil, options: opts)
+        XCTAssertEqual(Set(plan.items.map(\.mediaId)), [all[1].id!, all[2].id!], "only the photo whose main face is soft is left out")
+        let flat = try Exporter(store: store).planFlat(all.map { $0.id! }, base: tmp.appendingPathComponent("out"), options: opts)
+        XCTAssertEqual(Set(flat.items.map(\.mediaId)), [all[1].id!, all[2].id!])
+
+        let measures = try Selection.measures(store, urls: all.map(\.url) + [root.appendingPathComponent("unknown.jpg")])
+        XCTAssertEqual(measures.count, 3, "files the library never saw are left to the caller")
+        XCTAssertEqual(measures[all[0].url]?.faceSharpness, 20)
+        XCTAssertEqual(measures[all[1].url]?.faceSharpness, 500, "the biggest face, not the tiny soft one")
+        XCTAssertEqual(measures[all[1].url]?.faceScore, 0.7)
+        XCTAssertEqual(measures[all[2].url]?.featurePrint, [1, 0])
+        XCTAssertEqual(measures[all[2].url]?.takenAt, Date(timeIntervalSince1970: 1000))
+        XCTAssertNil(measures[all[0].url]?.featurePrint, "no print before the idle pass")
+    }
+}

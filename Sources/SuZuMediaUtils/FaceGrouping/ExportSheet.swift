@@ -31,6 +31,7 @@ struct ExportSheet: View {
     @State private var writeNames = false
     @State private var topN: Int?
     @State private var bestOfBurst = false
+    @State private var skipBlurry = false
     @State private var plan: Exporter.Plan?
     @State private var planning = false
     @State private var running = false
@@ -73,7 +74,7 @@ struct ExportSheet: View {
         .frame(maxHeight: 860)
         .frame(width: editPhotos ? 960 : 620)
         .onAppear { chosen = Set(named.map(\.id)) }
-        .task(id: "\(name)|\(base?.path ?? "")|\(chosen.sorted())|\(editPhotos)|\(recipe.hashValue)|\(writeNames)|\(topN ?? 0)|\(bestOfBurst)|\(wholeEvent)") { await replan() }
+        .task(id: "\(name)|\(base?.path ?? "")|\(chosen.sorted())|\(editPhotos)|\(recipe.hashValue)|\(writeNames)|\(topN ?? 0)|\(bestOfBurst)|\(skipBlurry)|\(wholeEvent)") { await replan() }
     }
 
     @ViewBuilder
@@ -126,6 +127,7 @@ struct ExportSheet: View {
         o.writeNames = writeNames
         o.topN = topN
         o.bestOfBurst = bestOfBurst
+        o.skipBlurry = skipBlurry
         o.project = model.currentProject
         o.taken = wholeEvent ? nil : model.sessionRange
         return o
@@ -143,6 +145,8 @@ struct ExportSheet: View {
                 .labelsHidden().fixedSize()
                 Toggle("Skip similar shots (best of each burst)", isOn: $bestOfBurst).toggleStyle(.checkbox)
             }
+            Toggle("Skip blurry shots (main face out of focus)", isOn: $skipBlurry).toggleStyle(.checkbox)
+                .help("Photos whose biggest face is soft, as the Files browser marks them, are left out")
             Toggle("Write people's names into the files (Lightroom, Photos, Bridge)", isOn: $writeNames)
                 .toggleStyle(.checkbox)
                 .disabled(editPhotos)

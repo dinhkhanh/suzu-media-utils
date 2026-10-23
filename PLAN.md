@@ -358,3 +358,18 @@ and after every feature below; same 92 people.
 - Rename Team writes `team.json`; every Mac re-reads it each pass.
 - Sidebar: team card (tinted, "TEAM") above the project card ("PROJECT"); the project menu groups projects by team
   and "Only on this Mac"; the team menu lists the team's projects, Macs and actions.
+
+## v0.6.5 (2026-10-23): skip similar and blurry shots in Batch Export
+- `ShotCuller` (FaceCore): per photo capture time (EXIF, else mtime), Vision feature print, main-face sharpness
+  (aligned-crop Laplacian variance, the library's measure) and a whole-frame blur index (Crete et al. re-blur
+  metric on the 1500 px detection decode). Blurry = main face < 60, or no usable face and frame index > 0.58
+  (1,046 sharp library photos read ≤ 0.52; a 5×5 box blur at 1500 px reads 0.56–0.73). Similar = same rule as
+  `BurstGrouper` (≤ 2 s apart, print distance ≤ 0.48), neighbours in the folder when times are missing; the best
+  by library score, else face sharpness, else frame. Blurry go first so a group keeps a sharp one.
+- Batch Export: two checkboxes under the photos; the check runs when they or the photos change, unticks the losers
+  (reason on hover) and the user can tick any back. Library-known photos come from `Selection.measures` (no
+  decode); the rest are read in parallel (~0.1 s each with faces).
+- Copy/Move (ExportSheet) and `Exporter.Options.skipBlurry`: leaves out photos whose biggest face is soft.
+- Whole-frame blur alone cannot tell a blurry subject from a sharp background (tested: no separation against face
+  sharpness on 1,046 photos), hence the face-first rule.
+

@@ -152,6 +152,8 @@ struct EditPreview: View {
     /// When set, photos can be ticked off: the action then applies only to the ticked ones (this set holds the
     /// unticked ones, so photos added later start ticked).
     var excluded: Binding<Set<ToolItem>>? = nil
+    /// A word on some photos (why one was unticked), shown with the file name on hover.
+    var notes: [ToolItem: String] = [:]
     @State private var index = 0
     @State private var gridMode = false
     /// The strip re-centres for the arrows, not when a visible thumbnail is clicked.
@@ -359,7 +361,7 @@ struct EditPreview: View {
                             if mods.contains(.shift) || mods.contains(.command) { tick(i) } else { clickedInStrip = true; index = i }
                         })
                         .id(i)
-                        .help(item.url.lastPathComponent)
+                        .help(item.url.lastPathComponent + (notes[item].map { " · \($0)" } ?? ""))
                     }
                 }
                 .padding(.horizontal, 10).padding(.vertical, 8)
@@ -421,7 +423,7 @@ struct EditPreview: View {
                         StripThumb(url: item.url, selected: i == index, checked: isChecked(item), side: 150,
                                    onCheck: { tick(i) }, onTap: { tick(i) }, onDoubleTap: { index = i; gridMode = false })
                             .id(i)
-                            .help("\(item.url.lastPathComponent)\(item.personName.map { " · \($0)" } ?? "")")
+                            .help("\(item.url.lastPathComponent)\(item.personName.map { " · \($0)" } ?? "")\(notes[item].map { " · \($0)" } ?? "")")
                     }
                 }
                 .padding(12)

@@ -40,6 +40,8 @@ public struct Exporter: Sendable {
         public var topN: Int?
         /// From a burst of near-identical shots keep only the best one.
         public var bestOfBurst = false
+        /// Leave out photos whose main face is soft (out of focus or moved), as the Files browser marks them.
+        public var skipBlurry = false
         /// Only files of this project (nil = every project).
         public var project: Int64?
         /// Only files captured in this time range (a session), seconds since 1970.
@@ -215,12 +217,22 @@ public struct Exporter: Sendable {
         let list = mediaIds.map(String.init).joined(separator: ",")
         let faces = try store.db.read { db in
             try Row.fetchAll(db, sql: """
-                SELECT f.mediaId, f.personId, f.x, f.y, f.w, f.h, COALESCE(f.score, f.quality, 0) AS s, p.name, m.burstId
+                SELECT f.mediaId, f.personId, f.x, f.y, f.w, f.h, COALESCE(f.score, f.quality, 0) AS s, p.name, m.burstId, f.sharpness
                 FROM face f JOIN media m ON m.id = f.mediaId LEFT JOIN person p ON p.id = f.personId
                 WHERE f.mediaId IN (\(list)) AND f.time IS NULL
                 """)
         }
         let byMedia = Dictionary(grouping: faces) { $0["mediaId"] as Int64 }
+        if options.skipBlurry {
+            // The photo's biggest face, when it is big enough to be the subject, decides.
+            var blurry: Set<Int64> = []
+            for (m, fs) in byMedia {
+                guard let main = fs.filter({ ($0["w"] as Double) >= ShotCuller.minFaceWidth }).max(by: { ($0["w"] as Double) * ($0["h"] as Double) < ($1["w"] as Double) * ($1["h"] as Double) }),
+                      let s = main["sharpness"] as Double?, s < ShotCuller.softFaceBelow else { continue }
+                blurry.insert(m)
+            }
+            plan.items.removeAll { blurry.contains($0.mediaId) }
+        }
         // Best score per (file, person), read once: sorting thousands of files compares them many times.
         var best: [Int64: [Int64: Double]] = [:]
         var bestAny: [Int64: Double] = [:]

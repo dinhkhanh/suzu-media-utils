@@ -81,3 +81,43 @@ public enum Selection {
         return out
     }
 }
+
+extension Selection {
+    /// What the library already knows about these files, for culling before an export: capture time, feature print
+    /// (once the idle pass has made it) and the main face's sharpness and score. Files it never processed are
+    /// left out, so the caller measures those itself (`ShotCuller.measure`).
+    public static func measures(_ store: LibraryStore, urls: [URL]) throws -> [URL: ShotCuller.Measure] {
+        guard !urls.isEmpty else { return [:] }
+        // The library stores paths as scanned; /var and /private/var, or a symlinked volume, are the same file.
+        var byPath: [String: URL] = [:]
+        for u in urls { for p in Set([u.path, u.standardizedFileURL.path, u.resolvingSymlinksInPath().path]) { byPath[p] = byPath[p] ?? u } }
+        var out: [URL: ShotCuller.Measure] = [:]
+        try store.db.read { db in
+            // Chunked: a selection can be thousands of files, past SQLite's parameter limit.
+            for chunk in Array(byPath.keys).chunks(of: 500) {
+                let marks = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+                for r in try Row.fetchAll(db, sql: """
+                    SELECT m.path, m.takenAt, m.featurePrint,
+                        (SELECT f.sharpness FROM face f WHERE f.mediaId = COALESCE(m.duplicateOf, m.id) AND f.time IS NULL AND f.w >= ?
+                         ORDER BY f.w * f.h DESC LIMIT 1) AS faceSharpness,
+                        (SELECT COALESCE(f.score, f.quality, 0) FROM face f WHERE f.mediaId = COALESCE(m.duplicateOf, m.id) AND f.time IS NULL AND f.w >= ?
+                         ORDER BY f.w * f.h DESC LIMIT 1) AS faceScore
+                    FROM media m WHERE m.status = 'done' AND m.path IN (\(marks))
+                    """, arguments: StatementArguments([ShotCuller.minFaceWidth, ShotCuller.minFaceWidth] + chunk.map { $0 as DatabaseValueConvertible })) {
+                    guard let url = byPath[r["path"]] else { continue }
+                    let fp = (r["featurePrint"] as Data?).map(Vector.decode)
+                    out[url] = ShotCuller.Measure(url: url, takenAt: (r["takenAt"] as Double?).map(Date.init(timeIntervalSince1970:)),
+                                                  featurePrint: fp?.isEmpty == false ? fp : nil, blur: nil,
+                                                  faceSharpness: r["faceSharpness"], faceScore: r["faceScore"])
+                }
+            }
+        }
+        return out
+    }
+}
+
+extension Array {
+    func chunks(of size: Int) -> [[Element]] {
+        stride(from: 0, to: count, by: size).map { Array(self[$0..<Swift.min($0 + size, count)]) }
+    }
+}

@@ -16,6 +16,11 @@ struct BatchExportTool: View {
 
     /// Photos unticked in the preview; everything else is exported.
     @State private var excluded: Set<ToolItem> = []
+    /// Unticked by the check for similar and blurry shots (a subset of `excluded` until the user ticks one back).
+    @State private var culled: [ToolItem: ShotCuller.Reason] = [:]
+    @State private var checking: (done: Int, total: Int)?
+    @AppStorage("batchExport.skipSimilar") private var skipSimilar = false
+    @AppStorage("batchExport.skipBlurry") private var skipBlurry = false
     @State private var recipe = EditRecipe()
     @State private var output: URL?
     @State private var suffix = ""
@@ -43,13 +48,14 @@ struct BatchExportTool: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                EditPreview(recipe: $recipe, samples: items, excluded: $excluded)
+                EditPreview(recipe: $recipe, samples: items, excluded: $excluded, notes: culled.mapValues(Self.label))
                     .frame(minWidth: 260, maxWidth: .infinity)
                 Divider()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
                         InspectorSection(title: "Photos") {
                             ToolInputView(items: $items, kinds: MediaTypes.photos, mediaKind: .photo, label: "photos")
+                            cullOptions
                         }
                         EditControls(recipe: $recipe)
                         Text(fromPeople ? "Crops keep each person's face in frame; names are written into the files."
@@ -96,7 +102,7 @@ struct BatchExportTool: View {
                     .menuStyle(.borderlessButton).fixedSize()
                     .help("More ways to export")
                 }
-                .disabled(running || chosenCount == 0 || output == nil)
+                .disabled(running || chosenCount == 0 || output == nil || checking != nil)
             }
             .padding(.horizontal, 16).padding(.vertical, 10)
             .background(.bar)
@@ -117,6 +123,7 @@ struct BatchExportTool: View {
         .rememberEdits("batchExport", recipe: $recipe)
         // Only photos still in the list can be left out.
         .onChange(of: items) { if !excluded.isEmpty { excluded.formIntersection(items) } }
+        .task(id: "\(skipSimilar)|\(skipBlurry)|\(items.map(\.url.path).hashValue)") { await check() }
         .task {
             // SUZU_TOOL_SAMPLES=1 (testing): start with the project's best photos as input.
             if ProcessInfo.processInfo.environment["SUZU_TOOL_SAMPLES"] != nil, items.isEmpty, let faces = ToolWork.faces {
@@ -125,6 +132,89 @@ struct BatchExportTool: View {
                 if ProcessInfo.processInfo.environment["SUZU_TOOL_SAMPLES"] == "grid" { excluded = Set(items.dropFirst(1).prefix(3)) }
             }
         }
+    }
+
+    /// Similar and blurry shots are unticked in the preview, not hidden: the user sees what goes and can tick any back.
+    var cullOptions: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // People already come as the best of each burst (the Skip similar shots option above).
+            if !fromPeople {
+                Toggle("Skip similar shots (keep the best of each)", isOn: $skipSimilar).toggleStyle(.checkbox)
+                    .help("Shots taken within a couple of seconds that look the same: only the best one is exported")
+            }
+            Toggle("Skip blurry shots", isOn: $skipBlurry).toggleStyle(.checkbox)
+                .help("Photos whose main face is out of focus or moved; without a face, photos that are smeared all over")
+            if let c = checking {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    Text("Checking \(c.done) of \(c.total) photos…")
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            } else if skipSimilar || skipBlurry, !items.isEmpty {
+                let similar = culled.values.filter { if case .similar = $0 { true } else { false } }.count, blurry = culled.count - similar
+                Text(culled.isEmpty ? "Nothing to skip." : "\(Self.count(similar, "similar")) and \(Self.count(blurry, "blurry")) unticked — tick any to keep it.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    static func count(_ n: Int, _ what: String) -> String { "\(n) \(what) photo\(n == 1 ? "" : "s")" }
+
+    static func label(_ r: ShotCuller.Reason) -> String {
+        switch r {
+        case .blurry: "Blurry: unticked"
+        case .similar(let best): "Similar to \(best.lastPathComponent): unticked"
+        }
+    }
+
+    /// Finds the similar and blurry shots and unticks them; turning the options off ticks them back. The library's
+    /// measurements are used for photos it has processed; the others are read here (faces take ~¼ s each).
+    func check() async {
+        excluded.subtract(culled.keys)
+        culled = [:]
+        let similar = skipSimilar && !fromPeople, blurry = skipBlurry
+        guard similar || blurry, !items.isEmpty else { checking = nil; return }
+        let items = items, store = ToolWork.faces?.store, workers = ToolWork.parallelism
+        checking = (0, items.count)
+        let known = await Task.detached(priority: .userInitiated) { (try? store.map { try Selection.measures($0, urls: items.map(\.url)) }) ?? [:] }.value
+        guard !Task.isCancelled else { return }
+        var measures: [Int: ShotCuller.Measure] = [:]
+        await withTaskGroup(of: (Int, ShotCuller.Measure).self) { group in
+            var next = 0
+            func add() {
+                guard next < items.count, !Task.isCancelled else { return }
+                let i = next, url = items[i].url, have = known[url]; next += 1
+                group.addTask(priority: .userInitiated) {
+                    // A processed photo without a usable face needs the frame's blur; one from before the idle pass
+                    // needs its feature print. Both come from the thumbnail, which is quick.
+                    var m = have ?? ShotCuller.Measure(url: url)
+                    let needPrint = similar && m.featurePrint == nil, needBlur = blurry && m.faceSharpness == nil && m.blur == nil
+                    if have == nil || needPrint || needBlur {
+                        let fresh = ShotCuller.measure(url, faces: blurry && have == nil)
+                        if have == nil { m = fresh } else {
+                            if needPrint { m.featurePrint = fresh.featurePrint }
+                            if needBlur { m.blur = fresh.blur }
+                            if m.takenAt == nil { m.takenAt = fresh.takenAt }
+                        }
+                    }
+                    return (i, m)
+                }
+            }
+            for _ in 0..<workers { add() }
+            for await (i, m) in group {
+                measures[i] = m
+                checking = (measures.count, items.count)
+                add()
+            }
+        }
+        guard !Task.isCancelled, measures.count == items.count else { checking = nil; return }
+        let shots = items.indices.map { measures[$0]! }
+        let result = await Task.detached(priority: .userInitiated) { ShotCuller.cull(shots, similar: similar, blurry: blurry) }.value
+        guard !Task.isCancelled else { return }
+        culled = Dictionary(uniqueKeysWithValues: result.map { (items[$0.key], $0.value) })
+        excluded.formUnion(culled.keys)
+        checking = nil
     }
 
     /// Where a photo goes: its person's folder or the output folder.
