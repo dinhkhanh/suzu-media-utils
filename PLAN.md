@@ -457,3 +457,9 @@ and after every feature below; same 92 people.
   with. The plan counts new photos and new videos apart; `Options.videoDestination` sends videos to their own
   place (their own card folder and hand-over folder there, `Outcome.videoFolder`), the photos' destination
   otherwise. Both card folders can join the project.
+
+## v0.7.2 (2026-10-24): Edit & Export shows its photos again
+- `ToolInputView`'s task (session range, project, chosen people) ran on appear too and, in Files mode, set the
+  items from its own empty file list, wiping the photos `BatchExportTool(initial:)` was given from the library. It
+  only rebuilds the items from files when some are chosen there. `SUZU_START_EDIT=/a.jpg:/b.jpg` (testing) opens
+  the Edit & Export window on launch.
