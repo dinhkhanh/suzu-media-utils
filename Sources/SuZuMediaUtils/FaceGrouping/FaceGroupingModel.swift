@@ -508,6 +508,13 @@ final class FaceGroupingModel: ObservableObject {
         }
     }
 
+    /// Adds the folder Copy from Cards fills, unless a folder of the library already holds it.
+    func addCopiedFolder(_ url: URL, project: Int64) {
+        let path = canonicalPath(url)
+        if sources.contains(where: { path == $0.path || path.hasPrefix($0.path + "/") }) { return }
+        perform { try $0.addSource(url, kind: .media, project: project) }
+    }
+
     /// Hides the folder at once and forgets its files in the background (can take a while for big folders).
     func removeSource(_ id: Int64) {
         guard let service else { return }

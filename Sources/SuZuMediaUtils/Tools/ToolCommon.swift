@@ -6,10 +6,11 @@ import UniformTypeIdentifiers
 
 /// The tools beyond Face Grouping. Each is a self-contained view over MediaKit.
 enum ToolRoute: String, Hashable, CaseIterable {
-    case batchExport, rename, verify, video
+    case cards, batchExport, rename, verify, video
 
     var title: String {
         switch self {
+        case .cards: "Copy from Cards"
         case .batchExport: "Batch Export"
         case .rename: "Batch Rename"
         case .verify: "Copy Verifier"
@@ -18,6 +19,7 @@ enum ToolRoute: String, Hashable, CaseIterable {
     }
     var icon: String {
         switch self {
+        case .cards: "sdcard"
         case .batchExport: "wand.and.stars"
         case .rename: "character.cursor.ibeam"
         case .verify: "checkmark.shield"
@@ -40,6 +42,7 @@ struct ToolDetail: View {
     let route: ToolRoute
     var body: some View {
         switch route {
+        case .cards: CardCopyTool()
         case .batchExport: BatchExportTool()
         case .rename: BatchRenameTool()
         case .verify: CopyVerifierTool()

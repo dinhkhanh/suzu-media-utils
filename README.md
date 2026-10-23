@@ -111,6 +111,16 @@ and remembers its choices; edits can be saved back to the preset or as a new one
 Patterns like `{event}_{date}_{person}_{seq:3}` with a live preview; people come from Face Grouping, and renamed
 library files keep their faces and names.
 
+### Copy from Cards
+Photographers hand their cards over again and again during an event without erasing them. The tool knows each card
+by its volume UUID (the serial the camera wrote when it formatted the card; no renaming needed) and keeps a ledger
+of every file copied from it, so the next hand-over copies only what was shot since, however the earlier copies were
+moved, filtered or edited in the meantime. Files renamed on the card, or already in the library from a copy made by
+hand, are matched by contents and not copied twice. Each card gets its own folder at the destination (name the card
+"Nam R5 card 1"; the camera and body serial come from EXIF), with a folder per hand-over if you like; copies are
+streamed through SHA-256 and read back, keep the original's times, and the card's folder can be added to the open
+project so faces are found as the files land. A card seen before can be forgotten (right-click) to copy it all again.
+
 ### Copy Verifier
 Checks that a copy (memory card → NAS, NAS → backup) is complete — missing, truncated or damaged files (contents are
 compared with SHA-256 checksums unless you turn that off) — and repairs it. A repair copies to a temporary file and
@@ -196,7 +206,7 @@ About $1 per 1,000 faces; up to 3 face crops per unnamed group are sent, each fa
 | `Sources/FaceLibrary` | SQLite library (GRDB), folder monitor, processor, grouping, best shots, bursts, search, delivery, export, gallery, Rekognition |
 | `Sources/SuZuMediaUtils/App` | App shell: window, sidebar, settings, headless mode |
 | `Sources/SuZuMediaUtils/FaceGrouping` | Face Grouping UI |
-| `Sources/SuZuMediaUtils/Tools` | Batch Export, Batch Rename, Copy Verifier, Video Tools |
+| `Sources/SuZuMediaUtils/Tools` | Copy from Cards, Batch Export, Batch Rename, Copy Verifier, Video Tools |
 | `Sources/facescan` | Research CLI used to benchmark and tune thresholds |
 | `Tests/FaceLibraryTests`, `Tests/MediaKitTests` | Tests (28) |
 | `tools/` | Model conversion, icon, evaluation scripts |

@@ -426,3 +426,20 @@ and after every feature below; same 92 people.
   way); `PersonNames.merge` carries it onto the target.
 - Picking a name in the known-name suggestions saves it at once (`knownNameSuggestions(for:onPick:)`): a change
   that replaces the text with a suggested name is a pick, typing one more letter is not.
+
+## v0.7.0 (2026-10-24): Copy from Cards
+- `CardCopier` (FaceLibrary): a card is known by its volume UUID (a plain folder by a hidden `.suzu-card` marker,
+  since its volume UUID would be the disk's); `card` rows carry label, volume name and the camera's make, model and
+  body serial from the first photo's EXIF. `plan` lists the card's media and sidecars, marks files whose path, size
+  and mtime (±2 s, FAT) match this card's `cardFile` ledger as copied without reading them, reads the content key of
+  the rest and matches it against every card's ledger and `media.contentKey` (copied by hand), and the remainder is
+  new. `copy` streams each new file through SHA-256 to a temporary name, checks size (and reads it back with
+  `verify`), keeps the mtime, renames it, and records it as it lands; same-name-other-contents gets `_1`, same
+  contents already there is recorded, not copied; files matched by contents while planning are recorded too.
+  Destination: `<dest>/<card name>/<yyyy-MM-dd HH.mm>/` (a folder per hand-over, optional), flat or with the card's
+  folders. The ledger is per Mac (not team-synced).
+- `CardCopyTool` lists mounted removable/ejectable volumes with DCIM/PRIVATE (or media at the root), looks again on
+  mount/unmount, plans each card off the main thread, copies one card at a time with progress and Cancel, checks the
+  destination's free space, and can add the card's folder to the open project (`addCopiedFolder`, skipped when a
+  library folder already holds it). Cards seen before can be named or forgotten. `SUZU_CARD_VOLUMES=/a:/b` stands
+  folders in for cards when testing.

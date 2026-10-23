@@ -304,6 +304,33 @@ public final class LibraryStore: @unchecked Sendable {
                 t.column("count", .integer).notNull()
             }
         }
+        m.registerMigration("v12-cards") { db in
+            /// A photographer's memory card, known by its volume UUID (see CardCopier), and what was copied from it.
+            try db.create(table: "card") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("uuid", .text).notNull().unique()
+                t.column("label", .text)
+                t.column("volumeName", .text)
+                t.column("cameraMake", .text)
+                t.column("cameraModel", .text)
+                t.column("cameraSerial", .text)
+                t.column("firstSeenAt", .datetime).notNull()
+                t.column("lastCopiedAt", .datetime)
+                t.column("lastCopiedTo", .text)
+            }
+            try db.create(table: "cardFile") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("cardId", .integer).notNull().indexed().references("card", onDelete: .cascade)
+                t.column("relPath", .text).notNull()
+                t.column("size", .integer).notNull()
+                t.column("mtime", .double).notNull()
+                t.column("contentKey", .text).notNull().indexed()
+                t.column("sha256", .text)
+                t.column("copiedAt", .datetime).notNull()
+                t.column("copiedTo", .text)
+                t.uniqueKey(["cardId", "relPath", "contentKey"])
+            }
+        }
         return m
     }
 }

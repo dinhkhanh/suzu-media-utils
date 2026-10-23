@@ -1,4 +1,4 @@
-# Tính năng của SuZu Media Utils (v0.6.9)
+# Tính năng của SuZu Media Utils (v0.7.0)
 
 Ứng dụng macOS cho SuZu Media: nhận diện và nhóm khuôn mặt trong ảnh/video sự kiện, cùng các công cụ xử lý ảnh
 hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi tiếng qua Amazon, nếu bật).
@@ -137,6 +137,7 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Bỏ ảnh trùng, ảnh mờ | Tuỳ chọn "Skip similar shots" và "Skip blurry shots" trong Batch Export (file/thư mục): kiểm tra ảnh trước khi xuất rồi bỏ tích ảnh chụp liên tiếp giống nhau (giữ ảnh đẹp nhất) và ảnh mờ (mặt chính mất nét/rung; ảnh không có mặt thì xét cả khung). Rê chuột lên ảnh để xem lý do; tích lại nếu muốn giữ. Copy/Move cũng có "Skip blurry shots". |
 | Nguồn là người | Batch Export, Batch Rename, Video Tools nhận đầu vào là người: N ảnh đẹp nhất, bỏ ảnh trùng, mỗi người một thư mục. |
 | Batch Rename | Đổi tên theo mẫu `{event} {date} {time} {person} {people} {folder} {seq}` có xem trước; thư viện tự cập nhật đường dẫn. |
+| Chép từ thẻ nhớ (Copy from Cards) | Thẻ của các nhiếp ảnh gia đưa đi đưa lại nhiều lần trong sự kiện mà không xóa: ứng dụng nhận ra từng thẻ theo UUID của ổ (không cần đổi tên thẻ), ghi sổ mọi file đã chép từ thẻ đó, lần sau chỉ chép file mới chụp — dù bản chép trước đã bị chuyển đi, lọc hay chỉnh sửa. File đổi tên trên thẻ hoặc đã có trong thư viện (chép tay) cũng nhận ra theo nội dung, không chép hai lần. Mỗi thẻ một thư mục ở đích, mỗi lần đưa thẻ một thư mục con theo giờ (tùy chọn); đặt tên thẻ ("Nam R5 thẻ 1"), hiện máy ảnh và số serial thân máy từ EXIF; chép có kiểm tra SHA-256, giữ nguyên giờ file; kiểm tra chỗ trống ở đích; tự thêm thư mục thẻ vào dự án đang mở để nhận diện ngay. Chuột phải thẻ đã gặp → Forget để chép lại từ đầu. |
 | Copy Verifier | So sánh thư mục gốc và bản sao (mặc định so cả nội dung bằng SHA-256), tìm file thiếu hoặc lỗi và sửa lại; bản sửa được kiểm tra trước khi thay bản hỏng. |
 | Video Tools | Tạo bản proxy 720p và contact sheet (lưới khung hình có mốc thời gian) cho nhiều video. |
 
