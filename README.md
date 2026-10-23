@@ -16,7 +16,8 @@ groups them by person, keeps up as new files arrive, and files each person's med
 - **Projects:** one project per event, each with its own folders. Switch at the top of the sidebar (or File → Open
   Project); people, search, albums, auto rules, exports, the gallery and the batch tools follow the open project.
   People are shared: name someone once and they are recognised in every later project (typing a name suggests
-  people named before; "This Is…" merges a group into them).
+  people named before, and picking a suggestion saves it; "This Is…" merges a group into them). A named person
+  stays recognised after their folder is removed or their files are deleted or changed on disk.
 - Photos (JPEG, HEIC, PNG, TIFF) and videos (MP4/MOV natively; AV1, WebM, MKV, AVI… via ffmpeg). Videos are sampled
   at 1 frame per second; a person counts once per video.
 - Groups form automatically; known people are recognised as soon as a file finishes copying.

@@ -417,3 +417,12 @@ and after every feature below; same 92 people.
 - `Set.click(_:in:)` takes the grid's order: ⇧-click selects from the selection to the clicked item (⇧⌘ adds the
   range), `extend(to:in:)` for the face grids whose plain click toggles. Used by People, person pages, Search, Files
   (grid; the table has it natively) and face grids.
+
+## v0.6.9 (2026-10-23): named people are remembered when their faces leave the library
+- Removing a folder, or files deleted or changed on disk, kept the names but dropped every face of them, so the
+  same photos added again came back as unnamed groups. `PersonMemory.remember` runs in the transaction that deletes
+  the faces: a named person's mean face and unit count go into `personMemory` (migration `v11-person-memory`,
+  cascades with the person). `GroupingEngine.addMemory` counts it like a teammate's summary (weight capped the same
+  way); `PersonNames.merge` carries it onto the target.
+- Picking a name in the known-name suggestions saves it at once (`knownNameSuggestions(for:onPick:)`): a change
+  that replaces the text with a suggested name is a pick, typing one more letter is not.

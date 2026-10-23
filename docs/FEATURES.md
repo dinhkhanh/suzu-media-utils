@@ -1,4 +1,4 @@
-# Tính năng của SuZu Media Utils (v0.6.8)
+# Tính năng của SuZu Media Utils (v0.6.9)
 
 Ứng dụng macOS cho SuZu Media: nhận diện và nhóm khuôn mặt trong ảnh/video sự kiện, cùng các công cụ xử lý ảnh
 hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi tiếng qua Amazon, nếu bật).
@@ -31,7 +31,8 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Hỗ trợ video | MP4/MOV sẵn có; AV1, WebM, MKV, AVI… qua ffmpeg. Lấy 1 khung hình/giây, mỗi người tính một lần mỗi video. |
 | Tự động nhóm | Các khuôn mặt giống nhau tự gom thành một người. |
 | Đặt tên một lần | Người được dùng chung giữa các dự án: đã đặt tên ở sự kiện trước thì sự kiện sau tự nhận ra. |
-| Gợi ý tên | Khi gõ tên sẽ gợi ý những người đã đặt tên trước đó. |
+| Gợi ý tên | Khi gõ tên sẽ gợi ý những người đã đặt tên trước đó; chọn một gợi ý là lưu ngay, không cần Enter. |
+| Nhớ mặt người đã đặt tên | Bỏ thư mục, xóa hay sửa file trên đĩa thì vẫn nhớ khuôn mặt của người đã đặt tên: thêm lại đúng ảnh đó, hay gặp lại họ ở sự kiện sau, đều được nhận ra với đúng tên. |
 | Một tên, một người | Tên trùng (khác hoa/thường hoặc kiểu mã hóa Unicode) luôn là cùng một người; "New Person…" với tên đã có sẽ gộp vào người đó. |
 | "Đây là…" (This Is…) | Gộp một nhóm vào một người đã có tên, ở dự án này hoặc dự án khác. |
 | Đặt tên ngay trên lưới | Bấm vào tên để sửa, Enter để lưu và chuyển sang nhóm chưa có tên tiếp theo. |
