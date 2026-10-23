@@ -464,7 +464,7 @@ and after every feature below; same 92 people.
   only rebuilds the items from files when some are chosen there. `SUZU_START_EDIT=/a.jpg:/b.jpg` (testing) opens
   the Edit & Export window on launch.
 
-## Cards: a destination per card, cards copying side by side
+## v0.7.3 (2026-10-24): a destination per card, cards copying side by side
 - `CardCopyModel.ownDestinations` (UserDefaults `cardCopyOwnDestinations`, by volume UUID: this Mac's paths, not
   part of the team's ledger): a card's own place instead of the screen's destination, picked from a folder menu in
   its row and kept for its next hand-over. Videos still go to the screen's video destination when they have one.
