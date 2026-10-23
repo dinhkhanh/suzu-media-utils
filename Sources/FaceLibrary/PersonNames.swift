@@ -20,8 +20,8 @@ public enum PersonNames {
             .first { ($0["id"] as Int64) != excluding && key($0["name"]) == k }?["id"]
     }
 
-    /// Moves everything of `others` onto `target` (faces, "not this person" marks, delivery rules and their
-    /// history, smart albums), then deletes `others`.
+    /// Moves everything of `others` onto `target` (faces, remembered faces, "not this person" marks, delivery rules
+    /// and their history, smart albums), then deletes `others`.
     static func merge(_ others: [Int64], into target: Int64, db: Database) throws {
         let others = others.filter { $0 != target }
         guard !others.isEmpty else { return }
@@ -41,6 +41,7 @@ public enum PersonNames {
         }
         try db.execute(sql: "UPDATE OR IGNORE personRemote SET personId = ? WHERE personId IN (\(list))", arguments: [target])
         try db.execute(sql: "UPDATE face SET personId = ? WHERE personId IN (\(list))", arguments: [target])
+        try PersonMemory.merge(others, into: target, db: db)
         try db.execute(sql: "UPDATE face SET rejectedPersonId = ? WHERE rejectedPersonId IN (\(list))", arguments: [target])
         try db.execute(sql: "UPDATE person SET coverFaceId = (SELECT coverFaceId FROM person WHERE id IN (\(list)) AND coverFaceId IS NOT NULL LIMIT 1) WHERE id = ? AND coverFaceId IS NULL", arguments: [target])
         // Rules follow the person instead of being deleted with them (the foreign key cascades).

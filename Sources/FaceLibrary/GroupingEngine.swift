@@ -169,6 +169,7 @@ public final class GroupingEngine: @unchecked Sendable {
             for u in units(rs) { add(u.vector, to: pid) }
         }
         try addRemote("1")
+        try addMemory("1")
     }
 
     func rebuild(personIds: Set<Int64>) throws {
@@ -176,7 +177,25 @@ public final class GroupingEngine: @unchecked Sendable {
             people[pid] = nil
             for u in units(try loadRows("face.personId = ?", [pid])) { add(u.vector, to: pid) }
         }
-        try addRemote("personId IN (\(personIds.map(String.init).joined(separator: ",")))")
+        let list = personIds.map(String.init).joined(separator: ",")
+        try addRemote("personId IN (\(list))")
+        try addMemory("personId IN (\(list))")
+    }
+
+    /// Faces that left the library (PersonMemory) still count, the same way as a teammate's: a named person whose
+    /// folder was removed is recognised when their photos come back, or at the next event.
+    func addMemory(_ condition: String) throws {
+        let rows = try store.db.read { db in
+            try Row.fetchAll(db, sql: "SELECT personId, centroid, count FROM personMemory WHERE \(condition)")
+        }
+        for r in rows {
+            let pid: Int64 = r["personId"], centroid = Vector.decode(r["centroid"]), n = min(r["count"] as Int, Self.remoteWeightCap)
+            guard centroid.count == 512, n > 0 else { continue }
+            var p = people[pid] ?? ([Float](repeating: 0, count: 512), 0)
+            for i in 0..<512 { p.sum[i] += centroid[i] * Float(n) }
+            p.count += n
+            people[pid] = p
+        }
     }
 
     /// Faces a teammate's Mac saw count as if they were here: the mean of their embeddings, weighted by how many

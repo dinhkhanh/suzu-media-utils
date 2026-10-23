@@ -296,6 +296,14 @@ public final class LibraryStore: @unchecked Sendable {
             try db.execute(sql: "DROP TABLE team")
             try db.execute(sql: "ALTER TABLE team_new RENAME TO team")
         }
+        m.registerMigration("v11-person-memory") { db in
+            /// The mean of a named person's faces that left the library (see PersonMemory).
+            try db.create(table: "personMemory") { t in
+                t.column("personId", .integer).primaryKey().references("person", onDelete: .cascade)
+                t.column("centroid", .blob).notNull()
+                t.column("count", .integer).notNull()
+            }
+        }
         return m
     }
 }

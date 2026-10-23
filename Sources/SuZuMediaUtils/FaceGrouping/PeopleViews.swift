@@ -152,7 +152,7 @@ struct PersonCell: View {
                     .multilineTextAlignment(.center)
                     .font(.headline)
                     .focused(editing, equals: person.id)
-                    .knownNameSuggestions(for: name)
+                    .knownNameSuggestions(for: name) { onRename($0) }
                     .onSubmit { onRename(name) }
                     .onExitCommand { name = person.name ?? ""; editing.wrappedValue = nil }
                     .onAppear { name = person.name ?? "" }
@@ -259,7 +259,7 @@ struct PersonDetail: View {
                 TextField("Add a name", text: $name)
                     .textFieldStyle(.plain)
                     .font(.title.bold())
-                    .knownNameSuggestions(for: name)
+                    .knownNameSuggestions(for: name) { _ in commitName() }
                     .onSubmit(commitName)
                 if !otherProjects.isEmpty {
                     Label("Also in \(otherProjects.prefix(3).joined(separator: ", "))\(otherProjects.count > 3 ? " and \(otherProjects.count - 3) more" : "")",
@@ -610,24 +610,37 @@ struct ThisIsMenu: View {
 
 extension View {
     /// While typing a name, suggests people already named in any project, so a name is given once and reused.
-    func knownNameSuggestions(for text: String) -> some View {
-        modifier(KnownNameSuggestions(text: text))
+    /// Picking a suggestion saves it at once (`onPick`), without Return.
+    func knownNameSuggestions(for text: String, onPick: @escaping (String) -> Void) -> some View {
+        modifier(KnownNameSuggestions(text: text, onPick: onPick))
     }
 }
 
 struct KnownNameSuggestions: ViewModifier {
     @EnvironmentObject var model: FaceGroupingModel
     let text: String
+    let onPick: (String) -> Void
 
     func body(content: Content) -> some View {
-        let typed = text.trimmingCharacters(in: .whitespaces)
-        let matches = typed.isEmpty ? [] : model.knownPeople.compactMap(\.name)
-            .filter { $0.localizedCaseInsensitiveContains(typed) && $0.compare(typed, options: .caseInsensitive) != .orderedSame }
-            .prefix(8)
-        content.textInputSuggestions {
-            ForEach(Array(matches), id: \.self) { name in
-                Text(name).textInputCompletion(name)
+        content
+            .textInputSuggestions {
+                ForEach(matches(text), id: \.self) { name in
+                    Text(name).textInputCompletion(name)
+                }
             }
-        }
+            .onChange(of: text) { old, new in
+                // A pick replaces the text with one of the names suggested for it. Typing the last letter of a
+                // suggested name is not a pick: "Na" must not save while "Nami" is being typed.
+                let typedOneMore = new.hasPrefix(old) && new.count == old.count + 1
+                if !typedOneMore, matches(old).contains(new) { onPick(new) }
+            }
+    }
+
+    func matches(_ text: String) -> [String] {
+        let typed = text.trimmingCharacters(in: .whitespaces)
+        guard !typed.isEmpty else { return [] }
+        return Array(model.knownPeople.compactMap(\.name)
+            .filter { $0.localizedCaseInsensitiveContains(typed) && $0.compare(typed, options: .caseInsensitive) != .orderedSame }
+            .prefix(8))
     }
 }

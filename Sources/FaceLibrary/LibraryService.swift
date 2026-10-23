@@ -179,7 +179,8 @@ public final class LibraryService: @unchecked Sendable {
         }
     }
 
-    /// Forgets a source and everything found in it. Files on disk are not touched. Deletes in small batches so the
+    /// Forgets a source and everything found in it. Files on disk are not touched. Named people stay, and what
+    /// their faces looked like is remembered (PersonMemory), so they are recognised when the photos come back. Deletes in small batches so the
     /// database stays responsive; call it off the main thread for big folders.
     public func removeSource(_ id: Int64) throws {
         lock.withLock { monitors.removeValue(forKey: id) }?.stop()
@@ -198,6 +199,7 @@ public final class LibraryService: @unchecked Sendable {
                 guard !ids.isEmpty else { return 0 }
                 let list = ids.map(String.init).joined(separator: ",")
                 affected.formUnion(try Int64.fetchAll(db, sql: "SELECT DISTINCT personId FROM face WHERE mediaId IN (\(list)) AND personId IS NOT NULL"))
+                try PersonMemory.remember("face.mediaId IN (\(list))", db: db)
                 try db.execute(sql: "DELETE FROM media WHERE id IN (\(list))")
                 return ids.count
             }

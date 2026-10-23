@@ -196,6 +196,32 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(try store.db.read { db in try SourceRecord.fetchCount(db) }, 0)
     }
 
+    func testRemovedFolderLeavesNamesThatAreRecognisedAgain() throws {
+        var rng = SplitMix(seed: 7)
+        let ids = identities(2, seed: 3)
+        for i in 0..<4 { try makeFile("a/\(i).jpg", bytes: 100 + i) }
+        monitor().scan()
+        let named = try newPerson("Chi Pu"), group = try newPerson(nil)
+        for (i, m) in try media().enumerated() { _ = try addFace(mediaId: m.id!, personId: i < 3 ? named : group, vector: jitter(ids[0], &rng, amount: 0.2)) }
+        try LibraryServiceStub(store: store).removeSource(sourceId)
+        let remembered = try store.db.read { db in try Int.fetchOne(db, sql: "SELECT count FROM personMemory WHERE personId = ?", arguments: [named]) }
+        XCTAssertEqual(remembered, 3, "only the named person's faces are remembered")
+
+        var s = SourceRecord(path: root.path)
+        try store.db.write { db in try s.insert(db) }
+        sourceId = s.id
+        for i in 0..<2 { try makeFile("b/\(i).jpg", bytes: 200 + i) }
+        monitor().scan()
+        let again = try media()
+        _ = try addFace(mediaId: again[0].id!, personId: nil, vector: jitter(ids[0], &rng, amount: 0.2))
+        _ = try addFace(mediaId: again[1].id!, personId: nil, vector: jitter(ids[1], &rng, amount: 0.2))
+        let engine = GroupingEngine(store: store)
+        try engine.rebuildAll()
+        try engine.assignPending(mediaIds: again.map { $0.id! })
+        let back = try store.db.read { db in try Int64.fetchAll(db, sql: "SELECT personId FROM face WHERE personId IS NOT NULL") }
+        XCTAssertEqual(back, [named], "the same person's new photo gets the kept name; someone else doesn't")
+    }
+
     func testEmptyListingOfNonEmptySourceDeletesNothing() throws {
         try makeFile("a.jpg")
         let m = monitor()
