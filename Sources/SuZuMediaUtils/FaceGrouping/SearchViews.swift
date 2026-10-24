@@ -51,6 +51,7 @@ struct SearchView: View {
                                 }
                                 Button("Open With Default App") { urls.forEach { NSWorkspace.shared.open($0) } }
                                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(urls) }
+                                Button("Copy File Path") { Clipboard.copyPaths(urls) }
                             }
                     }
                 }
