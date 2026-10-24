@@ -153,14 +153,22 @@ struct FilesBrowser: View {
     var body: some View {
         VStack(spacing: 0) {
             SessionBar(divider: true)
-            if !present.isEmpty {
-                PeopleFilterBar(present: present, selected: $withPeople)
+            HStack(spacing: 0) {
+                FolderColumn(files: files, folder: folder, go: go)
                 Divider()
+                VStack(spacing: 0) {
+                    filterRow
+                    if !present.isEmpty {
+                        PeopleFilterBar(present: present, selected: $withPeople)
+                        Divider()
+                    }
+                    content.frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Divider()
+                    pathBar
+                }
             }
-            content.frame(maxWidth: .infinity, maxHeight: .infinity)
-            Divider()
-            pathBar
         }
+        .overlay(alignment: .bottom) { if !selectedFiles.isEmpty { selectionBar } }
         .navigationTitle(folder.map { ($0 as NSString).lastPathComponent } ?? model.projectName)
         .navigationSubtitle(subtitle)
         .searchable(text: $search, placement: .toolbar, prompt: "Name or person")
@@ -290,6 +298,72 @@ struct FilesBrowser: View {
         .contextMenu(forSelectionType: String.self) { ids in menu(for: ids) } primaryAction: { ids in open(ids) }
     }
 
+    /// Kind, rating, flag, label and subfolders as chips; the sort as a menu. The toolbar's View Options menu has
+    /// the same settings in full (any rating, every label).
+    var filterRow: some View {
+        HStack(spacing: 8) {
+            ScrollView(.horizontal) {
+                HStack(spacing: 6) {
+                    Picker("Kind", selection: $filter) { ForEach(FileFilter.allCases) { Text($0.title).tag($0) } }
+                        .pickerStyle(.segmented).labelsHidden().fixedSize().controlSize(.small)
+                    Chip(minRating > 0 ? String(repeating: "★", count: minRating) + (minRating < 5 ? "+" : "") : "★ 3+", on: minRating > 0,
+                         help: "Only photos rated three stars or better (View Options: any rating)") { minRating = minRating > 0 ? 0 : 3 }
+                    Chip("Picks", on: flagFilter == .picks, help: "Only picks (P)") { flagFilter = flagFilter == .picks ? .all : .picks }
+                    Chip("Hide rejects", on: flagFilter == .hideRejects, help: "Leave out rejects (X)") { flagFilter = flagFilter == .hideRejects ? .all : .hideRejects }
+                    Menu {
+                        Picker("Label", selection: $labelFilter) {
+                            Text("Any Label").tag("")
+                            ForEach(ColorLabel.allCases, id: \.self) { Text($0.title).tag($0.rawValue) }
+                            Text("No Label").tag("none")
+                        }
+                        .pickerStyle(.inline)
+                    } label: {
+                        Chip(title: labelFilter == "none" ? "No label" : ColorLabel(rawValue: labelFilter)?.title ?? "Label", on: !labelFilter.isEmpty, action: {}) {
+                            if let l = ColorLabel(rawValue: labelFilter) { Circle().fill(l.color).frame(width: 8, height: 8) }
+                        }
+                    }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().tint(.primary)
+                    .help("Only files with this colour label (6–9 set one)")
+                    Chip("Subfolders", on: subfolders, help: "Include files in subfolders") { subfolders.toggle() }
+                }
+                .padding(.vertical, 7)
+            }
+            .scrollIndicators(.never)
+            Menu {
+                Picker("Sort By", selection: $sortKey) { ForEach(FileSort.allCases) { Text($0.title).tag($0) } }
+                Picker("Order", selection: $ascending) {
+                    Text("Ascending").tag(true)
+                    Text("Descending").tag(false)
+                }
+            } label: {
+                Text("\(sortKey.title) \(ascending ? "↑" : "↓")").font(.callout).foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton).fixedSize()
+            .help("Sort order")
+        }
+        .padding(.horizontal, 16)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    /// Over the grid while files are selected: what they are, the culling keys, and what to do with them.
+    var selectionBar: some View {
+        let chosen = selectedFiles
+        let photos = chosen.filter { $0.kind == .photo }.count, videos = chosen.count - photos
+        let bytes = chosen.reduce(Int64(0)) { $0 + $1.size }
+        let what = "\(photos) photo\(photos == 1 ? "" : "s")" + (videos > 0 ? ", \(videos) video\(videos == 1 ? "" : "s")" : "")
+        return SelectionBar(title: "\(chosen.count) selected · \(what) · \(bytes.formatted(.byteCount(style: .file)))", clear: { selection = [] }) {
+            Text("1–5 stars · P pick · X reject · 6–9 labels · Space Quick Look").font(.caption).foregroundStyle(.secondary).padding(.trailing, 4)
+            Button("Write Ratings…") { confirmWrite = chosen.map(\.id) }.help("Write ratings and labels into the files (IPTC/XMP)")
+            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(chosen.map(\.url)) }
+            if chosen.count > 1 { Button("Cull") { cull(chosen) }.help("Go through these one by one, full screen (F)") }
+            Button("Export…") { export(selection) }
+            if photos > 0 {
+                Button("Open in Edit & Export") { open(selection) }.buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(.bottom, 22)
+    }
+
     /// Project › folder › subfolder…, the filters in use, then how many items; drag the slider for bigger icons.
     var pathBar: some View {
         HStack(spacing: 3) {
@@ -307,7 +381,7 @@ struct FilesBrowser: View {
                     Label(filterSummary, systemImage: "xmark.circle.fill").lineLimit(1)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(Color.accent)
                 .help("Clear the filters")
                 .padding(.trailing, 8)
             }
@@ -604,6 +678,89 @@ struct FilesBrowser: View {
     }
 }
 
+/// The project's folders down the left of Files: each folder with how many files it holds, the open folder's
+/// subfolders under it, offline folders flagged. Right-click a folder for Finder, Rescan, Locate and Remove.
+struct FolderColumn: View {
+    @EnvironmentObject var model: FaceGroupingModel
+    let files: [ProjectFile]
+    let folder: String?
+    let go: (String?) -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 1) {
+                SectionLabel("Folders").padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 4)
+                row(title: model.projectName, icon: "calendar", count: files.count, path: nil, depth: 0)
+                ForEach(model.projectSources) { s in
+                    row(title: s.name, icon: !s.online ? "externaldrive.badge.xmark" : s.network ? "server.rack" : "folder",
+                        count: count(under: s.path), path: s.path, depth: 1, offline: !s.online)
+                        .contextMenu { sourceMenu(s) }
+                    if let folder, folder == s.path || folder.hasPrefix(s.path + "/") {
+                        ForEach(subfolders(of: s.path), id: \.self) { sub in
+                            row(title: (sub as NSString).lastPathComponent, icon: "folder", count: count(under: sub), path: sub, depth: 2)
+                            if folder != sub, folder.hasPrefix(sub + "/") {
+                                ForEach(subfolders(of: folder), id: \.self) { deep in
+                                    row(title: (deep as NSString).lastPathComponent, icon: "folder", count: count(under: deep), path: deep, depth: 3)
+                                }
+                            }
+                        }
+                    }
+                }
+                if model.projectSources.count { !$0.online } > 0 {
+                    Text("Offline: renamed or moved? Right-click → Locate Folder…").font(.caption).foregroundStyle(Color.amber)
+                        .padding(.horizontal, 10).padding(.top, 4).fixedSize(horizontal: false, vertical: true)
+                }
+                Button { model.addFolder(kind: .media) } label: { Label("Add Folder…", systemImage: "plus") }
+                    .buttonStyle(.plain).foregroundStyle(.secondary).font(.callout)
+                    .padding(.horizontal, 10).padding(.top, 8)
+            }
+            .padding(.horizontal, 6).padding(.bottom, 10)
+        }
+        .frame(width: 212)
+        .background(Color.primary.opacity(0.025))
+    }
+
+    func count(under path: String) -> Int { files.count { $0.path.hasPrefix(path + "/") } }
+
+    func subfolders(of path: String) -> [String] {
+        ProjectFiles.contents(of: path, in: files).folders.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    func row(title: String, icon: String, count: Int, path: String?, depth: Int, offline: Bool = false) -> some View {
+        let selected = folder == path
+        return Button { go(path) } label: {
+            HStack(spacing: 6) {
+                Image(systemName: icon).foregroundStyle(offline ? AnyShapeStyle(Color.amber) : selected ? AnyShapeStyle(.primary) : AnyShapeStyle(.tint))
+                    .frame(width: 16)
+                Text(title).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+                Text(offline ? "offline" : count.formatted()).font(.caption).foregroundStyle(offline ? Color.amber : .secondary).monospacedDigit()
+            }
+            .font(.callout)
+            .padding(.vertical, 4).padding(.trailing, 8).padding(.leading, 8 + CGFloat(depth) * 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Color.primary.opacity(0.1) : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder func sourceMenu(_ s: SourceSummary) -> some View {
+        if s.online {
+            Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: s.path) }
+            Button("Rescan") { model.rescan(s.id) }
+        }
+        Button("Locate Folder…") { model.locateSource(s.id) }
+        if model.projects.count > 1 {
+            Menu("Move to Project") {
+                ForEach(model.projects.filter { $0.id != s.projectId }) { p in Button(p.name) { model.moveSource(s.id, to: p.id) } }
+            }
+        }
+        Divider()
+        Button("Remove from Library", role: .destructive) { model.removeSource(s.id) }
+    }
+}
+
 /// The people in the folder as face chips; click some to show only the files they're all in.
 struct PeopleFilterBar: View {
     @EnvironmentObject var model: FaceGroupingModel
@@ -635,7 +792,7 @@ struct PeopleFilterBar: View {
                             }
                             .font(.caption)
                             .padding(.leading, 3).padding(.trailing, 8).padding(.vertical, 3)
-                            .background(Capsule().fill(on ? Color.accentColor : Color.secondary.opacity(0.12)))
+                            .background(Capsule().fill(on ? Color.accent : Color.secondary.opacity(0.12)))
                             .foregroundStyle(on ? .white : .primary)
                         }
                         .buttonStyle(.plain)
@@ -681,7 +838,7 @@ struct FileIcon: View {
                     .lineLimit(2).truncationMode(.middle).multilineTextAlignment(.center)
             }
             .padding(.horizontal, 5).padding(.vertical, 1)
-            .background(RoundedRectangle(cornerRadius: 4).fill(selected ? Color.accentColor : .clear))
+            .background(RoundedRectangle(cornerRadius: 4).fill(selected ? Color.accent : .clear))
             .foregroundStyle(selected ? .white : .primary)
             if let f = item.file, f.rating > 0 || f.flag != .none {
                 HStack(spacing: 5) {
@@ -783,19 +940,6 @@ struct FileThumbnail: View {
             .background(.black.opacity(0.6), in: Capsule())
             .padding(4)
             .help([file.eyesClosed ? "Eyes closed" : nil, file.soft ? "Soft focus" : nil, file.flag == .pick ? "Pick" : nil].compactMap { $0 }.joined(separator: ", "))
-        }
-    }
-}
-
-/// The Files browser's place in the sidebar, above Face Grouping.
-struct FilesSidebar: View {
-    @EnvironmentObject var model: FaceGroupingModel
-
-    var body: some View {
-        Section("Library") {
-            Label("Files", systemImage: "folder")
-                .badge(model.stats.files)
-                .tag(AppRoute.files)
         }
     }
 }

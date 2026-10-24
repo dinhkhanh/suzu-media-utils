@@ -46,6 +46,35 @@ struct LibraryStats: Equatable {
     var unassignedFaces = 0
 }
 
+/// What the Overview shows beyond `LibraryStats`: culling marks, deliveries, faces to review.
+struct OverviewStats: Equatable {
+    var picks = 0
+    var rejects = 0
+    /// Photos rated ★★★ or better.
+    var rated = 0
+    /// Files auto rules copied somewhere, and when the last one went.
+    var delivered = 0
+    var lastDelivered: Date?
+    /// Photos with a face nobody is assigned to yet.
+    var unassignedPhotos = 0
+}
+
+/// Someone a person is often photographed with.
+struct Companion: Identifiable, Equatable {
+    var id: Int64
+    var name: String
+    var count: Int
+    var coverFaceId: Int64?
+}
+
+/// One line of tonight's activity (Overview, status popover).
+struct ActivityItem: Identifiable, Equatable {
+    let id = UUID()
+    let at: Date
+    let text: String
+    let icon: String
+}
+
 /// A file in a person's view: the media plus the best face of that person in it.
 struct PersonMedia: Identifiable, Hashable {
     var id: Int64
@@ -127,6 +156,10 @@ final class FaceGroupingModel: ObservableObject {
     var localProjects: [ProjectSummary] { projects.filter { $0.teamId == nil } }
     /// Bumped after ratings, labels or flags change, so every view showing them re-reads.
     @Published var marksVersion = 0
+    /// Counts the Overview shows beside `stats`: culling marks, deliveries, faces to review.
+    @Published var overview = OverviewStats()
+    /// What happened tonight (names, merges, deliveries, folders), newest first; see `log`.
+    @Published var activity: [ActivityItem] = []
     /// Folders being removed in the background; hidden from the sidebar right away.
     @Published var removing: Set<Int64> = []
     private var cancellables: Set<AnyCancellable> = []
@@ -161,7 +194,10 @@ final class FaceGroupingModel: ObservableObject {
 
     private func attach(_ service: LibraryService) {
         self.service = service
-        service.onDelivered = { report in Notifier.post(report) }
+        service.onDelivered = { [weak self] report in
+            Notifier.post(report)
+            Task { @MainActor in self?.logDelivery(report) }
+        }
         service.teamSync.onChange = { [weak self] in Task { @MainActor in self?.applyTeamStatus() } }
         ToolWork.faces = self
         service.start()
@@ -177,7 +213,7 @@ final class FaceGroupingModel: ObservableObject {
         guard let db = store?.db else { return }
         regionObserver = DatabaseRegionObservation(tracking: Table("face"), Table("person"), Table("media"), Table("source"),
                                                    Table("smartAlbum"), Table("deliveryRule"), Table("project"),
-                                                   Table("sessionLabel"), Table("team"))
+                                                   Table("sessionLabel"), Table("team"), Table("delivery"))
             .start(in: db, onError: { _ in }, onChange: { [weak self] _ in
                 DispatchQueue.main.async { self?.dirty = true }
             })
@@ -218,15 +254,19 @@ final class FaceGroupingModel: ObservableObject {
                  try SmartAlbum.order(Column("name")).fetchAll(db), try DeliveryService.rules(db),
                  try Self.fetchProjects(db), try Self.fetchKnownPeople(db),
                  project == nil ? [] : try EventSessions.list(db, project: project, gap: gap),
-                 try TeamRecord.order(Column("joinedAt")).fetchAll(db))
+                 try TeamRecord.order(Column("joinedAt")).fetchAll(db),
+                 try Self.fetchOverview(db, project: project))
             }
             await MainActor.run {
                 defer { self.refreshing = false }
                 // The project changed while reading: the next tick reads the new one.
                 guard project == self.currentProject, range == self.sessionRange else { self.dirty = true; return }
-                if let (people, sources, stats, albums, rules, projects, known, sessions, teams) = result {
+                if let (people, sources, stats, albums, rules, projects, known, sessions, teams, overview) = result {
                     if teams != self.teams { self.teams = teams; self.applyTeamStatus() }
                     if sessions != self.sessions {
+                        if sessions.count > self.sessions.count, !self.sessions.isEmpty, let s = sessions.last {
+                            self.log("Session \(self.sessionTitle(s)) started", icon: "clock")
+                        }
                         self.sessions = sessions
                         // The session may have grown, merged or split: re-read with its current range.
                         if self.sessionRange != range { self.dirty = true }
@@ -246,6 +286,7 @@ final class FaceGroupingModel: ObservableObject {
                     if people != self.people { self.people = people }
                     self.applySources(sources)
                     if stats != self.stats { self.stats = stats }
+                    if overview != self.overview { self.overview = overview }
                     if albums != self.albums { self.albums = albums }
                     if rules != self.rules {
                         if self.rules.isEmpty && !rules.isEmpty { Notifier.requestPermission() }
@@ -271,7 +312,55 @@ final class FaceGroupingModel: ObservableObject {
             }
             return s
         }
-        if updated != sources { sources = updated }
+        if updated != sources {
+            for s in updated {
+                guard let old = sources.first(where: { $0.id == s.id }) else { continue }
+                if old.scanning && !s.scanning { log("Finished scanning \(s.name) · \(s.found.formatted()) files found", icon: "folder") }
+                if old.online && !s.online { log("\(s.name) went offline", icon: "externaldrive.badge.xmark") }
+                if !old.online && s.online { log("\(s.name) is back online", icon: "externaldrive") }
+            }
+            sources = updated
+        }
+    }
+
+    // MARK: - Activity
+
+    /// Notes something that happened, for the Overview and the status popover.
+    func log(_ text: String, icon: String = "circle.fill") {
+        activity.insert(ActivityItem(at: Date(), text: text, icon: icon), at: 0)
+        if activity.count > 60 { activity.removeLast(activity.count - 60) }
+    }
+
+    private func logDelivery(_ report: DeliveryService.Report) {
+        let who = report.newFiles.sorted { $0.value > $1.value }.prefix(3).map { "\($0.key) \($0.value)" }.joined(separator: " · ")
+        if report.copied > 0 {
+            log("Delivered \(report.copied) file\(report.copied == 1 ? "" : "s") · \(who)", icon: "paperplane")
+        } else if !report.newFiles.isEmpty {
+            log("New photos: \(who)", icon: "bell")
+        }
+    }
+
+    /// Culling, delivery and review counts of the project (nil = every project).
+    nonisolated static func fetchOverview(_ db: Database, project: Int64?) throws -> OverviewStats {
+        var o = OverviewStats()
+        if let r = try Row.fetchOne(db, sql: """
+            SELECT COUNT(*) FILTER (WHERE m.flag = 1) AS picks, COUNT(*) FILTER (WHERE m.flag = -1) AS rejects,
+                COUNT(*) FILTER (WHERE m.rating >= 3) AS rated
+            FROM media m LEFT JOIN source s ON s.id = m.sourceId WHERE m.duplicateOf IS NULL AND \(ProjectScope.sql(project))
+            """) {
+            o.picks = r["picks"]; o.rejects = r["rejects"]; o.rated = r["rated"]
+        }
+        if let r = try Row.fetchOne(db, sql: """
+            SELECT COUNT(DISTINCT d.mediaId) AS n, MAX(d.deliveredAt) AS last
+            FROM delivery d JOIN media m ON m.id = d.mediaId LEFT JOIN source s ON s.id = m.sourceId WHERE \(ProjectScope.sql(project))
+            """) {
+            o.delivered = r["n"]; o.lastDelivered = r["last"]
+        }
+        o.unassignedPhotos = try Int.fetchOne(db, sql: """
+            SELECT COUNT(DISTINCT face.mediaId) FROM face JOIN media m ON m.id = face.mediaId LEFT JOIN source s ON s.id = m.sourceId
+            WHERE face.personId IS NULL AND face.quality >= 0.3 AND \(ProjectScope.sql(project))
+            """) ?? 0
+        return o
     }
 
     /// People with faces in the project (nil = anywhere), with counts for that project.
@@ -351,6 +440,25 @@ final class FaceGroupingModel: ObservableObject {
         guard let store else { return [] }
         let project = currentProject, range = sessionRange
         return await Task.detached(priority: .userInitiated) { Self.loadFaces(store, personId, project: project, taken: range) }.value
+    }
+
+    /// The named people this person is most often photographed with, in the open project and session.
+    func companions(of personId: Int64) async -> [Companion] {
+        guard let store else { return [] }
+        let project = currentProject, range = sessionRange
+        return await Task.detached(priority: .utility) {
+            (try? store.db.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT p.id, p.name, COUNT(DISTINCT m.id) AS n,
+                        COALESCE(p.coverFaceId, (SELECT c.id FROM face c WHERE c.personId = p.id ORDER BY c.score DESC LIMIT 1)) AS cover
+                    FROM face f JOIN media m ON m.id = f.mediaId LEFT JOIN source s ON s.id = m.sourceId
+                    JOIN face o ON o.mediaId = m.id AND o.personId IS NOT NULL AND o.personId != f.personId
+                    JOIN person p ON p.id = o.personId
+                    WHERE f.personId = ? AND p.name IS NOT NULL AND \(ProjectScope.sql(project)) AND \(EventSessions.sql(range))
+                    GROUP BY p.id ORDER BY n DESC LIMIT 8
+                    """, arguments: [personId]).map { Companion(id: $0["id"], name: $0["name"], count: $0["n"], coverFaceId: $0["cover"]) }
+            }) ?? []
+        }.value
     }
 
     /// Names of the other projects a person appears in (shown on their page: the name carries over).
@@ -504,7 +612,10 @@ final class FaceGroupingModel: ObservableObject {
             : "Choose a folder with one subfolder per person, named after them, each holding a few clear photos of that person."
         Panels.choose(folders: true, files: false, multiple: true, prompt: "Add", message: message,
                       start: FileManager.default.homeDirectoryForCurrentUser) { [weak self] urls in
-            for url in urls { self?.perform { try $0.addSource(url, kind: kind, project: project) } }
+            for url in urls {
+                self?.perform { try $0.addSource(url, kind: kind, project: project) }
+                self?.log("Added folder \(url.lastPathComponent)", icon: "folder.badge.plus")
+            }
         }
     }
 
@@ -513,6 +624,7 @@ final class FaceGroupingModel: ObservableObject {
         let path = canonicalPath(url)
         if sources.contains(where: { path == $0.path || path.hasPrefix($0.path + "/") }) { return }
         perform { try $0.addSource(url, kind: .media, project: project) }
+        log("Added the card folder \(url.lastPathComponent)", icon: "sdcard")
     }
 
     /// Hides the folder at once and forgets its files in the background (can take a while for big folders).
@@ -543,17 +655,23 @@ final class FaceGroupingModel: ObservableObject {
     func rename(_ personId: Int64, to name: String) -> Int64 {
         var result = personId
         perform { result = try $0.rename(personId, to: name) }
+        let n = name.trimmingCharacters(in: .whitespaces)
+        if !n.isEmpty { log(result == personId ? "Named \(n)" : "Named \(n) · merged with the person of that name", icon: "pencil") }
         return result
     }
 
     /// Merges a group into a known person (named in this or another project).
-    func mergeInto(_ id: Int64, _ target: Int64) { perform { try $0.merge([id], into: target) } }
+    func mergeInto(_ id: Int64, _ target: Int64) {
+        perform { try $0.merge([id], into: target) }
+        if let name = knownPeople.first(where: { $0.id == target })?.name { log("This is \(name) · group merged", icon: "person.2") }
+    }
 
     func merge(_ ids: Set<Int64>) {
         // Keep a named person if there is one, else the largest group.
         let chosen = people.filter { ids.contains($0.id) }
         guard let target = chosen.first(where: { $0.name != nil }) ?? chosen.max(by: { $0.faces < $1.faces }) else { return }
         perform { try $0.merge(Array(ids), into: target.id) }
+        log("Merged \(ids.count) people into \(target.displayName)", icon: "person.2")
     }
 
     /// Starts or stops the local-network gallery (remembered across launches).

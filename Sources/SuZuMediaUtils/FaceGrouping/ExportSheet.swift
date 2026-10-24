@@ -65,7 +65,7 @@ struct ExportSheet: View {
                 }
                 .font(.callout)
                 .padding(8)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.1)))
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.accent.opacity(0.1)))
             }
             if let result { resultView(result) } else { form }
         }

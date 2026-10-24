@@ -5,6 +5,9 @@ import SwiftUI
 /// Copies what is new off the photographers' memory cards. Cards are handed over again and again during an event
 /// without being erased; the library remembers each card (by its volume UUID) and every file copied from it, so a
 /// card's next hand-over copies only what was shot since, however the earlier copies were moved or edited.
+///
+/// Each mounted card is a panel: what is new on it as a sentence, where it goes, one button. The destination and
+/// the options sit in a column on the right.
 struct CardCopyTool: View {
     @EnvironmentObject var faces: FaceGroupingModel
     @StateObject private var model = CardCopyModel()
@@ -24,19 +27,112 @@ struct CardCopyTool: View {
     /// Both places chosen for this card (videos' too, when they have their own).
     func ready(_ card: CardCopyModel.Card) -> Bool { destination(for: card) != nil && (!splitVideos || videoDestination != nil) }
 
+    var withNew: [CardCopyModel.Card] { model.cards.filter { c in !c.copying && !c.gone && ready(c) && (c.plan.map { !$0.new.isEmpty } ?? false) } }
+    var copying: Int { model.cards.count(where: \.copying) }
+
     var body: some View {
-        Form {
-            Section("Destination") {
-                FolderField(title: splitVideos ? "Copy photos into" : "Copy into", url: Binding(get: { destination }, set: { destinationPath = $0?.path ?? "" }))
-                if splitVideos {
-                    FolderField(title: "Copy videos into", url: Binding(get: { videoDestinationPath.isEmpty ? nil : URL(fileURLWithPath: videoDestinationPath, isDirectory: true) },
-                                                                        set: { videoDestinationPath = $0?.path ?? "" }))
+        HStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if model.cards.isEmpty {
+                        noCards
+                    }
+                    ForEach(model.cards) { card in
+                        let free = destination(for: card).flatMap { CardCopier.freeSpace(at: $0) }
+                        CardRow(card: card, model: model, canCopy: ready(card), free: free,
+                                videoFree: videoDestination.flatMap { CardCopier.freeSpace(at: $0) } ?? free,
+                                destination: destination(for: card), videoDestination: videoDestination) { copy(card) }
+                    }
+                    let others = model.known.filter { k in !model.cards.contains { $0.identity.uuid == k.card.uuid } }
+                    if !others.isEmpty {
+                        knownCards(others)
+                    }
                 }
-                Toggle("Videos go to their own folder", isOn: $splitVideos).toggleStyle(.checkbox)
-                    .help("Photos to one place, videos to another (an editor's drive, say); a clip's XML goes with the clip")
-                Text("Each card gets its own folder here, named after the card. A card can go somewhere else instead (its row has a folder menu): cards copying to different disks run side by side at full speed.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                FlowLayout(spacing: 14) {
+                .padding(20)
+            }
+            Divider()
+            options
+        }
+        .navigationTitle("Copy from Cards")
+        .navigationSubtitle(subtitle)
+        .toolbar {
+            ToolbarItem {
+                Button { model.refresh(store: faces.store, sync: faces.service?.teamSync) } label: { Label("Look Again", systemImage: "arrow.clockwise") }
+                    .disabled(model.looking)
+                    .help("Look for cards again (they are also noticed as they mount)")
+            }
+            ToolbarItem {
+                Button("Copy New Files from All") { for c in withNew { copy(c) } }
+                    .disabled(withNew.isEmpty)
+                    .help("Start every card that has new files, side by side")
+            }
+        }
+        .task { model.refresh(store: faces.store, sync: faces.service?.teamSync) }
+        .onChange(of: faces.store == nil) { model.refresh(store: faces.store, sync: faces.service?.teamSync) }
+    }
+
+    var subtitle: String {
+        let n = model.cards.count { !$0.gone }
+        if n == 0 { return "Only what was shot since the last hand-over" }
+        var parts = ["\(n) card\(n == 1 ? "" : "s") connected"]
+        if !withNew.isEmpty { parts.append("\(withNew.count) with new files") }
+        if copying > 0 { parts.append("\(copying) copying") }
+        return parts.joined(separator: " · ")
+    }
+
+    var noCards: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "sdcard").font(.system(size: 28)).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    if model.looking { ProgressView().controlSize(.small) }
+                    Text(model.looking ? "Looking for cards…" : "No card connected").font(.headline)
+                }
+                Text("Insert a card: cards with a DCIM folder show up here as they mount, with what was shot since their last hand-over.")
+                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.panel))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.separator, lineWidth: 1))
+    }
+
+    func knownCards(_ others: [CardCopier.KnownCard]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                SectionLabel("Cards seen before")
+                Text("· \(others.count) · right-click to forget one and copy it all again").font(.caption).foregroundStyle(.tertiary)
+            }
+            .padding(.bottom, 6)
+            ForEach(Array(others.enumerated()), id: \.element.id) { i, k in
+                if i > 0 { Divider() }
+                KnownCardRow(known: k, model: model).padding(.vertical, 6)
+            }
+        }
+        .padding(16)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.panel))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.separator, lineWidth: 1))
+    }
+
+    /// The column on the right: where copies go, and how.
+    var options: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 8) {
+                    SectionLabel("Destination")
+                    DestinationBox(title: splitVideos ? "Photos" : "Photos & videos", url: Binding(get: { destination }, set: { destinationPath = $0?.path ?? "" }))
+                    Toggle("Videos go to their own folder", isOn: $splitVideos)
+                        .help("Photos to one place, videos to another (an editor's drive, say); a clip's XML goes with the clip")
+                    if splitVideos {
+                        DestinationBox(title: "Videos", url: Binding(get: { videoDestinationPath.isEmpty ? nil : URL(fileURLWithPath: videoDestinationPath, isDirectory: true) },
+                                                                 set: { videoDestinationPath = $0?.path ?? "" }))
+                    }
+                    Text("Each card gets its own folder here, named after the card. A card can go somewhere else instead — its panel has a Change… button and remembers it for next time, so cards copying to different disks run side by side at full speed.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    SectionLabel("Options")
                     Toggle("Verify each copy", isOn: $verify).help("Reads every copy back and compares its SHA-256 with the original")
                     Toggle("A folder per hand-over", isOn: $perHandover).help("“2026-10-24 14.05” inside the card's folder, so each hand-over is its own session")
                     Toggle("Keep the card's folders", isOn: $keepLayout).help("DCIM/100CANON/… as on the card, instead of files side by side")
@@ -46,43 +142,16 @@ struct CardCopyTool: View {
                             .id(p)
                     }
                 }
-                .toggleStyle(.checkbox)
+                .toggleStyle(.switch).controlSize(.small)
+                Text("Cards are known by the serial the camera wrote when it formatted them, so the next hand-over copies only what was shot since — however the earlier copies were moved or edited. Files already in the library are matched by contents and never copied twice.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(Color.primary.opacity(0.04)))
             }
-            Section {
-                if model.cards.isEmpty {
-                    HStack {
-                        if model.looking { ProgressView().controlSize(.small) }
-                        Text(model.looking ? "Looking for cards…" : "Insert a card. Cards with a DCIM folder show up here as they mount.")
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    ForEach(model.cards) { card in
-                        let free = destination(for: card).flatMap { CardCopier.freeSpace(at: $0) }
-                        CardRow(card: card, model: model, canCopy: ready(card), free: free,
-                                videoFree: videoDestination.flatMap { CardCopier.freeSpace(at: $0) } ?? free) { copy(card) }
-                    }
-                }
-            } header: {
-                HStack {
-                    Text("Cards")
-                    Spacer()
-                    Button("Look Again") { model.refresh(store: faces.store, sync: faces.service?.teamSync) }.controlSize(.small).disabled(model.looking)
-                }
-            }
-            let others = model.known.filter { k in !model.cards.contains { $0.identity.uuid == k.card.uuid } }
-            if !others.isEmpty {
-                Section("Cards seen before") {
-                    ForEach(others) { k in
-                        KnownCardRow(known: k, model: model)
-                    }
-                }
-            }
+            .padding(18)
         }
-        .formStyle(.grouped)
-        .navigationTitle("Copy from Cards")
-        .navigationSubtitle("Only what was shot since the last hand-over")
-        .task { model.refresh(store: faces.store, sync: faces.service?.teamSync) }
-        .onChange(of: faces.store == nil) { model.refresh(store: faces.store, sync: faces.service?.teamSync) }
+        .frame(width: 320)
+        .background(Color.primary.opacity(0.025))
     }
 
     func copy(_ card: CardCopyModel.Card) {
@@ -107,7 +176,31 @@ struct CardCopyTool: View {
     }
 }
 
-/// One mounted card: its name (editable), camera, what is new, and the copy's progress or result.
+/// A folder chosen as a destination: its name, the disk's free space, and Change.
+struct DestinationBox: View {
+    let title: String
+    @Binding var url: URL?
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: url == nil ? "folder.badge.questionmark" : "externaldrive").foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(url?.lastPathComponent ?? "Choose a folder").fontWeight(.semibold).lineLimit(1).truncationMode(.middle)
+                    .foregroundStyle(url == nil ? Color.amber : .primary)
+                Text(url.map { u in "\(title) · \(u.deletingLastPathComponent().path)" + (CardCopier.freeSpace(at: u).map { " · \($0.formatted(.byteCount(style: .file))) free" } ?? "") } ?? "\(title) · nothing chosen yet")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            }
+            Spacer(minLength: 4)
+            Button(url == nil ? "Choose…" : "Change") { Panels.chooseFolder { url = $0 } }.controlSize(.small)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 9).fill(Color.primary.opacity(0.05)))
+        .help(url?.path ?? "")
+    }
+}
+
+/// One mounted card as a panel: its name (editable), camera and room; what is new as a sentence; where it goes;
+/// the copy's progress or result; and one button.
 struct CardRow: View {
     let card: CardCopyModel.Card
     @ObservedObject var model: CardCopyModel
@@ -115,16 +208,21 @@ struct CardRow: View {
     /// Room at the destinations, when known (videos' is the photos' when they share one).
     let free: Int64?
     let videoFree: Int64?
+    let destination: URL?
+    let videoDestination: URL?
     let copy: () -> Void
     @State private var label: String
     @EnvironmentObject var faces: FaceGroupingModel
 
-    init(card: CardCopyModel.Card, model: CardCopyModel, canCopy: Bool, free: Int64?, videoFree: Int64?, copy: @escaping () -> Void) {
+    init(card: CardCopyModel.Card, model: CardCopyModel, canCopy: Bool, free: Int64?, videoFree: Int64?,
+         destination: URL?, videoDestination: URL?, copy: @escaping () -> Void) {
         self.card = card
         self.model = model
         self.canCopy = canCopy
         self.free = free
         self.videoFree = videoFree
+        self.destination = destination
+        self.videoDestination = videoDestination
         self.copy = copy
         _label = State(initialValue: card.plan?.card.label ?? "")
     }
@@ -136,30 +234,87 @@ struct CardRow: View {
         return free.map { p.newBytes > $0 } ?? false
     }
 
+    var hasNew: Bool { card.plan.map { !$0.new.isEmpty } ?? false }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Image(systemName: "sdcard").font(.title2).foregroundStyle(.tint)
-                Text(card.identity.volumeName).fontWeight(.semibold)
-                TextField("", text: $label, prompt: Text("Name this card, e.g. Nam R5 card 1"))
-                    .labelsHidden().textFieldStyle(.roundedBorder).frame(maxWidth: 240)
-                    .onSubmit { rename(card.plan?.card.label) }
-                    .help("A name for this card. The card itself is not renamed; it is known by its volume UUID.")
-                if let camera = card.plan?.card.camera ?? card.identity.cameraMake {
-                    Text(camera + (card.identity.cameraSerial.map { " · \($0)" } ?? "")).foregroundStyle(.secondary).lineLimit(1)
+        HStack(alignment: .top, spacing: 16) {
+            Image(systemName: "sdcard.fill").font(.system(size: 34)).foregroundStyle(card.gone ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.tint))
+                .frame(width: 44)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    Text(card.identity.volumeName).font(.title3.weight(.semibold))
+                    TextField("", text: $label, prompt: Text("Name this card, e.g. Nam R5 card 1"))
+                        .labelsHidden().textFieldStyle(.roundedBorder).frame(maxWidth: 220)
+                        .onSubmit { rename(card.plan?.card.label) }
+                        .help("A name for this card. The card itself is not renamed; it is known by its volume UUID.")
+                    if let camera = card.plan?.card.camera ?? card.identity.cameraMake {
+                        Text(camera + (card.identity.cameraSerial.map { " · \($0)" } ?? "")).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    if let cap = card.identity.capacity, let free = card.identity.available {
+                        Text("· \(cap.formatted(.byteCount(style: .file))) · \(free.formatted(.byteCount(style: .file))) free")
+                            .foregroundStyle(.tertiary).lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
+                    statusPill
                 }
-                Spacer()
-                if let cap = card.identity.capacity, let free = card.identity.available {
-                    Text("\(free.formatted(.byteCount(style: .file))) free of \(cap.formatted(.byteCount(style: .file)))")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+                status
+                if let o = card.outcome { outcome(o) }
+                if let e = card.error { Text(e).foregroundStyle(.red).font(.callout) }
             }
-            status
-            if let o = card.outcome { outcome(o) }
-            if let e = card.error { Text(e).foregroundStyle(.red).font(.callout) }
+            if !card.gone && !card.planning {
+                VStack(spacing: 6) {
+                    if card.copying {
+                        Button("Stop") { model.cancel(card.id) }.frame(maxWidth: .infinity)
+                    } else if let p = card.plan {
+                        // Other cards may be copying meanwhile: to other disks at full speed, to the same one side by side.
+                        Button("Copy New Files") { copy() }
+                            .buttonStyle(.borderedProminent)
+                            .keyboardShortcut(.defaultAction)
+                            .disabled(!canCopy || p.new.isEmpty || tooBig(p))
+                            .help(canCopy ? "" : "Choose a destination folder first")
+                            .frame(maxWidth: .infinity)
+                        Button("Eject") { model.eject(card.id) }.frame(maxWidth: .infinity)
+                    }
+                }
+                .frame(width: 140)
+                .controlSize(.regular)
+            }
         }
-        .padding(.vertical, 4)
+        .padding(16)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.panel))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(hasNew && !card.copying && !card.gone ? Color.amber.opacity(0.5) : Color(nsColor: .separatorColor), lineWidth: 1))
         .onChange(of: card.plan?.card.label) { label = card.plan?.card.label ?? "" }
+    }
+
+    @ViewBuilder var statusPill: some View {
+        if card.gone {
+            pill("Removed", color: .orange)
+        } else if card.planning {
+            pill("Looking…", color: .secondary)
+        } else if card.copying {
+            pill("Copying", color: .accent, dot: true)
+        } else if let p = card.plan {
+            if p.new.isEmpty {
+                pill("Up to date", color: .good, icon: "checkmark")
+            } else if let at = p.card.lastCopiedAt {
+                pill("New since \(at.formatted(date: .omitted, time: .shortened))", color: .amber)
+            } else {
+                pill("Never copied", color: .amber)
+            }
+        }
+    }
+
+    func pill(_ text: String, color: Color, icon: String? = nil, dot: Bool = false) -> some View {
+        HStack(spacing: 5) {
+            if dot { Circle().fill(color).frame(width: 7, height: 7) }
+            if let icon { Image(systemName: icon).font(.caption2.weight(.bold)) }
+            Text(text)
+        }
+        .font(.caption.weight(.semibold))
+        .padding(.horizontal, 9).padding(.vertical, 3)
+        .background(Capsule().fill(color.opacity(0.16)))
+        .foregroundStyle(color)
     }
 
     @ViewBuilder
@@ -170,38 +325,71 @@ struct CardRow: View {
         } else if card.planning {
             HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Looking at the card…").foregroundStyle(.secondary) }
         } else if card.copying {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 6) {
                 ProgressView(value: Double(card.progress.bytesDone), total: Double(max(1, card.progress.bytesTotal)))
-                HStack {
-                    Text("\(card.progress.done) of \(card.progress.total) · \(card.progress.bytesDone.formatted(.byteCount(style: .file))) of \(card.progress.bytesTotal.formatted(.byteCount(style: .file))) · \(card.progress.current)")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    Spacer()
-                    Button("Cancel") { model.cancel(card.id) }.controlSize(.small)
+                HStack(spacing: 14) {
+                    Text("\(card.progress.done.formatted()) of \(card.progress.total.formatted()) files").fontWeight(.semibold)
+                    Text("\(card.progress.bytesDone.formatted(.byteCount(style: .file))) of \(card.progress.bytesTotal.formatted(.byteCount(style: .file)))").foregroundStyle(.secondary)
+                    Text(card.progress.current).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
                 }
+                .monospacedDigit()
+                Text("Pulling the card stops the copy at once; nothing half-written is left, and it goes on in the same folder when the card is back.")
+                    .font(.caption).foregroundStyle(.tertiary)
             }
         } else if let p = card.plan {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(summary(p)).fontWeight(p.new.isEmpty ? .regular : .semibold)
-                    if let at = p.card.lastCopiedAt {
-                        Text("Last copied \(at.formatted(date: .abbreviated, time: .shortened))\(p.card.lastCopiedTo.map { " to \(($0 as NSString).lastPathComponent)" } ?? "")")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        Text("Never copied from").font(.caption).foregroundStyle(.secondary)
-                    }
-                    if tooBig(p), let free {
-                        Text("Not enough room at the destination: \(free.formatted(.byteCount(style: .file))) free.").font(.caption).foregroundStyle(.red)
-                    }
+            VStack(alignment: .leading, spacing: 4) {
+                summaryText(p)
+                if let at = p.card.lastCopiedAt {
+                    Text("Last copied \(at.formatted(date: .abbreviated, time: .shortened))\(p.card.lastCopiedTo.map { " to \(($0 as NSString).lastPathComponent)" } ?? "")")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                Spacer()
-                destinationMenu
-                Button("Eject") { model.eject(card.id) }.controlSize(.small)
-                // Other cards may be copying meanwhile: to other disks at full speed, to the same one side by side.
-                Button("Copy New Files") { copy() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!canCopy || p.new.isEmpty || tooBig(p))
-                    .help(canCopy ? "" : "Choose a destination folder first")
+                destinationLine(p)
+                if tooBig(p), let free {
+                    Label("Not enough room at the destination: \(free.formatted(.byteCount(style: .file))) free.", systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.red)
+                }
             }
+        }
+    }
+
+    /// "312 new photos · 14 new videos · 9.8 GB · 1,208 copied before".
+    func summaryText(_ p: CardCopier.Plan) -> some View {
+        var head = Text("")
+        if p.files.isEmpty {
+            head = Text("No photos or videos on the card")
+        } else if p.new.isEmpty {
+            head = Text("Nothing new")
+        } else {
+            var what: [String] = []
+            if p.newPhotos > 0 { what.append("\(p.newPhotos.formatted()) new photo\(p.newPhotos == 1 ? "" : "s")") }
+            if p.newVideos > 0 { what.append("\(p.newVideos.formatted()) new video\(p.newVideos == 1 ? "" : "s")") }
+            if what.isEmpty { what.append("\(p.new.count) new") }
+            head = Text(what.joined(separator: " · ")).fontWeight(.semibold) + Text(" · \(p.newBytes.formatted(.byteCount(style: .file)))")
+        }
+        var rest: [String] = []
+        if !p.copiedBefore.isEmpty {
+            rest.append(p.copiedElsewhere == 0 ? "\(p.copiedBefore.count.formatted()) copied before"
+                        : p.copiedElsewhere == p.copiedBefore.count ? "\(p.copiedBefore.count.formatted()) copied on a teammate's Mac"
+                        : "\(p.copiedBefore.count.formatted()) copied before (\(p.copiedElsewhere) on a teammate's Mac)")
+        }
+        if !p.inLibrary.isEmpty { rest.append("\(p.inLibrary.count.formatted()) already in the library") }
+        return (head + Text(rest.isEmpty ? "" : " · " + rest.joined(separator: " · ")).foregroundStyle(.secondary))
+            .font(.body)
+    }
+
+    /// Where the photos (and videos) will land, and the menu to send this card somewhere else.
+    func destinationLine(_ p: CardCopier.Plan) -> some View {
+        let folder = CardCopier.cardFolderName(p.card)
+        return HStack(spacing: 6) {
+            Image(systemName: "arrow.turn.down.right").font(.caption).foregroundStyle(.tertiary)
+            if let destination {
+                Text("Photos → \(destination.lastPathComponent)/\(folder)" + (videoDestination.map { " · Videos → \($0.lastPathComponent)/\(folder)" } ?? ""))
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    .help(destination.appendingPathComponent(folder).path)
+            } else {
+                Text("Choose a destination folder on the right").font(.caption).foregroundStyle(Color.amber)
+            }
+            destinationMenu
         }
     }
 
@@ -210,13 +398,13 @@ struct CardRow: View {
     var destinationMenu: some View {
         let own = model.ownDestination(card.id)
         return Menu {
-            Button("The Folder Above") { model.setOwnDestination(card.id, nil) }.disabled(own == nil)
+            Button("The Destination Folder") { model.setOwnDestination(card.id, nil) }.disabled(own == nil)
             Button("Another Folder for This Card…") { Panels.chooseFolder { model.setOwnDestination(card.id, $0) } }
         } label: {
-            Label(own.map { "Into \($0.lastPathComponent)" } ?? "Into the folder above", systemImage: "folder")
+            Text(own == nil ? "Change…" : "Own folder: \(own!.lastPathComponent)").font(.caption)
         }
-        .menuStyle(.button).controlSize(.small).fixedSize()
-        .help(own.map { "This card copies into \($0.path)" } ?? "This card copies into the destination folder above. Pick another folder to copy this card to a different disk, side by side with the other cards.")
+        .menuStyle(.borderlessButton).fixedSize()
+        .help(own.map { "This card copies into \($0.path)" } ?? "This card copies into the destination folder. Pick another folder to copy this card to a different disk, side by side with the other cards.")
     }
 
     /// Saves a name typed in. An empty or unchanged field is left alone: a field ending its editing when the window
@@ -225,27 +413,6 @@ struct CardRow: View {
         let typed = label.trimmingCharacters(in: .whitespaces)
         guard !typed.isEmpty, typed != (current ?? "") else { return }
         model.setLabel(card.id, typed, store: faces.store)
-    }
-
-    func summary(_ p: CardCopier.Plan) -> String {
-        var parts: [String] = []
-        if p.new.isEmpty {
-            parts.append("Nothing new")
-        } else {
-            var what: [String] = []
-            if p.newPhotos > 0 { what.append("\(p.newPhotos) new photo\(p.newPhotos == 1 ? "" : "s")") }
-            if p.newVideos > 0 { what.append("\(p.newVideos) new video\(p.newVideos == 1 ? "" : "s")") }
-            if what.isEmpty { what.append("\(p.new.count) new") }
-            parts.append(what.joined(separator: ", ") + " · " + p.newBytes.formatted(.byteCount(style: .file)))
-        }
-        if !p.copiedBefore.isEmpty {
-            parts.append(p.copiedElsewhere == 0 ? "\(p.copiedBefore.count) copied before"
-                         : p.copiedElsewhere == p.copiedBefore.count ? "\(p.copiedBefore.count) copied on a teammate's Mac"
-                         : "\(p.copiedBefore.count) copied before (\(p.copiedElsewhere) on a teammate's Mac)")
-        }
-        if !p.inLibrary.isEmpty { parts.append("\(p.inLibrary.count) already in the library") }
-        if p.files.isEmpty { parts = ["No photos or videos on the card"] }
-        return parts.joined(separator: " · ")
     }
 
     func outcomeText(_ o: CardCopier.Outcome) -> String {
@@ -268,7 +435,8 @@ struct CardRow: View {
     func outcome(_ o: CardCopier.Outcome) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(outcomeText(o)).foregroundStyle(o.failed.isEmpty ? Color.primary : Color.orange)
+                Label(outcomeText(o), systemImage: o.interruption == nil && o.failed.isEmpty ? "checkmark.circle.fill" : "exclamationmark.circle")
+                    .foregroundStyle(o.failed.isEmpty && o.interruption == nil ? Color.good : Color.orange)
                 Spacer()
                 Button(o.videoFolder == nil ? "Show in Finder" : "Show Photos") { NSWorkspace.shared.activateFileViewerSelecting([o.folder]) }.controlSize(.small)
                 if let v = o.videoFolder { Button("Show Videos") { NSWorkspace.shared.activateFileViewerSelecting([v]) }.controlSize(.small) }
@@ -281,6 +449,7 @@ struct CardRow: View {
                 }
             }
         }
+        .padding(.top, 2)
     }
 }
 

@@ -472,3 +472,25 @@ and after every feature below; same 92 people.
 - Copy New Files no longer waits for the other cards: cards to different disks copy at full speed side by side,
   cards to the same disk share it. `ToolWork.begin/end` count the jobs under way so the library's extras stay paused
   until the last one is done.
+
+## v0.8.0 (2026-10-25): the redesign — Overview, workflow sidebar, appearance, People/Person/Files/Cards/Export
+- `App/OverviewView.swift`: the start screen. `OverviewStats` (picks/rejects/★3+, deliveries + last delivery, photos
+  with unassigned faces) is read in the model's background tick beside `LibraryStats`; the `delivery` table joins the
+  region observation. `ActivityItem` feed (`FaceGroupingModel.log`): names, merges, deliveries (`onDelivered`), folders
+  added, scans finished, folders offline/online, new sessions; capped at 60, this Mac only.
+- `AppShell`: `AppRoute.overview`, `FaceRoute.toName` (People filtered to unnamed), `AppRoute(key:)`/`key` shared by
+  `SUZU_START_ROUTE` and the "where I left off" start screen (`lastRoute`). Sidebar: Overview · Files, People (People,
+  To Name, Unassigned Faces, Search, Auto Rules), Smart Albums, collapsible Folders / Known People, Tools.
+  `FaceGroupingStatus` is a pill (rate, time left, team sync) with an activity popover.
+- `App/Appearance.swift`: `appearance` (system/light/dark → `.preferredColorScheme` on every scene, also View →
+  Appearance), `accent` (coral or the Mac's → `.tint`; `Color.accent` replaces `Color.accentColor` in custom
+  drawings), `startScreen`. Dynamic `NSColor`s for coral/amber/good/panel so both modes come from one definition.
+- `App/Chrome.swift`: `Chip`, `FaceChip`, `SelectionBar`, `ChipRow`, `SectionLabel` shared by the screens.
+- People: 150-px tiles, dashed Add name, ⏎ to the next unnamed, ⇥ skips (`onKeyPress(.tab)`), banner with Start
+  Naming, floating bar (Merge into One, This Is…, Open). Person: hero header, `companions(of:)` query ("often with",
+  toggles `alsoWith`), tab row, Best N / Hide bursts chips, `PersonMediaTile` (score, burst, time, session).
+- Files: `FolderColumn` (sources, subfolders of the open folder, offline flag, source context menu), `filterRow`
+  chips, `selectionBar`. Cards: `CardRow` as a panel with a status pill, sentence, destination line, `DestinationBox`
+  column, Copy New Files from All. Batch Export: cull switches and count live in the bottom bar.
+- Found while verifying: a `Text + Text` with `.fixedSize` inside the People banner blanked the whole
+  `NavigationSplitView` on macOS 15; plain `Text`s in a `VStack` instead.

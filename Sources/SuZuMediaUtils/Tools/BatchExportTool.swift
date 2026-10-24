@@ -60,7 +60,6 @@ struct BatchExportTool: View {
                     VStack(alignment: .leading, spacing: 22) {
                         InspectorSection(title: "Photos") {
                             ToolInputView(items: $items, kinds: MediaTypes.photos, mediaKind: .photo, label: "photos")
-                            cullOptions
                         }
                         EditControls(recipe: $recipe)
                         Text(fromPeople ? "Crops keep each person's face in frame; names are written into the files."
@@ -81,22 +80,31 @@ struct BatchExportTool: View {
                 .frame(width: 320)
             }
             Divider()
-            HStack(spacing: 12) {
+            HStack(spacing: 14) {
+                cullOptions
+                Divider().frame(height: 18)
                 if running || finished {
-                    ProgressView(value: Double(done), total: Double(max(1, total))).frame(maxWidth: 220)
+                    ProgressView(value: Double(done), total: Double(max(1, total))).frame(maxWidth: 200)
                     Text(finished ? "Done: \(done - failures.count - skipped) saved\(skipped == 0 ? "" : ", \(skipped) skipped")\(failures.isEmpty ? "" : ", \(failures.count) failed")"
                          : "\(done) of \(total)")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.secondary).monospacedDigit()
                     if let f = failures.first { Text(f).font(.caption).foregroundStyle(.red).lineLimit(1).help(failures.prefix(10).joined(separator: "\n")) }
                 } else {
-                    Text(output == nil ? "Choose where to save" : "\(chosenCount) photos → \(output!.lastPathComponent)").foregroundStyle(.secondary)
+                    (Text("\(chosenCount) of \(items.count)").fontWeight(.semibold) + Text(" ticked"))
+                        .monospacedDigit()
+                    Text(output.map { "→ \($0.lastPathComponent)" } ?? "Choose where to save (Output, on the right)")
+                        .foregroundStyle(output == nil ? Color.amber : .secondary).lineLimit(1)
                 }
                 Spacer()
                 if running { Button("Stop") { cancel = true } }
                 if finished, let output { Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([output]) } }
                 HStack(spacing: 4) {
-                    Button("Export \(chosenCount) Photo\(chosenCount == 1 ? "" : "s")") { start(bothShapes: false) }
-                        .keyboardShortcut(.defaultAction)
+                    Button { start(bothShapes: false) } label: {
+                        Label("Export \(chosenCount) Photo\(chosenCount == 1 ? "" : "s")", systemImage: "square.and.arrow.up")
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
                     // Rarely needed: every photo in both of the crop shapes picked (⌘-click) in Crop.
                     Menu {
                         let shapes = Self.bothShapes(recipe)
@@ -141,27 +149,24 @@ struct BatchExportTool: View {
 
     /// Similar and blurry shots are unticked in the preview, not hidden: the user sees what goes and can tick any back.
     var cullOptions: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        HStack(spacing: 12) {
             // People already come as the best of each burst (the Skip similar shots option above).
             if !fromPeople {
-                Toggle("Skip similar shots (keep the best of each)", isOn: $skipSimilar).toggleStyle(.checkbox)
+                Toggle("Skip similar", isOn: $skipSimilar)
                     .help("Shots taken within a couple of seconds that look the same: only the best one is exported")
             }
-            Toggle("Skip blurry shots", isOn: $skipBlurry).toggleStyle(.checkbox)
+            Toggle("Skip blurry", isOn: $skipBlurry)
                 .help("Photos whose main face is out of focus or moved; without a face, photos that are smeared all over")
             if let c = checking {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.mini)
-                    Text("Checking \(c.done) of \(c.total) photos…")
-                }
-                .font(.caption).foregroundStyle(.secondary)
+                ProgressView().controlSize(.mini)
+                Text("Checking \(c.done) of \(c.total)…").font(.caption).foregroundStyle(.secondary).monospacedDigit()
             } else if skipSimilar || skipBlurry, !items.isEmpty {
                 let similar = culled.values.filter { if case .similar = $0 { true } else { false } }.count, blurry = culled.count - similar
-                Text(culled.isEmpty ? "Nothing to skip." : "\(Self.count(similar, "similar")) and \(Self.count(blurry, "blurry")) unticked — tick any to keep it.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(culled.isEmpty ? "nothing to skip" : "−\(culled.count) unticked (\(similar) similar, \(blurry) blurry) · tick any to keep it")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
         }
-        .padding(.top, 4)
+        .toggleStyle(.switch).controlSize(.small)
     }
 
     static func count(_ n: Int, _ what: String) -> String { "\(n) \(what) photo\(n == 1 ? "" : "s")" }

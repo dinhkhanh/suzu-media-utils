@@ -5,12 +5,16 @@ import SwiftUI
 struct SuZuMediaUtilsApp: App {
     @StateObject private var faces = FaceGroupingModel()
     @StateObject private var updater = Updater()
+    // Settings › General. Applied at the root of every scene so windows, sheets and popovers agree.
+    @AppStorage("appearance") private var appearance = Appearance.system
+    @AppStorage("accent") private var accent = AccentChoice.coral
 
     var body: some Scene {
         WindowGroup("SuZu Media Utils") {
             AppShell()
                 .environmentObject(faces)
                 .frame(minWidth: 900, minHeight: 600)
+                .styled(appearance, accent)
         }
         .commands {
             CommandGroup(after: .appInfo) {
@@ -33,19 +37,26 @@ struct SuZuMediaUtilsApp: App {
                     .disabled(faces.currentProject == nil)
                 Button("Join a Team…") { faces.askJoinTeam = true }
             }
+            CommandGroup(after: .toolbar) {
+                Picker("Appearance", selection: $appearance) {
+                    ForEach(Appearance.allCases) { Text($0.title).tag($0) }
+                }
+            }
         }
         // Photos opened from the library: Batch Export with just them.
         WindowGroup("Edit & Export", id: "edit", for: EditRequest.self) { $request in
-            EditWindow(request: request).environmentObject(faces)
+            EditWindow(request: request).environmentObject(faces).styled(appearance, accent)
         }
         // Files culled from the Files browser, full screen.
         WindowGroup("Cull", id: "cull", for: CullRequest.self) { $request in
-            CullWindow(request: request).environmentObject(faces)
+            CullWindow(request: request).environmentObject(faces).styled(appearance, accent)
         }
         .defaultSize(width: 1400, height: 900)
         .restorationBehavior(.disabled)
         Settings {
             TabView {
+                GeneralSettings()
+                    .tabItem { Label("General", systemImage: "gearshape") }
                 FaceGroupingSettings()
                     .tabItem { Label("Face Grouping", systemImage: "person.2.crop.square.stack") }
                 WatermarkSettings()
@@ -57,6 +68,17 @@ struct SuZuMediaUtilsApp: App {
             }
             .environmentObject(faces)
             .environmentObject(updater)
+            .styled(appearance, accent)
         }
+    }
+}
+
+extension View {
+    /// The user's appearance and accent (Settings › General) on a scene's root view.
+    func styled(_ appearance: Appearance, _ accent: AccentChoice) -> some View {
+        preferredColorScheme(appearance.colorScheme)
+            .tint(accent.color)
+            // Custom drawings read `Color.accent` themselves; redraw them when the choice changes.
+            .id(accent)
     }
 }

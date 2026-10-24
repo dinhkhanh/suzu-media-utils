@@ -383,7 +383,7 @@ struct EditPreview: View {
         }
         .menuStyle(.button).buttonStyle(.borderless).fixedSize()
         .font(.caption)
-        .foregroundStyle(own == nil ? .white.opacity(0.85) : Color.accentColor)
+        .foregroundStyle(own == nil ? .white.opacity(0.85) : Color.accent)
         .padding(.horizontal, 10).padding(.vertical, 5)
         .background(.black.opacity(0.55), in: Capsule())
         .padding(10)
@@ -558,7 +558,7 @@ struct ZoomButton: View {
         Button { value = own ?? 1; open = true } label: { Label(title, systemImage: "plus.magnifyingglass") }
             .buttonStyle(.borderless)
             .font(.caption)
-            .foregroundStyle(own == nil ? .white.opacity(0.85) : Color.accentColor)
+            .foregroundStyle(own == nil ? .white.opacity(0.85) : Color.accent)
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(.black.opacity(0.55), in: Capsule())
             .padding(.vertical, 10)
@@ -621,13 +621,13 @@ struct StripThumb: View {
         .frame(width: side, height: side)
         .clipShape(RoundedRectangle(cornerRadius: 5))
         .opacity(checked == false ? 0.35 : 1)
-        .overlay(RoundedRectangle(cornerRadius: 5).stroke(selected ? Color.accentColor : .clear, lineWidth: 3))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(selected ? Color.accent : .clear, lineWidth: 3))
         .overlay(alignment: .topTrailing) {
             if let checked {
                 Image(systemName: checked ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: side > 120 ? 22 : 18))
                     .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, checked ? Color.accentColor : Color.black.opacity(hoveringCheck ? 0.6 : 0.35))
+                    .foregroundStyle(.white, checked ? Color.accent : Color.black.opacity(hoveringCheck ? 0.6 : 0.35))
                     .shadow(radius: 2)
                     .scaleEffect(hoveringCheck ? 1.15 : 1)
                     .padding(6)
@@ -701,7 +701,7 @@ struct LevelButton: View {
         Button { value = -(own ?? rendered.angle ?? 0); open = true } label: { Label(title, systemImage: "level") }
             .buttonStyle(.borderless)
             .font(.caption)
-            .foregroundStyle(own == nil ? .white.opacity(0.85) : Color.accentColor)
+            .foregroundStyle(own == nil ? .white.opacity(0.85) : Color.accent)
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(.black.opacity(0.55), in: Capsule())
             .padding(.vertical, 10)

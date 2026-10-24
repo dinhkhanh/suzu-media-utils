@@ -190,7 +190,7 @@ struct CullWindow: View {
                             .resizable().aspectRatio(contentMode: .fit)
                             .frame(height: 104)
                             .clipShape(RoundedRectangle(cornerRadius: 4))
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(zoom == face ? Color.accentColor : .clear, lineWidth: 2))
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(zoom == face ? Color.accent : .clear, lineWidth: 2))
                         HStack(spacing: 4) {
                             Text(face.name ?? "Unnamed").lineLimit(1)
                             if Self.eyesClosed(face) { Image(systemName: "eye.slash").foregroundStyle(.orange).help("Eyes closed") }
@@ -218,7 +218,7 @@ struct CullWindow: View {
                             }
                             .overlay(alignment: .topTrailing) { FlagBadge(flag: files[i].flag == .pick ? .pick : .none, size: 8, onImage: true).padding(2) }
                             .padding(2)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(i == index ? Color.accentColor : .clear, lineWidth: 2))
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(i == index ? Color.accent : .clear, lineWidth: 2))
                             .id(i)
                             .onTapGesture { index = i }
                     }

@@ -13,6 +13,16 @@ Full feature list (Vietnamese): [docs/FEATURES.md](docs/FEATURES.md).
 Point it at any folders — NAS share, external drive or local disk — and it finds every face in the photos and videos,
 groups them by person, keeps up as new files arrive, and files each person's media into a folder named after them.
 
+- **Overview (the start screen):** the event at a glance — files, people, faces to review and deliveries as four
+  counts; the night's workflow as five steps (Ingest → Recognise → Name → Cull → Deliver, each a link to the screen
+  that does it); the sessions as a timeline (click one to see its files); what needs you (unnamed people, a card
+  that was handed over, an offline folder, a rule waiting for its folder); and what happened on this Mac (names,
+  merges, deliveries, folders). The sidebar follows the same order: Overview and Files, then People (People,
+  To Name, Unassigned Faces, Search, Smart Albums, Auto Rules), then Tools; folders fold away under Folders. The
+  status pill at the bottom shows what the library is doing with a rate and time left, plus the team's sync; click it
+  for tonight's activity.
+- **Appearance:** Settings → General: System (follows macOS, Auto included), Light or Dark, also under View →
+  Appearance; the accent (SuZu coral or the Mac's), and which screen the app opens on.
 - **Projects:** one project per event, each with its own folders. Switch at the top of the sidebar (or File → Open
   Project); people, search, albums, auto rules, exports, the gallery and the batch tools follow the open project.
   People are shared: name someone once and they are recognised in every later project (typing a name suggests
@@ -21,8 +31,15 @@ groups them by person, keeps up as new files arrive, and files each person's med
 - Photos (JPEG, HEIC, PNG, TIFF) and videos (MP4/MOV natively; AV1, WebM, MKV, AVI… via ffmpeg). Videos are sampled
   at 1 frame per second; a person counts once per video.
 - Groups form automatically; known people are recognised as soon as a file finishes copying.
-- Name people right in the grid, merge groups, fix mistakes ("Not this person", "Move to…"); pick any face as a
-  person's picture, or let the best shot be chosen automatically (sharp, eyes open, facing the camera).
+- Name people right in the grid, built for a run: click a tile, type, ⏎ — the cursor moves to the next unnamed
+  person; ⇥ skips one; names from every project are suggested as you type; "Start Naming" on the banner begins
+  with the first unnamed. Select several (⌘-click, ⇧-click) for a floating bar: Merge into One, This Is…, Open.
+  Fix mistakes ("Not this person", "Move to…"); pick any face as a person's picture, or let the best shot be
+  chosen automatically (sharp, eyes open, facing the camera).
+- A person's page: their picture, name (click to rename), counts and when they were shot, who they are **often
+  with** (click a face chip to see only the photos together), then Photos / Videos / Faces with Best first, Best
+  N and Hide bursts as chips; each photo carries its best-shot score, burst count, time and session. Select photos
+  for Open in Edit & Export; the toolbar opens the best shots shown.
 - **Sessions:** each project splits itself into sessions wherever nobody shot for 30 minutes (adjustable): the
   opening, each match, the awards. The session bar sits above People, person pages, Unassigned Faces, Files, Search
   and Batch Export (even with a single session): click a session to see, or export, only that stretch of the event;
@@ -112,6 +129,11 @@ Patterns like `{event}_{date}_{person}_{seq:3}` with a live preview; people come
 library files keep their faces and names.
 
 ### Copy from Cards
+Each mounted card is a panel: its name, camera and room; what is new as a sentence ("312 new photos · 14 new
+videos · 9.8 GB · 1,208 copied before"), a status pill (New since 14:05 · Copying · Up to date), where its files
+will land, and one button. The destination and the options sit in a column on the right; Copy New Files from All
+starts every card that has something new, side by side.
+
 Photographers hand their cards over again and again during an event without erasing them. The tool knows each card
 by its volume UUID (the serial the camera wrote when it formatted the card; no renaming needed) and keeps a ledger
 of every file copied from it, so the next hand-over copies only what was shot since, however the earlier copies were
@@ -211,7 +233,7 @@ About $1 per 1,000 faces; up to 3 face crops per unnamed group are sent, each fa
 | `Sources/FaceCore` | Detection (Vision), alignment, Core ML embeddings, clustering, video sampling, ffmpeg fallback |
 | `Sources/MediaKit` | Edit pipeline (auto tone, crops, watermark), metadata, video clips/reels/proxies/contact sheets, rename, verifier |
 | `Sources/FaceLibrary` | SQLite library (GRDB), folder monitor, processor, grouping, best shots, bursts, search, delivery, export, gallery, Rekognition |
-| `Sources/SuZuMediaUtils/App` | App shell: window, sidebar, settings, headless mode |
+| `Sources/SuZuMediaUtils/App` | App shell: window, sidebar, Overview, appearance settings, headless mode |
 | `Sources/SuZuMediaUtils/FaceGrouping` | Face Grouping UI |
 | `Sources/SuZuMediaUtils/Tools` | Copy from Cards, Batch Export, Batch Rename, Copy Verifier, Video Tools |
 | `Sources/facescan` | Research CLI used to benchmark and tune thresholds |

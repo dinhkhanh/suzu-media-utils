@@ -4,6 +4,8 @@ import SwiftUI
 /// Face Grouping's places in the sidebar.
 enum FaceRoute: Hashable {
     case people
+    /// The people grid showing only the unnamed, for a naming run.
+    case toName
     case unassigned
     case search
     case album(Int64)
@@ -29,6 +31,7 @@ struct FaceGroupingDetail: View {
             Group {
                 switch route {
                 case .people: PeopleGrid(path: $path)
+                case .toName: PeopleGrid(path: $path, filter: .unnamed).id("toName")
                 case .unassigned: UnassignedView()
                 case .search: SearchView(albumId: nil)
                 case .album(let id): SearchView(albumId: id)
@@ -46,18 +49,27 @@ struct FaceGroupingDetail: View {
     }
 }
 
-/// Face Grouping's sidebar sections; rows are tagged with `AppRoute.faces`.
+/// Face Grouping's sidebar sections; rows are tagged with `AppRoute.faces`. People first (naming is the night's
+/// main job), albums and rules with them; the folders themselves fold away (they are browsed in Files) but stay
+/// here for their status and right-click actions (Locate, Rescan, Remove).
 struct FaceGroupingSidebar: View {
     @EnvironmentObject var model: FaceGroupingModel
+    @AppStorage("sidebar.folders") private var foldersOpen = false
+    @AppStorage("sidebar.known") private var knownOpen = false
 
     /// The open project's albums (all of them in "All Projects").
     var albums: [SmartAlbum] { model.albums.filter { model.currentProject == nil || $0.projectId == model.currentProject } }
+    var unnamed: Int { model.people.count { $0.faces > 0 && $0.name == nil } }
 
     var body: some View {
-        Section("Face Grouping") {
+        Section("People") {
             Label("People", systemImage: "person.2")
                 .badge(model.people.filter { $0.faces > 0 }.count)
                 .tag(AppRoute.faces(.people))
+            Label("To Name", systemImage: "questionmark.circle")
+                .badge(Text(unnamed.formatted()).foregroundStyle(unnamed > 0 ? Color.amber : .secondary))
+                .tag(AppRoute.faces(.toName))
+                .help("People without a name yet")
             Label("Unassigned Faces", systemImage: "questionmark.square.dashed")
                 .badge(model.stats.unassignedFaces)
                 .tag(AppRoute.faces(.unassigned))
@@ -76,16 +88,30 @@ struct FaceGroupingSidebar: View {
                 }
             }
         }
-        Section(model.currentProject == nil ? "Folders (all projects)" : "Folders") {
+        Section(isExpanded: $foldersOpen) {
             ForEach(model.projectSources) { SourceRow(source: $0).tag(AppRoute.faces(.source($0.id))) }
-            if model.projectSources.isEmpty && model.service != nil {
+            if model.service != nil {
                 Button { model.addFolder(kind: .media) } label: { Label("Add Folder…", systemImage: "plus") }
                     .buttonStyle(.borderless).foregroundStyle(.secondary)
             }
+        } header: {
+            folderHeader
         }
         if model.sources.contains(where: { $0.kind == .reference }) {
-            Section("Known People") {
+            Section("Known People", isExpanded: $knownOpen) {
                 ForEach(model.sources.filter { $0.kind == .reference }) { SourceRow(source: $0).tag(AppRoute.faces(.source($0.id))) }
+            }
+        }
+    }
+
+    /// "Folders · 3", with a warning when one is offline so it is noticed even folded.
+    var folderHeader: some View {
+        let offline = model.projectSources.count { !$0.online }
+        return HStack(spacing: 6) {
+            Text(model.currentProject == nil ? "Folders (all projects)" : "Folders")
+            if offline > 0 {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.amber)
+                    .help("\(offline) folder\(offline == 1 ? " is" : "s are") offline — renamed or moved? Open to locate it")
             }
         }
     }
@@ -151,34 +177,107 @@ struct SourceRow: View {
     }
 }
 
+/// The status pill at the bottom of the sidebar: what the library is doing, how fast, how long it will take, and
+/// the team's sync. Click it for tonight's activity.
 struct FaceGroupingStatus: View {
+    @EnvironmentObject var model: FaceGroupingModel
+    @State private var showActivity = false
+
+    /// Title, detail (right-aligned), and a progress fraction (nil: busy without a known end; -1: no bar).
+    var state: (title: String, detail: String, progress: Double?) {
+        if model.service == nil && model.startupError == nil { return ("Opening library…", "", nil) }
+        if let scanning = model.sources.first(where: { $0.scanning && $0.found > $0.files }) {
+            return ("Scanning \(scanning.name)…", "\(scanning.found.formatted()) found", nil)
+        }
+        if !model.removing.isEmpty { return ("Removing folder…", "", nil) }
+        if model.stats.pending > 0 {
+            var detail = model.rate > 0.1 ? String(format: "%.0f/s", model.rate) : ""
+            if model.rate > 0.1 {
+                let s = Double(model.stats.pending) / model.rate
+                detail += s < 90 ? " · ~\(Int(s.rounded())) s" : s < 5400 ? " · ~\(Int((s / 60).rounded())) min" : " · ~\(Int((s / 3600).rounded())) h"
+            }
+            return ("Processing \(model.stats.pending.formatted()) files", detail,
+                    Double(model.stats.files - model.stats.pending) / Double(max(1, model.stats.files)))
+        }
+        if model.projects.isEmpty { return ("Create a project to start", "", -1) }
+        if model.projectSources.isEmpty { return ("Add this event's folders to start", "", -1) }
+        return ("\(model.stats.files.formatted()) files", "up to date", -1)
+    }
+
+    var body: some View {
+        let (title, detail, progress) = state
+        Button { showActivity.toggle() } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(title).font(.callout.weight(.medium)).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(detail).font(.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+                }
+                if let progress, progress >= 0 {
+                    ProgressView(value: progress).progressViewStyle(.linear).controlSize(.small)
+                } else if progress == nil {
+                    ProgressView().progressViewStyle(.linear).controlSize(.small)
+                }
+                teamLine
+            }
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 9).fill(.quaternary.opacity(0.5)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 10).padding(.bottom, 10).padding(.top, 4)
+        .help("What the library is doing. Click for tonight's activity.")
+        .popover(isPresented: $showActivity, arrowEdge: .top) { ActivityPopover() }
+    }
+
+    @ViewBuilder var teamLine: some View {
+        if let team = model.currentTeam {
+            let status = model.teamStatus[team.id!]
+            let ok = status?.reachable == true && status?.error == nil
+            HStack(spacing: 5) {
+                Circle().fill(ok ? Color.good : Color.amber).frame(width: 7, height: 7)
+                Text(ok ? "Team \(TeamBar.subtitle(status))" : "Team \(team.name): \(TeamBar.subtitle(status))")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+    }
+}
+
+/// Tonight's activity, newest first.
+struct ActivityPopover: View {
     @EnvironmentObject var model: FaceGroupingModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if model.service == nil && model.startupError == nil {
-                ProgressView().progressViewStyle(.linear)
-                Text("Opening library…").font(.caption).foregroundStyle(.secondary)
-            } else if let scanning = model.sources.first(where: { $0.scanning && $0.found > $0.files }) {
-                ProgressView().progressViewStyle(.linear)
-                Text("Scanning \(scanning.name)… \(scanning.found.formatted()) files found").font(.caption).foregroundStyle(.secondary)
-            } else if !model.removing.isEmpty {
-                ProgressView().progressViewStyle(.linear)
-                Text("Removing folder from the library…").font(.caption).foregroundStyle(.secondary)
-            } else if model.stats.pending > 0 {
-                ProgressView(value: Double(model.stats.files - model.stats.pending), total: Double(max(1, model.stats.files)))
-                Text("Processing \(model.stats.pending) files" + (model.rate > 0.1 ? String(format: " · %.0f/s", model.rate) : ""))
-                    .font(.caption).foregroundStyle(.secondary)
-            } else if model.projects.isEmpty {
-                Text("Create a project to start.").font(.caption).foregroundStyle(.secondary)
-            } else if model.projectSources.isEmpty {
-                Text("Add this event's folders to start.").font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Activity").font(.headline)
+            if model.activity.isEmpty {
+                Text("Names, merges, deliveries and folders show up here as they happen.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else {
-                Text("\(model.stats.files) files · up to date").font(.caption).foregroundStyle(.secondary)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(model.activity) { ActivityRow(item: $0) }
+                    }
+                }
+                .frame(maxHeight: 360)
             }
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .frame(width: 340)
+    }
+}
+
+struct ActivityRow: View {
+    let item: ActivityItem
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(item.at.formatted(date: .omitted, time: .shortened)).font(.caption).foregroundStyle(.tertiary).monospacedDigit()
+                .frame(width: 54, alignment: .leading)
+            Image(systemName: item.icon).font(.caption).foregroundStyle(.secondary).frame(width: 14)
+            Text(item.text).font(.callout).fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 

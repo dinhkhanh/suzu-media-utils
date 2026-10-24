@@ -6,16 +6,24 @@ enum PeopleFilter: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// Everyone in the project as face tiles. Naming is the night's main job, so it is built for a run: click a tile,
+/// type, ⏎ — the cursor moves to the next unnamed person; ⇥ skips one; names from every project are suggested.
+/// Several tiles selected (⌘-click, ⇧-click) bring up a bar to merge them, or say who they are.
 struct PeopleGrid: View {
     @EnvironmentObject var model: FaceGroupingModel
     @Binding var path: NavigationPath
     @State private var search = ""
-    @State private var filter = PeopleFilter.all
+    @State private var filter: PeopleFilter
     @State private var selected: Set<Int64> = []
     @FocusState private var editing: Int64?
     @State private var suggesting = false
     @State private var exportAll: ExportMode?
     @State private var galleryExport = false
+
+    init(path: Binding<NavigationPath>, filter: PeopleFilter = .all) {
+        _path = path
+        _filter = State(initialValue: filter)
+    }
 
     var shown: [PersonSummary] {
         model.people.filter { p in
@@ -24,33 +32,43 @@ struct PeopleGrid: View {
                 && (search.isEmpty || (p.name ?? "").localizedCaseInsensitiveContains(search))
         }
     }
+    var unnamed: Int { model.people.count { $0.faces > 0 && $0.name == nil } }
+    var named: Int { model.people.count { $0.faces > 0 && $0.name != nil } }
 
     var body: some View {
         VStack(spacing: 0) {
-        SessionBar()
-        ScrollView {
-            if shown.isEmpty {
-                ContentUnavailableView(model.people.isEmpty ? "No people yet" : "No matches", systemImage: "person.2",
-                                       description: Text(model.people.isEmpty ? "Add a folder; groups appear as files are processed." : ""))
-                    .padding(.top, 80)
-            }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 16)], spacing: 18) {
-                ForEach(shown) { p in
-                    PersonGridCell(person: p, selected: selected.contains(p.id), mergeCount: selected.count > 1 && selected.contains(p.id) ? selected.count : 0,
-                                   known: model.knownPeople.filter { $0.id != p.id }, editing: editing == p.id, focus: $editing,
-                                   open: { path.append(PersonRoute(id: p.id)) },
-                                   click: { selected.click(p.id, in: shown.map(\.id)) },
-                                   mergeSelected: { model.merge(selected); selected = [] },
-                                   thisIs: { model.mergeInto(p.id, $0) },
-                                   rename: { commitName($0, for: p) })
-                        .equatable()
+            SessionBar(divider: true)
+            if unnamed > 0 && filter != .named && search.isEmpty { namingBanner }
+            ScrollView {
+                if shown.isEmpty {
+                    ContentUnavailableView(model.people.isEmpty ? "No people yet" : filter == .unnamed ? "Everyone has a name" : "No matches",
+                                           systemImage: filter == .unnamed ? "checkmark.circle" : "person.2",
+                                           description: Text(model.people.isEmpty ? "Add a folder; groups appear as files are processed." : ""))
+                        .padding(.top, 80)
                 }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 170), spacing: 6)], spacing: 6) {
+                    ForEach(shown) { p in
+                        PersonGridCell(person: p, selected: selected.contains(p.id), mergeCount: selected.count > 1 && selected.contains(p.id) ? selected.count : 0,
+                                       known: model.knownPeople.filter { $0.id != p.id }, editing: editing == p.id, focus: $editing,
+                                       open: { path.append(PersonRoute(id: p.id)) },
+                                       click: { selected.click(p.id, in: shown.map(\.id)) },
+                                       mergeSelected: { model.merge(selected); selected = [] },
+                                       thisIs: { model.mergeInto(p.id, $0) },
+                                       rename: { commitName($0, for: p) },
+                                       skip: { skip(from: p) })
+                            .equatable()
+                    }
+                }
+                .padding(.horizontal, 18).padding(.vertical, 14)
+                // Room for the selection bar.
+                .padding(.bottom, selected.isEmpty ? 0 : 64)
             }
-            .padding(20)
+            // A click between tiles clears the selection.
+            .background { Color.clear.contentShape(Rectangle()).onTapGesture { selected = []; editing = nil } }
         }
-        }
+        .overlay(alignment: .bottom) { if !selected.isEmpty { selectionBar } }
         .navigationTitle(model.currentSession.map { "People · \(model.sessionTitle($0))" } ?? "People")
-        .navigationSubtitle("\(shown.count) people · click a name to edit, double-click to open, ⌘-click or ⇧-click to select several")
+        .navigationSubtitle("\(named + unnamed) · \(named) named" + (unnamed > 0 ? " · \(unnamed) to name" : ""))
         .searchable(text: $search, prompt: "Search names")
         .sheet(isPresented: $suggesting) { CelebritySheet() }
         .sheet(item: $exportAll) { ExportSheet(scope: .all, mode: $0) }
@@ -58,9 +76,15 @@ struct PeopleGrid: View {
         .toolbar {
             ToolbarItem {
                 Picker("Show", selection: $filter) {
-                    ForEach(PeopleFilter.allCases) { Text($0.rawValue).tag($0) }
+                    ForEach(PeopleFilter.allCases) { f in
+                        Text(f == .unnamed && unnamed > 0 ? "Unnamed \(unnamed)" : f.rawValue).tag(f)
+                    }
                 }
                 .pickerStyle(.segmented)
+            }
+            ToolbarItem {
+                Button { suggesting = true } label: { Label("Suggest Names", systemImage: "sparkles") }
+                    .help("Look up unnamed groups with Amazon Rekognition celebrity recognition")
             }
             ToolbarItem {
                 Menu {
@@ -73,14 +97,46 @@ struct PeopleGrid: View {
                 }
                 .help("Copy or move every named person's photos and videos into folders named after them, in one go")
             }
-            ToolbarItem {
-                Button { suggesting = true } label: { Label("Suggest Names…", systemImage: "sparkles") }
-                    .help("Look up unnamed groups with Amazon Rekognition celebrity recognition")
+        }
+    }
+
+    /// "24 people still need a name" with the keys, and a button that starts the run.
+    var namingBanner: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "pencil").foregroundStyle(Color.amber)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(unnamed) \(unnamed == 1 ? "person still needs" : "people still need") a name").fontWeight(.semibold)
+                Text("Click a tile, type, press ⏎ — the cursor moves to the next unnamed person. ⇥ skips one; names from every project are suggested as you type.")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
-            ToolbarItem {
-                Button("Merge") { model.merge(selected); selected = [] }
-                    .disabled(selected.count < 2)
-                    .help("Merge the selected people into one (keeps the name if one of them is named)")
+            Spacer()
+            Button("Start Naming") { startNaming() }.controlSize(.small)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.amber.opacity(0.1)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.amber.opacity(0.3), lineWidth: 1))
+        .padding(.horizontal, 18).padding(.top, 12)
+    }
+
+    var selectionBar: some View {
+        SelectionBar(title: selected.count == 1 ? "1 person selected" : "\(selected.count) people selected", clear: { selected = [] }) {
+            Button("Merge into One") { model.merge(selected); selected = [] }
+                .buttonStyle(.borderedProminent)
+                .disabled(selected.count < 2)
+                .help("Merge the selected people into one (keeps the name if one of them is named)")
+            Menu("This Is…") {
+                ForEach(model.knownPeople.filter { !selected.contains($0.id) }) { k in
+                    Button(k.displayName) {
+                        for id in selected { model.mergeInto(id, k.id) }
+                        selected = []
+                    }
+                }
+            }
+            .fixedSize()
+            .disabled(model.knownPeople.allSatisfy { selected.contains($0.id) })
+            .help("The selected people are someone already named, here or in another project")
+            if selected.count == 1, let id = selected.first {
+                Button("Open") { path.append(PersonRoute(id: id)) }
             }
         }
     }
@@ -90,11 +146,24 @@ extension PeopleGrid {
     /// Saves an inline rename, then moves the cursor to the next unnamed person for fast labelling.
     func commitName(_ raw: String, for person: PersonSummary) {
         let name = raw.trimmingCharacters(in: .whitespaces)
-        let list = shown
-        let next = list.drop { $0.id != person.id }.dropFirst().first { $0.name == nil }
-            ?? list.first { $0.name == nil && $0.id != person.id }
         if !name.isEmpty && name != person.name { model.rename(person.id, to: name) }
-        editing = person.name == nil && !name.isEmpty ? next?.id : nil
+        editing = person.name == nil && !name.isEmpty ? nextUnnamed(after: person)?.id : nil
+    }
+
+    /// ⇥: leave this one for later and go to the next unnamed person.
+    func skip(from person: PersonSummary) {
+        editing = nextUnnamed(after: person)?.id
+    }
+
+    func startNaming() {
+        if filter == .named { filter = .all }
+        editing = shown.first { $0.name == nil }?.id
+    }
+
+    func nextUnnamed(after person: PersonSummary) -> PersonSummary? {
+        let list = shown
+        return list.drop { $0.id != person.id }.dropFirst().first { $0.name == nil }
+            ?? list.first { $0.name == nil && $0.id != person.id }
     }
 }
 
@@ -116,13 +185,14 @@ struct PersonGridCell: View, Equatable {
     let mergeSelected: () -> Void
     let thisIs: (Int64) -> Void
     let rename: (String) -> Void
+    let skip: () -> Void
 
     static func == (a: PersonGridCell, b: PersonGridCell) -> Bool {
         a.person == b.person && a.selected == b.selected && a.mergeCount == b.mergeCount && a.known == b.known && a.editing == b.editing
     }
 
     var body: some View {
-        PersonCell(person: person, selected: selected, editing: focus, onRename: rename)
+        PersonCell(person: person, selected: selected, editing: focus, onRename: rename, onSkip: skip)
             .onTapGesture(count: 2, perform: open)
             .onTapGesture(perform: click)
             .contextMenu {
@@ -133,51 +203,79 @@ struct PersonGridCell: View, Equatable {
     }
 }
 
+/// A face, the name (or a dashed "Add name" that turns into a field), and the counts.
 struct PersonCell: View {
     let person: PersonSummary
     let selected: Bool
     var editing: FocusState<Int64?>.Binding?
     var onRename: ((String) -> Void)?
+    var onSkip: (() -> Void)?
     @State private var name = ""
 
+    var isEditing: Bool { editing?.wrappedValue == person.id }
+
     var body: some View {
-        VStack(spacing: 6) {
-            FaceImage(faceId: person.coverFaceId, side: 110)
+        VStack(spacing: 8) {
+            FaceImage(faceId: person.coverFaceId, side: 112)
                 .clipShape(Circle())
-                .overlay(Circle().stroke(selected ? Color.accentColor : .clear, lineWidth: 3))
+                .overlay(Circle().stroke(.separator, lineWidth: 1))
+                .overlay(Circle().stroke(selected ? Color.accent : isEditing ? Color.amber : .clear, lineWidth: 3))
+                .shadow(color: .black.opacity(selected ? 0.25 : 0), radius: 6, y: 2)
             if let editing, let onRename {
-                // Inline name field: click, type, Return. Escape restores the old name.
-                TextField("Add name", text: $name)
-                    .textFieldStyle(.plain)
-                    .multilineTextAlignment(.center)
-                    .font(.headline)
-                    .focused(editing, equals: person.id)
-                    .knownNameSuggestions(for: name) { onRename($0) }
-                    .onSubmit { onRename(name) }
-                    .onExitCommand { name = person.name ?? ""; editing.wrappedValue = nil }
-                    .onAppear { name = person.name ?? "" }
-                    .onChange(of: person.name) { name = person.name ?? "" }
+                if isEditing {
+                    // Inline name field: click, type, Return. Escape restores the old name.
+                    TextField("Add name", text: $name)
+                        .textFieldStyle(.plain)
+                        .multilineTextAlignment(.center)
+                        .font(.headline)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(isEditing ? Color.primary.opacity(0.06) : .clear))
+                        .focused(editing, equals: person.id)
+                        .knownNameSuggestions(for: name) { onRename($0) }
+                        .onSubmit { onRename(name) }
+                        .onKeyPress(.tab) {
+                            // Skip to the next unnamed person; an unsaved name is left behind.
+                            if person.name == nil { name = ""; onSkip?(); return .handled }
+                            return .ignored
+                        }
+                        .onExitCommand { name = person.name ?? ""; editing.wrappedValue = nil }
+                        .onAppear { name = person.name ?? "" }
+                        .onChange(of: person.name) { name = person.name ?? "" }
+                } else if let n = person.name {
+                    Text(n).font(.headline).lineLimit(1)
+                        .onTapGesture { editing.wrappedValue = person.id }
+                        .help("Click to rename")
+                } else {
+                    Button("Add name") { editing.wrappedValue = person.id }
+                        .buttonStyle(.plain)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(Color.amber)
+                        .padding(.horizontal, 10).padding(.vertical, 3)
+                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.amber.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [3, 2])))
+                }
             } else {
                 Text(person.displayName)
                     .font(.headline)
                     .foregroundStyle(person.name == nil ? .secondary : .primary)
                     .lineLimit(1)
             }
-            Text(counts).font(.caption).foregroundStyle(.secondary)
+            Text(counts).font(.caption).foregroundStyle(.secondary).monospacedDigit()
         }
-        .frame(width: 130)
+        .padding(.vertical, 12).padding(.horizontal, 6)
+        .frame(maxWidth: .infinity)
+        .background(RoundedRectangle(cornerRadius: 12).fill(selected ? Color.accent.opacity(0.12) : .clear))
         .contentShape(Rectangle())
     }
 
     var counts: String {
-        var parts = ["\(person.photos) photo\(person.photos == 1 ? "" : "s")"]
+        var parts = ["\(person.photos.formatted()) photo\(person.photos == 1 ? "" : "s")"]
         if person.videos > 0 { parts.append("\(person.videos) video\(person.videos == 1 ? "" : "s")") }
         return parts.joined(separator: " · ")
     }
 }
 
 enum MediaSort: String, CaseIterable, Identifiable {
-    case best = "Best First", time = "By Time", name = "By Name"
+    case best = "Best first", time = "By time", name = "By name"
     var id: String { rawValue }
 }
 
@@ -186,6 +284,8 @@ enum DetailTab: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// One person: a header with their picture, name, counts and who they are often with; then their photos (best
+/// first, one of each burst), videos and faces.
 struct PersonDetail: View {
     @EnvironmentObject var model: FaceGroupingModel
     let personId: Int64
@@ -206,26 +306,36 @@ struct PersonDetail: View {
     @State private var notifyRule = false
     @State private var videoExport = false
     @State private var otherProjects: [String] = []
+    @State private var companions: [Companion] = []
 
     var person: PersonSummary? { model.people.first { $0.id == personId } }
 
     var body: some View {
         VStack(spacing: 0) {
             SessionBar(divider: true)
-            header
-            Divider()
             ScrollView {
-                switch tab {
-                case .photos: mediaGrid(shown(.photo), empty: "No photos of this person")
-                case .videos: mediaGrid(shown(.video), empty: "No videos of this person")
-                case .faces: faceGrid
+                VStack(alignment: .leading, spacing: 0) {
+                    header
+                    tabs
+                    switch tab {
+                    case .photos: mediaGrid(shown(.photo), empty: "No photos of this person")
+                    case .videos: mediaGrid(shown(.video), empty: "No videos of this person")
+                    case .faces: faceGrid
+                    }
                 }
+                .padding(.bottom, selectedMedia.isEmpty && selectedFaces.isEmpty ? 0 : 64)
             }
+            .background { Color.clear.contentShape(Rectangle()).onTapGesture { selectedMedia = []; selectedFaces = [] } }
+        }
+        .overlay(alignment: .bottom) {
+            if tab != .faces && !selectedMedia.isEmpty { mediaSelectionBar }
+            if tab == .faces && !selectedFaces.isEmpty { faceSelectionBar }
         }
         .navigationTitle(person?.displayName ?? "Person")
         .toolbar { toolbar }
         .task(id: reloadKey) { await reload() }
-        .onAppear { name = person?.name ?? "" }
+        // The name, once the model has the person (and after a rename elsewhere); not while it is being typed.
+        .onChange(of: person?.name, initial: true) { if name != (person?.name ?? ""), name.isEmpty || name == person?.name { name = person?.name ?? "" } }
         .sheet(isPresented: $notifyRule) { RuleSheet(presetPerson: personId, notifyOnly: true) }
         .sheet(isPresented: $videoExport) { VideoExportSheet(personId: personId, name: person?.name ?? "Person") }
         .sheet(item: $export) { mode in
@@ -240,65 +350,93 @@ struct PersonDetail: View {
         async let m = model.media(of: personId, alsoWith: alsoWith)
         async let f = model.faces(of: personId)
         async let o = model.otherProjects(of: personId)
-        let (newMedia, newFaces, others) = await (m, f, o)
+        async let c = model.companions(of: personId)
+        let (newMedia, newFaces, others, together) = await (m, f, o, c)
         guard !Task.isCancelled else { return }
         otherProjects = others
+        companions = together
         media = newMedia
         faces = newFaces
         selectedFaces = selectedFaces.intersection(faces.map(\.id))
+        selectedMedia = selectedMedia.intersection(media.map(\.id))
     }
 
+    // MARK: - Header
+
     var header: some View {
-        HStack(spacing: 16) {
-            FaceImage(faceId: person?.coverFaceId, side: 84).clipShape(Circle())
+        HStack(alignment: .center, spacing: 18) {
+            FaceImage(faceId: person?.coverFaceId, side: 96).clipShape(Circle())
+                .overlay(Circle().stroke(.separator, lineWidth: 1))
                 .contextMenu {
                     Button("Pick Best Shot Automatically") { model.setCover(personId, faceId: nil) }
                 }
                 .help("Right-click a photo or face to use it as the picture")
             VStack(alignment: .leading, spacing: 6) {
-                TextField("Add a name", text: $name)
-                    .textFieldStyle(.plain)
-                    .font(.title.bold())
-                    .knownNameSuggestions(for: name) { _ in commitName() }
-                    .onSubmit(commitName)
-                if !otherProjects.isEmpty {
-                    Label("Also in \(otherProjects.prefix(3).joined(separator: ", "))\(otherProjects.count > 3 ? " and \(otherProjects.count - 3) more" : "")",
-                          systemImage: "calendar.badge.checkmark")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .help("Recognised in these projects too: a name given here applies to all of them")
+                HStack(spacing: 10) {
+                    TextField("Add a name", text: $name)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 24, weight: .bold))
+                        .knownNameSuggestions(for: name) { _ in commitName() }
+                        .onSubmit(commitName)
+                        .fixedSize()
+                        .help("Click to rename; the name applies in every project")
+                    if !otherProjects.isEmpty {
+                        Label("Known in \(otherProjects.count + 1) projects", systemImage: "checkmark.seal")
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 8).padding(.vertical, 3)
+                            .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                            .help("Also in \(otherProjects.joined(separator: ", ")): a name given here applies to all of them")
+                    }
                 }
-                HStack(spacing: 12) {
-                    if let p = person { Text(PersonCell(person: p, selected: false).counts).foregroundStyle(.secondary) }
-                    filterMenu
-                    ForEach(Array(alsoWith), id: \.self) { id in
-                        Button {
-                            alsoWith.remove(id)
-                        } label: {
-                            Label("with \(model.people.first { $0.id == id }?.displayName ?? "?")", systemImage: "xmark.circle.fill")
+                Text(summary).foregroundStyle(.secondary)
+                if !companions.isEmpty || !alsoWith.isEmpty {
+                    HStack(spacing: 6) {
+                        Text("Often with").font(.callout).foregroundStyle(.secondary).padding(.trailing, 2)
+                        ScrollView(.horizontal) {
+                            HStack(spacing: 6) {
+                                ForEach(companions) { c in
+                                    FaceChip(faceId: c.coverFaceId, title: c.name, count: c.count.formatted(), on: alsoWith.contains(c.id),
+                                             help: "Only photos with \(c.name) in them too") {
+                                        if alsoWith.contains(c.id) { alsoWith.remove(c.id) } else { alsoWith.insert(c.id) }
+                                    }
+                                }
+                                // Someone picked who no longer shows in the top companions: still a chip, so it can be removed.
+                                ForEach(Array(alsoWith).filter { id in !companions.contains { $0.id == id } }, id: \.self) { id in
+                                    let p = model.people.first { $0.id == id } ?? model.knownPeople.first { $0.id == id }
+                                    FaceChip(faceId: p?.coverFaceId, title: p?.displayName ?? "?", on: true) { alsoWith.remove(id) }
+                                }
+                                Menu {
+                                    ForEach(model.people.filter { $0.name != nil && $0.id != personId && !alsoWith.contains($0.id) }) { p in
+                                        Button(p.displayName) { alsoWith.insert(p.id) }
+                                    }
+                                } label: {
+                                    Image(systemName: "plus")
+                                }
+                                .menuStyle(.borderlessButton).fixedSize()
+                                .help("Only photos where this person is together with someone else")
+                            }
                         }
-                        .buttonStyle(.bordered).controlSize(.small)
+                        .scrollIndicators(.never)
                     }
                 }
             }
-            Spacer()
-            Picker("", selection: $tab) {
-                ForEach(DetailTab.allCases) { t in Text(tabTitle(t)).tag(t) }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 300)
+            Spacer(minLength: 0)
         }
-        .padding(16)
+        .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 12)
     }
 
-    var filterMenu: some View {
-        Menu("Also with…") {
-            ForEach(model.people.filter { $0.name != nil && $0.id != personId && !alsoWith.contains($0.id) }) { p in
-                Button(p.displayName) { alsoWith.insert(p.id) }
-            }
+    /// "1,204 photos · 12 videos · 18:14 → 23:38".
+    var summary: String {
+        var parts: [String] = []
+        if let p = person { parts.append(PersonCell(person: p, selected: false).counts) }
+        let times = media.compactMap(\.takenAt)
+        if let first = times.min(), let last = times.max() {
+            let f = DateFormatter()
+            f.dateFormat = Calendar.current.isDate(first, inSameDayAs: last) ? "HH:mm" : "d MMM HH:mm"
+            parts.append("\(f.string(from: first)) → \(f.string(from: last))")
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help("Only show files where this person appears together with someone else")
+        if !alsoWith.isEmpty { parts.append("only together with \(alsoWith.count == 1 ? "them" : "all of them")") }
+        return parts.joined(separator: " · ")
     }
 
     func commitName() {
@@ -312,8 +450,57 @@ struct PersonDetail: View {
         }
     }
 
+    // MARK: - Tabs and controls
+
+    var tabs: some View {
+        HStack(spacing: 18) {
+            ForEach(DetailTab.allCases) { t in
+                Button { tab = t } label: {
+                    HStack(spacing: 5) {
+                        Text(t.rawValue).fontWeight(.medium)
+                        Text(tabCount(t).formatted()).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                    .padding(.vertical, 8)
+                    .overlay(alignment: .bottom) { Rectangle().fill(tab == t ? Color.accent : .clear).frame(height: 2) }
+                    .foregroundStyle(tab == t ? .primary : .secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
+            if tab != .faces {
+                Picker("Sort", selection: $sort) { ForEach(MediaSort.allCases) { Text($0.rawValue).tag($0) } }
+                    .pickerStyle(.segmented).labelsHidden().fixedSize()
+                Menu {
+                    Picker("Show", selection: $topN) {
+                        Text("All").tag(Int?.none)
+                        ForEach([10, 20, 50, 100], id: \.self) { Text("Best \($0)").tag(Int?.some($0)) }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    Chip(topN.map { "Best \($0)" } ?? "All shots", on: topN != nil) {}
+                }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().tint(.primary)
+                .help("Show only the best shots (sharp, eyes open, facing the camera, smiling)")
+                let hidden = media.filter { $0.kind == (tab == .videos ? .video : .photo) }.count - shown(tab == .videos ? .video : .photo, limit: false).count
+                Chip("Hide bursts", count: collapseBursts && hidden > 0 ? "−\(hidden)" : nil, on: collapseBursts,
+                     help: "Show only the best photo of each burst of near-identical shots") { collapseBursts.toggle() }
+            }
+        }
+        .padding(.horizontal, 20)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    func tabCount(_ t: DetailTab) -> Int {
+        switch t {
+        case .photos: media.filter { $0.kind == .photo }.count
+        case .videos: media.filter { $0.kind == .video }.count
+        case .faces: faces.count
+        }
+    }
+
     /// The grid after session filter, sort, burst collapsing and Top N.
-    func shown(_ kind: MediaKind) -> [PersonMedia] {
+    func shown(_ kind: MediaKind, limit: Bool = true) -> [PersonMedia] {
         var items = media.filter { $0.kind == kind }
         if collapseBursts {
             var best: [Int64: Int] = [:]
@@ -330,37 +517,11 @@ struct PersonDetail: View {
         case .time: items.sort { ($0.takenAt ?? .distantPast, $0.path) < ($1.takenAt ?? .distantPast, $1.path) }
         case .name: items.sort { $0.path < $1.path }
         }
-        if let n = topN { items = Array(items.sorted { $0.score > $1.score }.prefix(n)) }
+        if limit, let n = topN { items = Array(items.sorted { $0.score > $1.score }.prefix(n)) }
         return items
     }
 
-    var viewControls: some View {
-        FlowLayout(spacing: 10) {
-            Picker("", selection: $sort) { ForEach(MediaSort.allCases) { Text($0.rawValue).tag($0) } }
-                .fixedSize()
-            Picker("", selection: $topN) {
-                Text("All").tag(Int?.none)
-                ForEach([10, 20, 50, 100], id: \.self) { Text("Best \($0)").tag(Int?.some($0)) }
-            }
-            .fixedSize()
-            .help("Show only the best shots (sharp, eyes open, facing the camera, smiling)")
-            SessionPicker()
-            Toggle("Hide similar shots", isOn: $collapseBursts)
-                .toggleStyle(.checkbox)
-                .fixedSize()
-                .help("Show only the best photo of each burst of near-identical shots")
-        }
-        .padding(.horizontal, 16).padding(.top, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    func tabTitle(_ t: DetailTab) -> String {
-        switch t {
-        case .photos: "Photos (\(media.filter { $0.kind == .photo }.count))"
-        case .videos: "Videos (\(media.filter { $0.kind == .video }.count))"
-        case .faces: "Faces (\(faces.count))"
-        }
-    }
+    // MARK: - Grids
 
     @ViewBuilder
     func mediaGrid(_ items: [PersonMedia], empty: String) -> some View {
@@ -368,27 +529,15 @@ struct PersonDetail: View {
             ContentUnavailableView(empty, systemImage: tab == .videos ? "video.slash" : "photo")
                 .padding(.top, 60)
         }
-        viewControls
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 8)], spacing: 8) {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 176, maximum: 240), spacing: 10)], spacing: 10) {
             ForEach(items) { item in
-                MediaThumbnail(item: item)
-                    .overlay(alignment: .topTrailing) {
-                        if item.hiddenInBurst > 0 {
-                            Text("+\(item.hiddenInBurst)")
-                                .font(.caption.bold()).padding(.horizontal, 6).padding(.vertical, 2)
-                                .background(.black.opacity(0.6), in: Capsule()).foregroundStyle(.white).padding(6)
-                                .help("\(item.hiddenInBurst) similar shots hidden; this is the best of the burst")
-                        }
-                    }
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(selectedMedia.contains(item.id) ? Color.accentColor : .clear, lineWidth: 3))
-                    .onTapGesture(count: 2) { NSWorkspace.shared.open(item.url) }
+                PersonMediaTile(item: item, session: sessionName(item), selected: selectedMedia.contains(item.id))
+                    .onTapGesture(count: 2) { openWindow.edit([item.path], faces: [item.path: item.faceId]) }
                     .onTapGesture { selectedMedia.click(item.id, in: items.map(\.id)) }
                     .contextMenu {
                         // The selection when this photo is in it, else just this photo.
                         let open = selectedMedia.contains(item.id) ? items.filter { selectedMedia.contains($0.id) } : [item]
-                        Button(open.count > 1 ? "Open \(open.count) Photos" : "Open") {
-                            openWindow.edit(open.map(\.path), faces: Dictionary(open.map { ($0.path, $0.faceId) }, uniquingKeysWith: { a, _ in a }))
-                        }
+                        Button(open.count > 1 ? "Open \(open.count) Photos in Edit & Export" : "Open in Edit & Export") { openInEditor(open) }
                         Button("Open With Default App") { open.forEach { NSWorkspace.shared.open($0.url) } }
                         Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(open.map(\.url)) }
                         Divider()
@@ -397,7 +546,17 @@ struct PersonDetail: View {
                     .help(item.url.lastPathComponent)
             }
         }
-        .padding(16)
+        .padding(20)
+    }
+
+    /// The named session a photo was taken in, when the event has named sessions.
+    func sessionName(_ item: PersonMedia) -> String? {
+        guard let t = item.takenAt?.timeIntervalSince1970 else { return nil }
+        return model.sessions.first { $0.contains(t) }?.name
+    }
+
+    func openInEditor(_ items: [PersonMedia]) {
+        openWindow.edit(items.map(\.path), faces: Dictionary(items.map { ($0.path, $0.faceId) }, uniquingKeysWith: { a, _ in a }))
     }
 
     var faceGrid: some View {
@@ -406,38 +565,105 @@ struct PersonDetail: View {
         }
     }
 
-    @ToolbarContentBuilder
-    var toolbar: some ToolbarContent {
-        if tab == .faces && !selectedFaces.isEmpty {
-            ToolbarItem {
-                Button("Not \(person?.name ?? "This Person")") {
-                    model.reject(selectedFaces, from: personId)
-                    selectedFaces = []
-                }
-                .help("Remove the selected faces; they won't be put back here automatically")
-            }
-            ToolbarItem {
-                MoveFacesMenu(faces: selectedFaces, excluding: personId) { selectedFaces = [] }
+    var mediaSelectionBar: some View {
+        let chosen = media.filter { selectedMedia.contains($0.id) }
+        return SelectionBar(title: "\(chosen.count) selected", clear: { selectedMedia = [] }) {
+            Button("Open in Edit & Export") { openInEditor(chosen) }.buttonStyle(.borderedProminent)
+            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(chosen.map(\.url)) }
+            if chosen.count == 1, let one = chosen.first {
+                Button("Use as Picture") { model.setCover(personId, faceId: one.faceId) }
             }
         }
+    }
+
+    var faceSelectionBar: some View {
+        SelectionBar(title: "\(selectedFaces.count) face\(selectedFaces.count == 1 ? "" : "s") selected", clear: { selectedFaces = [] }) {
+            Button("Not \(person?.name ?? "This Person")") {
+                model.reject(selectedFaces, from: personId)
+                selectedFaces = []
+            }
+            .help("Remove the selected faces; they won't be put back here automatically")
+            MoveFacesMenu(faces: selectedFaces, excluding: personId) { selectedFaces = [] }.fixedSize()
+        }
+    }
+
+    @ToolbarContentBuilder
+    var toolbar: some ToolbarContent {
         if tab == .videos && !media.filter({ $0.kind == .video }).isEmpty {
             ToolbarItem {
-                Button { videoExport = true } label: { Label("Export Clips…", systemImage: "film.stack") }
+                Button { videoExport = true } label: { Label("Video Moments…", systemImage: "film.stack") }
                     .help("Clips of each appearance, a highlight reel, or best still frames")
             }
+        }
+        ToolbarItem {
+            Button {
+                let photos = shown(.photo)
+                openInEditor(selectedMedia.isEmpty ? Array(photos.prefix(topN ?? 50)) : photos.filter { selectedMedia.contains($0.id) })
+            } label: {
+                Label("Edit & Export", systemImage: "slider.horizontal.3")
+            }
+            .disabled(media.isEmpty)
+            .help(selectedMedia.isEmpty ? "Open the best \(topN ?? 50) photos shown in Edit & Export (select some to open just those)"
+                                        : "Open the selected photos in Edit & Export")
         }
         ToolbarItem {
             Button { notifyRule = true } label: { Label("Deliver / Notify…", systemImage: "bell.badge") }
                 .help("Get notified, and optionally copy new photos of this person to a folder, as they arrive")
         }
         ToolbarItem {
-            Button { export = .copy } label: { Label("Copy to Folder…", systemImage: "doc.on.doc") }
-                .help("Copy this person's photos and videos into a folder named after them")
+            Menu {
+                Button("Copy to Folder…") { export = .copy }
+                Button("Move to Folder…") { export = .move }
+            } label: {
+                Label("Copy to Folder", systemImage: "folder")
+            } primaryAction: {
+                export = .copy
+            }
+            .help("Copy (or move) this person's photos and videos into a folder named after them")
         }
-        ToolbarItem {
-            Button { export = .move } label: { Label("Move to Folder…", systemImage: "folder") }
-                .help("Move this person's photos and videos into a folder named after them")
-        }
+    }
+}
+
+/// A photo or video of the person: best-shot score, burst count, time and session.
+struct PersonMediaTile: View {
+    let item: PersonMedia
+    let session: String?
+    let selected: Bool
+
+    var body: some View {
+        MediaThumbnail(item: item, side: 176)
+            .overlay(alignment: .topLeading) {
+                if item.kind == .photo && item.score > 0 {
+                    Label("\(Int((item.score * 100).rounded()))", systemImage: "star.fill")
+                        .font(.caption2.weight(.semibold)).monospacedDigit()
+                        .labelStyle(.titleAndIcon)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .foregroundStyle(.white)
+                        .padding(6)
+                        .help("Best-shot score: sharpness, eyes open, facing the camera, smile")
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if item.hiddenInBurst > 0 {
+                    Text("+\(item.hiddenInBurst)")
+                        .font(.caption.bold()).padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(.black.opacity(0.6), in: Capsule()).foregroundStyle(.white).padding(6)
+                        .help("\(item.hiddenInBurst) similar shots hidden; this is the best of the burst")
+                }
+            }
+            .overlay(alignment: .bottomLeading) {
+                if item.kind == .photo, let t = item.takenAt {
+                    Text(t.formatted(date: .omitted, time: .shortened) + (session.map { " · \($0)" } ?? ""))
+                        .font(.caption2).foregroundStyle(.white.opacity(0.9)).lineLimit(1)
+                        .padding(.horizontal, 8).padding(.top, 14).padding(.bottom, 5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom))
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? Color.accent : .clear, lineWidth: 3))
+            .contentShape(Rectangle())
     }
 }
 
@@ -456,7 +682,7 @@ struct FaceGrid<Menu: View>: View {
             ForEach(faces) { f in
                 FaceImage(faceId: f.id, side: 96)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(selection.contains(f.id) ? Color.accentColor : .clear, lineWidth: 3))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(selection.contains(f.id) ? Color.accent : .clear, lineWidth: 3))
                     .onTapGesture {
                         // A click ticks or unticks; ⇧-click ticks everything from the selection to here.
                         if NSEvent.modifierFlags.contains(.shift) { selection.extend(to: f.id, in: faces.map(\.id)) }

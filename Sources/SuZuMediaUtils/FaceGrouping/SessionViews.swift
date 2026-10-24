@@ -79,7 +79,7 @@ struct SessionBar: View {
             }
             .padding(.horizontal, 10).padding(.vertical, 5)
             .foregroundStyle(selected ? Color.white : .primary)
-            .background(RoundedRectangle(cornerRadius: 7).fill(selected ? Color.accentColor : Color.secondary.opacity(0.12)))
+            .background(RoundedRectangle(cornerRadius: 7).fill(selected ? Color.accent : Color.secondary.opacity(0.12)))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

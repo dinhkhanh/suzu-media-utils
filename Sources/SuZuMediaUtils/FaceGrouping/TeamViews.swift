@@ -78,8 +78,8 @@ struct TeamBar: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .padding(.horizontal, 10).padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(team == nil ? 0.04 : 0.12)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor.opacity(team == nil ? 0.15 : 0.35), lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.accent.opacity(team == nil ? 0.04 : 0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.accent.opacity(team == nil ? 0.15 : 0.35), lineWidth: 1))
         .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 2)
         .help(team.map { "Names, people, projects, session names and rules are shared with every Mac in the team through \($0.folder)" }
               ?? "A team is a folder every Mac can reach; its projects, people and rules are shared between those Macs.")
@@ -115,7 +115,7 @@ struct TeamBar: View {
         return HStack(spacing: 8) {
             Image(systemName: team == nil ? "person.3" : "person.3.fill").foregroundStyle(tint)
             VStack(alignment: .leading, spacing: 0) {
-                Text("TEAM").font(.caption2.weight(.semibold)).foregroundStyle(team == nil ? Color.secondary.opacity(0.6) : Color.accentColor.opacity(0.8))
+                Text("TEAM").font(.caption2.weight(.semibold)).foregroundStyle(team == nil ? Color.secondary.opacity(0.6) : Color.accent.opacity(0.8))
                 Text(title(team)).font(.headline).lineLimit(1)
                 Text(caption(team, status)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }

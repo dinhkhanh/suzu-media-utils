@@ -195,8 +195,8 @@ struct AspectChooser: View {
                 if let l = label(value) { Text(l).font(.caption2.weight(.medium)) }
             }
             .frame(maxWidth: .infinity).padding(.vertical, 6)
-            .foregroundStyle(selected ? Color.accentColor : .primary)
-            .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08)))
+            .foregroundStyle(selected ? Color.accent : .primary)
+            .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Color.accent.opacity(0.15) : Color.secondary.opacity(0.08)))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -406,7 +406,7 @@ struct AlignmentGrid: View {
                         let p = WatermarkSpec.Position.allCases[row * 3 + col]
                         Button { position = p } label: {
                             RoundedRectangle(cornerRadius: 3)
-                                .fill(p == position ? Color.accentColor : Color.secondary.opacity(0.22))
+                                .fill(p == position ? Color.accent : Color.secondary.opacity(0.22))
                                 .frame(width: 24, height: 16)
                         }
                         .buttonStyle(.plain)

@@ -39,7 +39,7 @@ struct SearchView: View {
                     ForEach(hits.prefix(shown)) { h in
                         MediaThumbnail(item: PersonMedia(id: h.id, path: h.path, kind: h.kind, faceId: h.faceId ?? 0, time: h.time,
                                                          score: h.score, takenAt: h.takenAt, burstId: h.burstId), side: 170)
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(selected.contains(h.id) ? Color.accentColor : .clear, lineWidth: 3))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(selected.contains(h.id) ? Color.accent : .clear, lineWidth: 3))
                             .onTapGesture(count: 2) { NSWorkspace.shared.open(URL(fileURLWithPath: h.path, isDirectory: false)) }
                             .onTapGesture { selected.click(h.id, in: hits.map(\.id)) }
                             .contextMenu {
