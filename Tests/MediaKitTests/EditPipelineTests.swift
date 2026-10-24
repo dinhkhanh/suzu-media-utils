@@ -309,7 +309,9 @@ final class EditPipelineTests: XCTestCase {
     func testAutoToneBrightensADarkImage() throws {
         let photo = try makeJPEG("dark.jpg", w: 800, h: 600)
         let input = CIImage(contentsOf: photo)!
-        let out = EditPipeline.autoTone(input, strength: 1)
+        var r = EditRecipe()
+        r.autoTone = true
+        let out = EditPipeline.tone(input, r)
         func mean(_ i: CIImage) -> Double {
             let avg = i.applyingFilter("CIAreaAverage", parameters: [kCIInputExtentKey: CIVector(cgRect: i.extent)])
             var px = [UInt8](repeating: 0, count: 4)

@@ -139,7 +139,11 @@ final class PreviewCache: @unchecked Sendable {
             angle = a
             (level, faces) = EditPipeline.rotate(oriented, degrees: a, focus: faces)
         }
-        let toned = EditPipeline.tone(level, r)
+        // Auto tone's dials for this photo, kept for the controls to show (and edit from).
+        let auto = r.autoTone ? EditPipeline.autoAdjustments(level, strength: r.autoToneStrength) : nil
+        let autoKey = item.url.path
+        Task { @MainActor in AutoToneValues.shared.set(auto, for: autoKey) }
+        let toned = EditPipeline.tone(level, r, auto: auto)
         r.straighten = nil
         r.rotation = nil
         r.autoTone = false
@@ -1333,4 +1337,18 @@ struct LevelButton: View {
 
     /// The slider's turn (clockwise, to a tenth of a degree) as this photo's own.
     func save() { CropPlacements.shared.set(rotation: -(value * 10).rounded() / 10, for: url) }
+}
+
+/// What auto tone set on each photo in the preview, by path: the editor's sliders show it under the user's own
+/// changes, so what is applied is what is shown.
+@MainActor
+final class AutoToneValues: ObservableObject {
+    static let shared = AutoToneValues()
+    @Published private(set) var byPhoto: [String: Adjustments] = [:]
+
+    func set(_ a: Adjustments?, for path: String) {
+        if byPhoto[path] != a {
+            if let a { byPhoto[path] = a } else { byPhoto[path] = nil }
+        }
+    }
 }

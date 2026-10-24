@@ -19,6 +19,9 @@ public final class Processor: @unchecked Sendable {
     public var extrasPaused = false
     /// Called (on a worker) after a Known-People photo named or extended a person, so teams hear of them at once.
     public var onReferenceEnrolled: (@Sendable (Int64) -> Void)?
+    /// Whether a file of this source is processed on this Mac (shared processing: another Mac may do a team's
+    /// face work; see SharedFaces). nil = everything.
+    public var processesLocally: (@Sendable (Int64?) -> Bool)?
 
     /// Progress for the UI: files processed since launch and timestamps for the rate.
     public private(set) var processedCount = 0
@@ -38,10 +41,10 @@ public final class Processor: @unchecked Sendable {
 
     /// Queues every pending media in the library (call at launch and after scans).
     public func enqueuePending() {
-        let ids = (try? store.db.read { db in
-            try Int64.fetchAll(db, sql: "SELECT id FROM media WHERE status = 'pending' AND duplicateOf IS NULL ORDER BY path")
+        let rows = (try? store.db.read { db in
+            try Row.fetchAll(db, sql: "SELECT id, sourceId FROM media WHERE status = 'pending' AND duplicateOf IS NULL ORDER BY path")
         }) ?? []
-        for id in ids { enqueue(id) }
+        for r in rows where processesLocally?(r["sourceId"]) ?? true { enqueue(r["id"]) }
     }
 
     public func enqueue(_ mediaId: Int64) {
@@ -61,7 +64,7 @@ public final class Processor: @unchecked Sendable {
 
     func process(_ mediaId: Int64) {
         guard let media = try? store.db.read({ db in try MediaRecord.fetchOne(db, key: mediaId) }),
-              media.status == .pending else { return }
+              media.status == .pending, processesLocally?(media.sourceId) ?? true else { return }
         do {
             // Fingerprint for move/copy detection, deferred from the folder scan to here.
             let key = media.contentKey ?? ContentKey.compute(media.url, size: media.size)
@@ -83,13 +86,20 @@ public final class Processor: @unchecked Sendable {
                 for i in faces.indices { try faces[i].insert(db) }
                 try db.execute(sql: """
                     UPDATE media SET status = 'done', error = NULL, width = ?, height = ?, duration = ?, contentKey = ?,
-                        takenAt = ?, analysisVersion = ? WHERE id = ?
+                        takenAt = ?, analysisVersion = ?, importedFrom = NULL WHERE id = ?
                     """, arguments: [analyzed.width, analyzed.height, analyzed.duration, key,
                                      (analyzed.takenAt ?? Date(timeIntervalSince1970: media.mtime)).timeIntervalSince1970,
                                      BestShot.analysisVersion, mediaId])
+                // For the team, when this Mac does its face work (see SharedFaces).
+                try db.execute(sql: "INSERT OR IGNORE INTO facePublish (mediaId) VALUES (?)", arguments: [mediaId])
             }
             for (f, p) in zip(faces, previews) {
                 if let p { ImageLoader.writeJPEG(p, to: store.faceCropURL(f.id!), quality: 0.8) }
+            }
+            // The thumbnail, from the decode already made (videos get theirs in the idle-time pass).
+            if let t = analyzed.thumbnail {
+                ImageLoader.writeJPEG(t, to: store.thumbnailURL(mediaId), quality: 0.8)
+                try? store.db.write { db in try db.execute(sql: "UPDATE media SET thumbAt = ? WHERE id = ?", arguments: [Date().timeIntervalSince1970, mediaId]) }
             }
             if let pid = try enrollReference(media, faces: faces) {
                 engine.referenceChanged(pid)
@@ -141,6 +151,29 @@ public final class Processor: @unchecked Sendable {
             // A new file or a batch job arrived meanwhile: leave the rest for the next idle moment.
             if queuedCount == 0 && !extrasPaused { autoreleasepool(invoking: work) }
             lock.withLock { _ = backgroundQueued.remove(id) }
+        }
+    }
+
+    /// Files without a thumbnail yet (older libraries, videos, files whose faces came from another Mac without
+    /// one), made when the queue is idle: the embedded preview or a reduced decode, never a full one.
+    public func enqueueThumbnails(limit: Int = 100) {
+        guard queuedCount == 0, backgroundCount == 0, !extrasPaused else { return }
+        let rows = (try? store.db.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT id, path FROM media WHERE status = 'done' AND duplicateOf IS NULL AND thumbAt IS NULL ORDER BY id DESC LIMIT ?
+                """, arguments: [limit])
+        }) ?? []
+        for r in rows {
+            let id: Int64 = r["id"], path: String = r["path"]
+            addBackground(id) { [self] in
+                let url = URL(fileURLWithPath: path, isDirectory: false)
+                var at = 0.0  // 0 = tried, couldn't (offline, unreadable): not retried forever
+                if let t = MediaAnalyzer.thumbnail(url) {
+                    ImageLoader.writeJPEG(t, to: store.thumbnailURL(id), quality: 0.8)
+                    at = Date().timeIntervalSince1970
+                }
+                try? store.db.write { db in try db.execute(sql: "UPDATE media SET thumbAt = ? WHERE id = ?", arguments: [at, id]) }
+            }
         }
     }
 

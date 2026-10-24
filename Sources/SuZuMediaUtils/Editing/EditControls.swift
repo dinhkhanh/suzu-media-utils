@@ -40,8 +40,18 @@ struct EditControls: View {
     @AppStorage("edit.curveOpen") private var curveOpen = false
     @AppStorage("edit.hslOpen") private var hslOpen = false
     @ObservedObject private var userLooks = UserLooks.shared
+    @ObservedObject private var autoValues = AutoToneValues.shared
     @State private var savingLook = false
     @State private var lookName = ""
+
+    /// What auto tone set on the shown photo (from its last preview render), when it is on.
+    var auto: Adjustments? { recipe.autoTone ? photo.flatMap { autoValues.byPhoto[$0.path] } : nil }
+
+    /// The dials as applied: auto tone's values with the user's changes on top. Moving one sets the user's part.
+    var shown: Binding<Adjustments> {
+        let look = look, auto = auto
+        return Binding(get: { look.wrappedValue.composed(over: auto) }, set: { look.wrappedValue = $0.subtracting(auto) })
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -50,34 +60,39 @@ struct EditControls: View {
                     scopePicker
                     HStack {
                         Toggle("Auto tone & enhance", isOn: $recipe.autoTone)
-                            .help("Exposure, contrast, shadows/highlights, vibrance and skin-tone balance; on automatically with crops and watermarks")
+                            .help("Measures each photo and sets its tone curve, shadows, highlights, vibrance and exposure; the dials below show what it set, and go on from there. On automatically with crops and watermarks")
                         Spacer()
                         looksMenu
                     }
                     if recipe.autoTone { PercentSlider(label: "Strength", value: $recipe.autoToneStrength, range: 0.2...1) }
+                    if look.wrappedValue.changesPixels || recipe.autoTone {
+                        Button("Reset All Dials") { recipe.autoTone = false; look.wrappedValue = look.wrappedValue.orientationOnly }
+                            .controlSize(.small)
+                            .help("Every slider back to 0, the tone curve straight, HSL and black & white off, auto tone off. Double-click any slider or its name to reset just that one")
+                    }
                     Toggle("Straighten tilted photos", isOn: Binding(get: { recipe.straighten == true }, set: { recipe.straighten = $0 ? true : nil }))
                         .help("Levels photos turned up to 10° off, by their vertical lines (pillars, door frames, screen edges), and trims the corners. Photos without clear lines are left as they are; turn any photo by hand with Level in the preview.")
                 }
                 InspectorSection(title: "Light") {
-                    AdjustSlider("Exposure", value: look.exposure, range: -2...2, unit: " EV")
-                    AdjustSlider("Contrast", value: look.contrast)
-                    AdjustSlider("Highlights", value: look.highlights)
-                    AdjustSlider("Shadows", value: look.shadows)
+                    AdjustSlider("Exposure", value: shown.exposure, range: -2...2, unit: " EV")
+                    AdjustSlider("Contrast", value: shown.contrast)
+                    AdjustSlider("Highlights", value: shown.highlights)
+                    AdjustSlider("Shadows", value: shown.shadows)
                 }
                 InspectorSection(title: "Colour") {
-                    AdjustSlider("Temperature", value: look.temperature, help: "Left cooler (bluer), right warmer (more yellow)")
-                    AdjustSlider("Tint", value: look.tint, help: "Left greener, right more magenta")
-                    AdjustSlider("Vibrance", value: look.vibrance, help: "Boosts muted colours and spares skin tones")
-                    AdjustSlider("Saturation", value: look.saturation)
+                    AdjustSlider("Temperature", value: shown.temperature, help: "Left cooler (bluer), right warmer (more yellow)")
+                    AdjustSlider("Tint", value: shown.tint, help: "Left greener, right more magenta")
+                    AdjustSlider("Vibrance", value: shown.vibrance, help: "Boosts muted colours and spares skin tones")
+                    AdjustSlider("Saturation", value: shown.saturation)
                     Toggle("Black & white", isOn: look.monochrome)
                 }
                 DisclosureGroup(isExpanded: $curveOpen) {
-                    CurveEditor(points: look.tone).padding(.top, 6)
+                    CurveEditor(points: shown.tone).padding(.top, 6)
                 } label: {
                     HStack {
                         Text("TONE CURVE").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                         Spacer()
-                        if look.wrappedValue.hasCurve { Button("Reset") { look.tone.wrappedValue = Adjustments.straightCurve }.controlSize(.small) }
+                        if shown.wrappedValue.hasCurve { Button("Reset") { shown.tone.wrappedValue = Adjustments.straightCurve }.controlSize(.small) }
                     }
                     .contentShape(Rectangle())
                     .onTapGesture { curveOpen.toggle() }
@@ -430,7 +445,7 @@ struct AdjustSlider: View {
             Text(label).frame(width: 84, alignment: .leading)
                 .onTapGesture(count: 2) { value = 0 }
                 .help(help ?? "Double-click the name to reset")
-            Slider(value: $value, in: range).controlSize(.small)
+            DialSlider(value: $value, range: range)
             Text(text).monospacedDigit().font(.caption).foregroundStyle(value == 0 ? .tertiary : .secondary).frame(width: 44, alignment: .trailing)
         }
     }
@@ -883,5 +898,46 @@ struct WatermarkSettings: View {
     func add(_ spec: WatermarkSpec, name: String) {
         let p = presets.upsert(WatermarkPreset(name: name, spec: spec))
         selection = p.id
+    }
+}
+
+/// A small slider that a double-click on puts back to 0 (SwiftUI's Slider swallows clicks, so this is an NSSlider).
+struct DialSlider: NSViewRepresentable {
+    @Binding var value: Double
+    var range: ClosedRange<Double>
+    var reset = 0.0
+
+    func makeNSView(context: Context) -> ResettableSlider {
+        let s = ResettableSlider()
+        s.minValue = range.lowerBound
+        s.maxValue = range.upperBound
+        s.controlSize = .small
+        s.isContinuous = true
+        s.target = context.coordinator
+        s.action = #selector(Coordinator.changed(_:))
+        s.onDoubleClick = { context.coordinator.parent.value = context.coordinator.parent.reset }
+        return s
+    }
+
+    func updateNSView(_ s: ResettableSlider, context: Context) {
+        context.coordinator.parent = self
+        if s.doubleValue != value { s.doubleValue = value }
+        s.onDoubleClick = { context.coordinator.parent.value = context.coordinator.parent.reset }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject {
+        var parent: DialSlider
+        init(_ p: DialSlider) { parent = p }
+        @objc func changed(_ s: NSSlider) { parent.value = s.doubleValue }
+    }
+
+    final class ResettableSlider: NSSlider {
+        var onDoubleClick: (() -> Void)?
+        override func mouseDown(with event: NSEvent) {
+            if event.clickCount == 2 { onDoubleClick?(); return }
+            super.mouseDown(with: event)
+        }
     }
 }

@@ -1,3 +1,4 @@
+import FaceCore
 import FaceLibrary
 import SwiftUI
 
@@ -654,7 +655,8 @@ struct PersonDetail: View {
         if collapseBursts {
             var best: [Int64: Int] = [:]
             var out: [PersonMedia] = []
-            for item in items.sorted(by: { $0.score > $1.score }) {
+            // The shot kept of a burst: a RAW file first (it holds the most), then the best by score.
+            for item in items.sorted(by: { (ImageLoader.isRaw($0.url) ? 1 : 0, $0.score) > (ImageLoader.isRaw($1.url) ? 1 : 0, $1.score) }) {
                 if let b = item.burstId, let i = best[b] { out[i].hiddenInBurst += 1; continue }
                 if let b = item.burstId { best[b] = out.count }
                 out.append(item)
@@ -678,17 +680,22 @@ struct PersonDetail: View {
             ContentUnavailableView(empty, systemImage: tab == .videos ? "video.slash" : "photo")
                 .padding(.top, 60)
         }
+        // The order once per redraw (not per tile), and a tile redraws only when its own state changes: a click
+        // used to re-render every tile on the page, which showed as a late highlight.
+        let order = items.map(\.id)
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 176, maximum: 240), spacing: 10)], spacing: 10) {
             ForEach(items) { item in
                 PersonMediaTile(item: item, session: sessionName(item), selected: selectedMedia.contains(item.id))
+                    .equatable()
                     .onTapGesture(count: 2) { openWindow.edit([item.path], faces: [item.path: item.faceId]) }
-                    .onTapGesture { selectedMedia.click(item.id, in: items.map(\.id)) }
+                    .onTapGesture { selectedMedia.click(item.id, in: order) }
                     .contextMenu {
                         // The selection when this photo is in it, else just this photo.
                         let open = selectedMedia.contains(item.id) ? items.filter { selectedMedia.contains($0.id) } : [item]
                         Button(open.count > 1 ? "Open \(open.count) Photos in Edit & Export" : "Open in Edit & Export") { openInEditor(open) }
                         Button("Open With Default App") { open.forEach { NSWorkspace.shared.open($0.url) } }
                         Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(open.map(\.url)) }
+                        Button("Copy File Path") { Clipboard.copyPaths(open.map(\.url)) }
                         Divider()
                         Button("Use as \(person?.name ?? "Person")'s Picture") { model.setCover(personId, faceId: item.faceId) }
                     }
@@ -719,6 +726,7 @@ struct PersonDetail: View {
         return SelectionBar(title: "\(chosen.count) selected", clear: { selectedMedia = [] }) {
             Button("Open in Edit & Export") { openInEditor(chosen) }.buttonStyle(.borderedProminent)
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(chosen.map(\.url)) }
+            Button("Copy File Path") { Clipboard.copyPaths(chosen.map(\.url)) }
             if chosen.count == 1, let one = chosen.first {
                 Button("Use as Picture") { model.setCover(personId, faceId: one.faceId) }
             }
@@ -774,7 +782,7 @@ struct PersonDetail: View {
 }
 
 /// A photo or video of the person: best-shot score, burst count, time and session.
-struct PersonMediaTile: View {
+struct PersonMediaTile: View, Equatable {
     let item: PersonMedia
     let session: String?
     let selected: Bool
@@ -846,6 +854,7 @@ struct FaceGrid<Menu: View>: View {
                             openWindow.edit(paths, faces: Dictionary(open.map { ($0.path, $0.id) }, uniquingKeysWith: { a, _ in a }))
                         }
                         Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(paths.map { URL(fileURLWithPath: $0, isDirectory: false) }) }
+                        Button("Copy File Path") { Clipboard.copyPaths(paths.map { URL(fileURLWithPath: $0, isDirectory: false) }) }
                         if Menu.self != EmptyView.self {
                             Divider()
                             menu(f.id)
@@ -917,6 +926,7 @@ struct FaceAssignItems: View {
 struct UnassignedView: View {
     @EnvironmentObject var model: FaceGroupingModel
     @State private var faces: [FaceItem] = []
+    @State private var pairs: [[FaceItem]] = []
     @State private var selection: Set<Int64> = []
     /// Faces to give a new person, while asking for the name.
     @State private var naming: Set<Int64>?
@@ -931,6 +941,7 @@ struct UnassignedView: View {
                                        description: Text("Clear faces that don't belong to any group show up here."))
                     .padding(.top, 80)
             }
+            if !pairs.isEmpty { pairsSection }
             FaceGrid(faces: faces, selection: $selection) { faceId in
                 // The selected faces when this one is selected, else just this one.
                 let targets = selection.contains(faceId) ? selection : [faceId]
@@ -962,7 +973,45 @@ struct UnassignedView: View {
         .task(id: "\(model.stats.unassignedFaces)|\(model.sessionRange.map { "\($0)" } ?? "")") {
             faces = await model.faces(of: nil)
             selection = selection.intersection(faces.map(\.id))
+            pairs = await model.likelyPairs()
         }
+    }
+
+    /// Faces seen twice that look like one person: a guest shot twice. One click makes them a person.
+    var pairsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("SEEN TWICE").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text("\(pairs.count) pair\(pairs.count == 1 ? "" : "s") that look like one person; groups need three faces")
+                    .font(.caption).foregroundStyle(.tertiary)
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 230, maximum: 260), spacing: 8)], spacing: 8) {
+                ForEach(pairs, id: \.[0].id) { pair in
+                    let ids = Set(pair.map(\.id))
+                    HStack(spacing: 6) {
+                        ForEach(pair) { f in
+                            FaceImage(faceId: f.id, side: 64).clipShape(RoundedRectangle(cornerRadius: 6))
+                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(selection.isSuperset(of: ids) ? Color.accent : .clear, lineWidth: 2))
+                        }
+                        Menu {
+                            FaceAssignItems(faces: ids, known: model.knownPeople, newPerson: { naming = ids },
+                                            assign: { model.assign(ids, to: $0); selection.subtract(ids) })
+                        } label: {
+                            Label("Name", systemImage: "person.badge.plus")
+                        }
+                        .menuStyle(.borderlessButton).fixedSize()
+                        .help("A new person from both faces, or someone already named")
+                    }
+                    .padding(6)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+                    .contentShape(Rectangle())
+                    .onTapGesture { selection = selection.isSuperset(of: ids) ? selection.subtracting(ids) : selection.union(ids) }
+                    .help("Click to select both faces (then Move to… in the toolbar), or use the menu")
+                }
+            }
+            Divider().padding(.top, 4)
+        }
+        .padding(.horizontal, 16).padding(.top, 12)
     }
 }
 

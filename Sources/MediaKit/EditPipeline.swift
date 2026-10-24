@@ -137,12 +137,48 @@ public enum EditPipeline {
 
     // MARK: - Tone
 
-    /// Auto tone, then the adjustments' light, colour and detail.
+    /// The adjustments' light, colour and detail; with auto tone, on top of what auto tone sets for this photo
+    /// (`autoAdjustments`), so the dials the editor shows are the ones applied.
     public static func tone(_ image: CIImage, _ recipe: EditRecipe) -> CIImage {
-        var out = image
-        if recipe.autoTone { out = autoTone(out, strength: recipe.autoToneStrength) }
-        if recipe.look.changesPixels { out = adjust(out, recipe.look) }
-        return out
+        tone(image, recipe, auto: recipe.autoTone ? autoAdjustments(image, strength: recipe.autoToneStrength) : nil)
+    }
+
+    /// As above with the auto tone's dials already measured (`autoAdjustments`), so a caller can show them.
+    public static func tone(_ image: CIImage, _ recipe: EditRecipe, auto: Adjustments?) -> CIImage {
+        let look = recipe.look.composed(over: auto)
+        return look.changesPixels ? adjust(image, look) : image
+    }
+
+    /// What Core Image's auto-enhance would do to this photo, as the editor's own dials: its tone curve, its
+    /// shadow and highlight lift, its vibrance and exposure. (Its skin-tone balance has no dial and is left out.)
+    /// `strength` scales it (1 = as Core Image would).
+    public static func autoAdjustments(_ image: CIImage, strength: Double) -> Adjustments {
+        var a = Adjustments()
+        for f in image.autoAdjustmentFilters(options: [.redEye: false, .crop: false, .level: false]) {
+            switch f.name {
+            case "CIToneCurve":
+                let pts = (0..<5).compactMap { f.value(forKey: "inputPoint\($0)") as? CIVector }.map { (Double($0.x), Double($0.y)) }.sorted { $0.0 < $1.0 }
+                guard pts.count >= 2 else { break }
+                // Its points usually sit at 0, ¼, ½, ¾ and 1; sampled there in any case.
+                a.tone = Adjustments.straightCurve.map { x in
+                    if x <= pts[0].0 { return pts[0].1 }
+                    if x >= pts[pts.count - 1].0 { return pts[pts.count - 1].1 }
+                    let i = pts.lastIndex { $0.0 <= x }!
+                    let (x0, y0) = pts[i], (x1, y1) = pts[i + 1]
+                    return x1 > x0 ? y0 + (y1 - y0) * (x - x0) / (x1 - x0) : y0
+                }
+            case "CIHighlightShadowAdjust":
+                if let h = f.value(forKey: "inputHighlightAmount") as? NSNumber { a.highlights = ((h.doubleValue - 1) / 0.7).clamped(-1, 0) }
+                if let s = f.value(forKey: "inputShadowAmount") as? NSNumber { a.shadows = s.doubleValue.clamped(-1, 1) }
+            case "CIVibrance":
+                if let v = f.value(forKey: kCIInputAmountKey) as? NSNumber { a.vibrance = v.doubleValue.clamped(-1, 1) }
+            case "CIExposureAdjust":
+                if let ev = f.value(forKey: kCIInputEVKey) as? NSNumber { a.exposure = ev.doubleValue.clamped(-2, 2) }
+            default:
+                break
+            }
+        }
+        return strength >= 0.999 ? a : a.scaled(max(0, strength))
     }
 
     /// Flips and quarter turns, with the face rects turned along. The result's origin is zero.
@@ -317,18 +353,6 @@ public enum EditPipeline {
         default: (c, 0, x)
         }
         return (r + m, g + m, b + m)
-    }
-
-    public static func autoTone(_ image: CIImage, strength: Double) -> CIImage {
-        var out = image
-        for f in image.autoAdjustmentFilters(options: [.redEye: false, .crop: false, .level: false]) {
-            f.setValue(out, forKey: kCIInputImageKey)
-            if let o = f.outputImage { out = o }
-        }
-        out = out.cropped(to: image.extent)
-        guard strength < 0.999 else { return out }
-        return out.applyingFilter("CIDissolveTransition", parameters: [kCIInputTargetImageKey: out, kCIInputImageKey: image, kCIInputTimeKey: max(0, strength)])
-            .cropped(to: image.extent)
     }
 
     // MARK: - Straighten

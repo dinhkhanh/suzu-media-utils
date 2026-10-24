@@ -211,7 +211,10 @@ struct ToolInputView: View {
         resolving = true
         Task.detached(priority: .userInitiated) {
             let files = (try? Selection.files(store, personIds: ids, kind: kind, topN: topN, bestOfBurst: burst, project: project, taken: taken)) ?? []
-            let items = files.map { ToolItem(url: $0.url, personName: $0.personName, people: $0.people, takenAt: $0.takenAt, focus: $0.focus) }
+            // A photo of two chosen people is listed once (the first person's), or the tools would edit it twice.
+            var seen: Set<String> = []
+            let items = files.filter { seen.insert($0.url.path).inserted }
+                .map { ToolItem(url: $0.url, personName: $0.personName, people: $0.people, takenAt: $0.takenAt, focus: $0.focus) }
             await MainActor.run { self.items = items; resolving = false }
         }
     }
@@ -349,4 +352,12 @@ struct FlowLayout: Layout {
 enum MediaTypes {
     static let photos = ImageLoader.extensions
     static let videos = VideoSampler.extensions
+}
+
+/// The clipboard, for file paths: one per line, as the Finder's "Copy as Pathname" gives them.
+enum Clipboard {
+    static func copyPaths(_ urls: [URL]) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(urls.map(\.path).joined(separator: "\n"), forType: .string)
+    }
 }

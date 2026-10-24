@@ -42,7 +42,7 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Đặt tên ngay trên lưới | Bấm vào tên để sửa, Enter để lưu và chuyển sang nhóm chưa có tên tiếp theo. |
 | Gộp nhóm | Chọn nhiều nhóm (⌘-click) rồi gộp làm một. |
 | Sửa nhầm lẫn | "Không phải người này" (không tự gán lại), "Chuyển sang…" người khác hoặc người mới. |
-| Khuôn mặt chưa gán | Danh sách khuôn mặt rõ nét chưa thuộc nhóm nào để đặt tên thủ công. Chuột phải lên khuôn mặt (hoặc ⌘-click chọn nhiều): "New Person…" để đặt tên người mới, "Move to" để chuyển vào người đã có tên. |
+| Khuôn mặt chưa gán | Danh sách khuôn mặt rõ nét chưa thuộc nhóm nào để đặt tên thủ công. Phía trên là "Seen twice": các cặp mặt giống nhau mới gặp hai lần (nhóm cần ba), một bấm là thành người. Chuột phải lên khuôn mặt (hoặc ⌘-click chọn nhiều): "New Person…" để đặt tên người mới, "Move to" để chuyển vào người đã có tên. |
 | Thư mục người quen (Known People) | Thư mục `<Tên>/<ảnh>` giúp tự đặt tên các nhóm khớp, không cần mạng. |
 | Gợi ý tên người nổi tiếng | Tra cứu nhóm chưa tên qua Amazon Rekognition (tùy chọn, chỉ gửi ảnh cắt khuôn mặt). |
 | Cũng có trong… | Trang người hiển thị các dự án khác mà người đó xuất hiện. |
@@ -98,7 +98,8 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Một nhóm, nhiều dự án | Nhóm là một thư mục mọi máy đều mở được (share NAS, Dropbox, iCloud Drive) và chứa mọi dự án bạn chia sẻ với nhóm. Thanh bên hiện Nhóm ở trên, Dự án ở dưới; menu dự án gom theo nhóm (và "Chỉ trên máy này"). |
 | Chia sẻ dự án | File → Share Project with Team…: tạo nhóm mới trong một thư mục, hoặc thêm dự án vào nhóm đang có. Không cần tài khoản hay máy chủ. Stop Sharing để rút dự án khỏi nhóm trên máy này. |
 | Tham gia nhóm | Trên máy khác: File → Join a Team…, chọn đúng thư mục đó một lần; các dự án của nhóm tự xuất hiện, rồi thêm thư mục ảnh của mình vào dự án đang chụp. |
-| Nhận diện chung | Đặt tên một người trên máy nào thì mọi máy trong nhóm đều nhận ra người đó (kể cả máy của người khác) trong vài giây. |
+| Nhận diện chung | Đặt tên một người trên máy nào thì mọi máy trong nhóm đều nhận ra người đó (kể cả máy của người khác) trong vài giây. Mỗi máy còn chia sẻ vài "kiểu mặt" tiêu biểu của từng người, nên mặt nghiêng thấy ở máy này khớp với mặt nghiêng ở máy kia. |
+| Một máy nhận diện cho cả nhóm | Trong menu Team: "This Mac processes faces for the team". Máy mạnh nhận diện; các máy chép thẻ và chỉnh ảnh không tốn CPU/GPU, chỉ đọc kết quả (khuôn mặt, người, nhóm, ảnh cắt) từ thư mục chung cho đúng những file mình thấy. Sửa trên máy nào ("Không phải người này", "Chuyển sang…", đặt tên, gộp) cũng về máy nhận diện và lan ra mọi máy. Thanh trạng thái báo "Waiting for <máy>: N files". "Every Mac processes its own files" trở lại như cũ. |
 | Dữ liệu được chia sẻ | Dự án (tên), tên người, gộp người, tên phiên và quy tắc tự động. Ảnh, khuôn mặt và ảnh cắt vẫn ở máy nào xử lý máy đó. |
 | Làm việc cùng lúc | Mỗi máy ghi vào nhật ký riêng của mình trong thư mục và đọc của máy khác, nên nhiều máy chạy cùng lúc không đụng nhau; máy mất mạng sẽ tự bắt kịp khi có lại. |
 | Thay đổi mới nhất thắng | Hai máy cùng sửa tên: tên sửa sau thắng. Cùng một tên đặt trên hai máy thì gộp thành một người. |
@@ -159,6 +160,7 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 
 | Tính năng | Mô tả ngắn |
 |---|---|
+| Ảnh thu nhỏ tức thì | Mỗi file có ảnh thu nhỏ làm sẵn (lúc nhận diện, hoặc lúc rảnh) lưu trong thư viện, nên mở thư mục trên NAS hiện ngay như Finder; máy không nhận diện nhận ảnh thu nhỏ qua thư mục nhóm. Ẩn ảnh trùng (burst) giữ file RAW trước JPEG/PNG. Chuột phải: Copy File Path. |
 | Không làm chậm nhận diện | Mọi tính năng phụ chạy khi rảnh hoặc ở mức ưu tiên thấp, tạm dừng khi có công cụ hàng loạt chạy. |
 | Không treo giao diện | Mọi tác vụ nặng chạy nền; hộp chọn thư mục không chặn ứng dụng. |
 | Thông báo trên Mac | Báo khi có ảnh mới của người được theo dõi. |

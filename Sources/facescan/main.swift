@@ -257,6 +257,20 @@ func scan() {
             try ScanResult.saveEmbeddings(emb, model: name, dir: out)
             timings["embed_\(name)"] = tEmbed
             print("embed \(name): \(aligned.count) faces in \(fmt(tEmbed, 2)) s = \(fmt(Double(aligned.count) / tEmbed)) faces/s (load \(fmt(tLoad, 2)) s)")
+            if flags.contains("flip") {
+                // Mirrored crops as a second "model", so test-time flip averaging can be scored offline.
+                let side = FaceAligner.side
+                let mirrored = aligned.map { c -> [UInt8] in
+                    var m = c
+                    for y in 0..<side { for x in 0..<side { for k in 0..<4 { m[(y * side + x) * 4 + k] = c[(y * side + side - 1 - x) * 4 + k] } } }
+                    return m
+                }
+                t = now()
+                let embF = try embedder.embed(mirrored)
+                dims["\(name)_flip"] = embF.first?.count ?? 0
+                try ScanResult.saveEmbeddings(embF, model: "\(name)_flip", dir: out)
+                print("embed \(name) flipped: \(fmt(now() - t, 2)) s")
+            }
         } catch {
             print("embed \(name) failed: \(error)")
         }

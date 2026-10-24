@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import FaceCore
 import FaceLibrary
 import Foundation
 import GRDB
@@ -152,7 +153,14 @@ final class FaceGroupingModel: ObservableObject {
     @Published var askRenameGroup: PersonGroupSummary?
     @Published var sources: [SourceSummary] = []
     @Published var stats = LibraryStats()
-    @Published var rate: Double = 0
+    /// How fast files are being processed. Its own object: it changes every second during ingest, and a change on
+    /// the model redraws every screen, where this redraws only the status pill.
+    let processing = ProcessingStatus()
+    var rate: Double { processing.rate }
+    /// A refresh asked for by the user (a name, a merge) goes at once; the ones the database triggers during
+    /// ingest wait a few seconds between them, so the screens aren't rebuilt under every click.
+    private var urgent = false
+    private var lastRefresh = Date.distantPast
     @Published var albums: [SmartAlbum] = []
     @Published var sharingURL: String?
     private var server: GalleryServer?
@@ -210,6 +218,7 @@ final class FaceGroupingModel: ObservableObject {
 
     private func attach(_ service: LibraryService) {
         self.service = service
+        Thumbnails.shared.store = service.store
         service.onDelivered = { [weak self] report in
             Notifier.post(report)
             Task { @MainActor in self?.logDelivery(report) }
@@ -243,6 +252,7 @@ final class FaceGroupingModel: ObservableObject {
     /// Re-reads everything now (after the user changed something).
     func refresh() {
         dirty = true
+        urgent = true
         tick()
     }
 
@@ -254,13 +264,18 @@ final class FaceGroupingModel: ObservableObject {
             // Published only when it changes: every published change redraws every screen, and a redraw while a
             // right-click menu is open rebuilds the menu (its submenus flash or close).
             let r = Double(n - lastProcessed) / now.timeIntervalSince(lastTick)
-            if r != rate { rate = r }
+            if r != processing.rate { processing.rate = r }
             lastProcessed = n
             lastTick = now
         }
         applySources(sources)
         applyTeamStatus()
         guard dirty, !refreshing, let db = store?.db else { return }
+        // While files pour in, every commit marks the data dirty: re-read at most every 3 s then.
+        let busy = service.processor.queuedCount > 0 || service.processor.backgroundCount > 0
+        if !urgent, busy, now.timeIntervalSince(lastRefresh) < 3 { return }
+        urgent = false
+        lastRefresh = now
         dirty = false
         refreshing = true
         let project = currentProject, range = sessionRange, gap = Double(sessionGapMinutes * 60)
@@ -466,6 +481,37 @@ final class FaceGroupingModel: ObservableObject {
         guard let store else { return [] }
         let project = currentProject, range = sessionRange
         return await Task.detached(priority: .userInitiated) { Self.loadFaces(store, personId, project: project, taken: range) }.value
+    }
+
+    /// Unassigned faces that look like one another but were seen only twice (groups need three): a guest shot
+    /// twice, offered as a pair so one click names them. Clear faces of the open project and session only.
+    func likelyPairs() async -> [[FaceItem]] {
+        guard let store else { return [] }
+        let project = currentProject, range = sessionRange
+        let threshold = service?.engine.settings.clusterThreshold ?? 0.45
+        let minQuality = service?.engine.settings.exemplarMinQuality ?? 0.3
+        return await Task.detached(priority: .userInitiated) {
+            let rows = (try? store.db.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT f.id, f.mediaId, m.path, f.quality, f.time, f.embedding FROM face f JOIN media m ON m.id = f.mediaId
+                    LEFT JOIN source s ON s.id = m.sourceId
+                    WHERE f.personId IS NULL AND f.assignment = 'none' AND f.embedding IS NOT NULL AND f.quality >= ?
+                      AND f.w * COALESCE(m.width, 0) >= 40 AND m.duplicateOf IS NULL AND \(ProjectScope.sql(project)) AND \(EventSessions.sql(range))
+                    ORDER BY f.id DESC LIMIT 3000
+                    """, arguments: [minQuality])
+            }) ?? []
+            guard rows.count >= 2 else { return [] }
+            let items = rows.map { FaceItem(id: $0["id"], mediaId: $0["mediaId"], path: $0["path"], quality: $0["quality"], time: $0["time"]) }
+            let vectors = rows.map { Vector.decode($0["embedding"]) }
+            guard vectors.allSatisfy({ $0.count == 512 }) else { return [] }
+            let labels = Clustering.averageLinkage(similarity: Clustering.similarityMatrix(vectors), count: vectors.count, threshold: threshold)
+            var groups: [Int: [Int]] = [:]
+            for (i, l) in labels.enumerated() { groups[l, default: []].append(i) }
+            // Two different photos of one face (not two faces in one photo).
+            return groups.values.filter { $0.count == 2 && items[$0[0]].mediaId != items[$0[1]].mediaId }
+                .map { $0.map { items[$0] } }
+                .sorted { max($0[0].quality, $0[1].quality) > max($1[0].quality, $1[1].quality) }
+        }.value
     }
 
     /// The named people this person is most often photographed with, in the open project and session.
@@ -835,6 +881,18 @@ final class FaceGroupingModel: ObservableObject {
 
     func leaveTeam(_ id: Int64) { perform { try $0.teamSync.leave(id) } }
 
+    /// Shared processing (see SharedFaces): whether this Mac does the team's face work, and choosing that.
+    func isProcessor(_ team: TeamRecord) -> Bool { team.processorId != nil && team.processorId == service?.teamSync.deviceId }
+    /// The teammate's Mac that processes the open project's faces, when it isn't this one.
+    var processingMac: String? {
+        guard let team = currentTeam, team.processorId != nil, !isProcessor(team) else { return nil }
+        return team.processorName ?? "a teammate's Mac"
+    }
+    func setProcessor(_ team: TeamRecord, thisMac: Bool) {
+        perform { try $0.teamSync.setProcessor(team.id!, thisMac: thisMac) }
+        log(thisMac ? "This Mac now processes faces for \(team.name)" : "Every Mac in \(team.name) processes its own files", icon: "cpu")
+    }
+
     func renameTeam(_ id: Int64, to name: String) { perform { try $0.teamSync.rename(id, to: name) } }
 
     /// The team folder moved (new NAS address or mount name): same team, new path.
@@ -859,4 +917,10 @@ final class FaceGroupingModel: ObservableObject {
 
 extension Result {
     var failure: Failure? { if case .failure(let e) = self { e } else { nil } }
+}
+
+/// See `FaceGroupingModel.processing`.
+@MainActor
+final class ProcessingStatus: ObservableObject {
+    @Published var rate: Double = 0
 }

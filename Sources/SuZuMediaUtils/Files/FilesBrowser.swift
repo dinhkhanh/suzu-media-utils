@@ -243,7 +243,7 @@ struct FilesBrowser: View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: iconSize + 8, maximum: iconSize + 48), spacing: 10, alignment: .top)], spacing: 14) {
                 ForEach(items) { item in
-                    FileIcon(item: item, side: iconSize, selected: selection.contains(item.id))
+                    FileIcon(item: item, side: iconSize, selected: selection.contains(item.id)).equatable()
                         .onTapGesture(count: 2) { open([item.id]) }
                         .onTapGesture { selection.click(item.id, in: items.map(\.id)); focused = true }
                         .contextMenu { menu(for: selection.contains(item.id) ? selection : [item.id]) }
@@ -355,6 +355,7 @@ struct FilesBrowser: View {
             Text("1–5 stars · P pick · X reject · 6–9 labels · Space Quick Look").font(.caption).foregroundStyle(.secondary).padding(.trailing, 4)
             Button("Write Ratings…") { confirmWrite = chosen.map(\.id) }.help("Write ratings and labels into the files (IPTC/XMP)")
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(chosen.map(\.url)) }
+            Button("Copy File Path") { Clipboard.copyPaths(chosen.map(\.url)) }
             if chosen.count > 1 { Button("Cull") { cull(chosen) }.help("Go through these one by one, full screen (F)") }
             Button("Export…") { export(selection) }
             if photos > 0 {
@@ -490,6 +491,7 @@ struct FilesBrowser: View {
         if !chosen.isEmpty {
             Divider()
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(urls) }
+            Button("Copy File Path") { Clipboard.copyPaths(urls) }
             Button("Copy Path") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(chosen.map(\.id).joined(separator: "\n"), forType: .string)
@@ -811,7 +813,7 @@ struct PeopleFilterBar: View {
 
 /// A Finder-style icon: the photo or a frame of the video, whole (not cropped), with the name under it, then the
 /// colour label, stars and flag.
-struct FileIcon: View {
+struct FileIcon: View, Equatable {
     let item: FileItem
     let side: CGFloat
     var selected = false
@@ -900,9 +902,8 @@ struct FileThumbnail: View {
         }
         .frame(width: side, height: side)
         .task(id: "\(file.path)#\(pixels)") {
-            // A frame a moment in: many videos open on black.
-            let time = file.kind == .video ? min(1, (file.duration ?? 2) / 2) : nil
-            image = await Thumbnails.shared.media(file.url, time: time, side: pixels)
+            // The library's thumbnail (for a video: the frame a moment in; many open on black).
+            image = await Thumbnails.shared.media(file.url, id: file.id, time: file.kind == .video ? 0 : nil, side: pixels)
         }
     }
 

@@ -232,7 +232,7 @@ struct BatchExportTool: View {
         let shots = items.indices.map { measures[$0]! }
         let result = await Task.detached(priority: .userInitiated) { ShotCuller.cull(shots, similar: similar, blurry: blurry) }.value
         guard !Task.isCancelled else { return }
-        culled = Dictionary(uniqueKeysWithValues: result.map { (items[$0.key], $0.value) })
+        culled = Dictionary(result.map { (items[$0.key], $0.value) }, uniquingKeysWith: { a, _ in a })
         excluded.formUnion(culled.keys)
         checking = nil
     }
@@ -435,7 +435,7 @@ final class EditHistory: ObservableObject {
 
     func currentEdits() -> [String: CropPlacements.Edit?] {
         let found = CropPlacements.shared.edits(for: urls)
-        return Dictionary(uniqueKeysWithValues: urls.map { ($0.path, found[$0.path]) })
+        return Dictionary(urls.map { ($0.path, found[$0.path]) }, uniquingKeysWith: { a, _ in a })
     }
 
     func recipeChanged(from old: EditRecipe, to new: EditRecipe) {

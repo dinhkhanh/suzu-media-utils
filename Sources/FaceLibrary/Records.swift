@@ -76,6 +76,10 @@ public struct MediaRecord: Codable, FetchableRecord, MutablePersistableRecord, I
     public var featurePrint: Data?
     public var burstId: Int64?
     public var analysisVersion: Int = BestShot.analysisVersion
+    /// The teammate's Mac whose face results this file carries (shared processing); nil = processed here.
+    public var importedFrom: String?
+    /// When the thumbnail was written (0: tried, couldn't); nil = not yet.
+    public var thumbAt: Double?
 
     public init(sourceId: Int64?, path: String, kind: MediaKind, size: Int64, mtime: Double, contentKey: String?) {
         self.sourceId = sourceId; self.path = path; self.kind = kind; self.size = size; self.mtime = mtime
@@ -156,6 +160,10 @@ public struct TeamRecord: Codable, FetchableRecord, MutablePersistableRecord, Id
     public var name: String
     public var folder: String
     public var joinedAt: Date
+    /// The one Mac that does this team's face work, when the team has chosen one (see SharedFaces); nil = every
+    /// Mac processes its own files.
+    public var processorId: String?
+    public var processorName: String?
 
     public init(uuid: String, name: String, folder: String) {
         self.uuid = uuid; self.name = name; self.folder = folder; joinedAt = Date()
@@ -180,6 +188,18 @@ public enum Vector {
         var s: Float = 0
         a.withUnsafeBufferPointer { pa in b.withUnsafeBufferPointer { pb in vDSP_dotpr(pa.baseAddress!, 1, pb.baseAddress!, 1, &s, vDSP_Length(n)) } }
         return s
+    }
+
+    /// Rows of 512 floats as Float16 (half the bytes; plenty for a cosine), and back.
+    public static func encodeHalfRows(_ rows: [[Float]]) -> Data {
+        var out = [Float16]()
+        out.reserveCapacity(rows.count * 512)
+        for r in rows where r.count == 512 { out += r.map { Float16($0) } }
+        return out.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+    public static func decodeHalfRows(_ d: Data) -> [[Float]] {
+        let flat = d.withUnsafeBytes { Array($0.bindMemory(to: Float16.self)) }.map { Float($0) }
+        return stride(from: 0, to: flat.count - flat.count % 512, by: 512).map { Array(flat[$0..<$0 + 512]) }
     }
 
     public static func normalized(_ v: [Float]) -> [Float] {

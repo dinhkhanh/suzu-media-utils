@@ -26,6 +26,24 @@ public final class LibraryService: @unchecked Sendable {
         processor = try Processor(store: store, engine: engine, modelURL: modelURL)
         teamSync = TeamSync(store: store, engine: engine)
         processor.onReferenceEnrolled = { [teamSync] _ in teamSync.pushSoon() }
+        // Shared processing: another Mac may do a team's face work (see SharedFaces).
+        processor.processesLocally = { [teamSync] sourceId in teamSync.processesLocally(sourceId: sourceId) }
+        teamSync.onRolesChanged = { [weak self] in self?.applyRoles() }
+        applyRoles()
+    }
+
+    /// Follows who processes which project: the grouping engine leaves the other Mac's projects alone, and files
+    /// that have become this Mac's to process are queued.
+    func applyRoles() {
+        let passive = teamSync.passiveProjects()
+        let anything = (try? store.db.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM project WHERE id NOT IN (\(passive.isEmpty ? "-1" : passive.map(String.init).joined(separator: ",")))")
+        }) ?? 1
+        engine.queue.async { [engine] in
+            engine.passiveProjects = passive
+            engine.processesAnything = anything > 0 || passive.isEmpty
+        }
+        processor.enqueuePending()
     }
 
     public func start() {
@@ -48,12 +66,13 @@ public final class LibraryService: @unchecked Sendable {
     public func maintain() -> Bool {
         guard processor.queuedCount == 0, (try? pendingCount()) == 0 else { return false }
         if processor.backgroundCount > 0 { return false }
-        let (old, noPrint, wantBursts) = (try? store.db.read { db in
+        let (old, noPrint, wantBursts, noThumb) = (try? store.db.read { db in
             (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'done' AND duplicateOf IS NULL AND analysisVersion < ?",
                               arguments: [BestShot.analysisVersion]) ?? 0,
              try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'done' AND duplicateOf IS NULL AND kind = 'photo' AND featurePrint IS NULL") ?? 0,
-             try DeliveryService.rules(db).contains { $0.enabled && $0.mediaQuery.collapseBursts })
-        }) ?? (0, 0, false)
+             try DeliveryService.rules(db).contains { $0.enabled && $0.mediaQuery.collapseBursts },
+             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'done' AND duplicateOf IS NULL AND thumbAt IS NULL") ?? 0)
+        }) ?? (0, 0, false, 0)
         // Deliveries first: they're what people are waiting for. Grouping settles ~30 s after a batch, so files
         // are only delivered once their faces are named. A rule that skips similar shots waits until the new
         // photos' bursts are known, or it would deliver every shot of a burst.
@@ -63,6 +82,8 @@ public final class LibraryService: @unchecked Sendable {
             if report.remaining > 0 { return false }
         }
         if processor.extrasPaused { return false }
+        // Thumbnails first: they are what the grids wait for.
+        if noThumb > 0 { processor.enqueueThumbnails(limit: 100); return false }
         if old > 0 { processor.enqueueUpgrades(limit: 40); burstsDirty = true; return false }
         if noPrint > 0 { processor.enqueueFeaturePrints(limit: 100); burstsDirty = true; return false }
         if burstsDirty {
@@ -355,14 +376,17 @@ public final class LibraryService: @unchecked Sendable {
 
     /// "Not this person": the faces leave the person and are never auto-assigned back to them.
     public func reject(faceIds: [Int64], from personId: Int64) throws {
+        let ids = faceIds.map(String.init).joined(separator: ",")
         try store.db.write { db in
             try db.execute(sql: """
                 UPDATE face SET personId = NULL, assignment = 'user', rejectedPersonId = ?
-                WHERE id IN (\(faceIds.map(String.init).joined(separator: ",")))
+                WHERE id IN (\(ids))
                 """, arguments: [personId])
+            try db.execute(sql: "INSERT OR IGNORE INTO faceEditPublish (faceId) SELECT id FROM face WHERE id IN (\(ids))")
         }
         engine.peopleChanged([personId])
         deleteEmptyPeople()
+        teamSync.pushSoon()
     }
 
     /// Puts faces (and, for videos, nothing else) under a person and locks them there. A face moved out of another
@@ -375,6 +399,7 @@ public final class LibraryService: @unchecked Sendable {
                 UPDATE face SET rejectedPersonId = CASE WHEN personId IS NOT NULL AND personId != ? THEN personId ELSE rejectedPersonId END,
                     personId = ?, assignment = 'user' WHERE id IN (\(ids))
                 """, arguments: [personId, personId])
+            try db.execute(sql: "INSERT OR IGNORE INTO faceEditPublish (faceId) SELECT id FROM face WHERE id IN (\(ids))")
             return prev
         }
         engine.peopleChanged(previous.union([personId]))

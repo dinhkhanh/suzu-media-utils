@@ -56,7 +56,8 @@ public final class CropPlacements: @unchecked Sendable {
     public func edit(for url: URL) -> Edit? { lock.withLock { edits[url.path] } }
     /// The edits of these files, for undo.
     public func edits(for urls: [URL]) -> [String: Edit] {
-        lock.withLock { Dictionary(uniqueKeysWithValues: urls.compactMap { u in edits[u.path].map { (u.path, $0) } }) }
+        // A photo may be listed twice (under two people): the same edit either way.
+        lock.withLock { Dictionary(urls.compactMap { u in edits[u.path].map { (u.path, $0) } }, uniquingKeysWith: { a, _ in a }) }
     }
     /// Puts these files' edits back (nil removes one), for undo.
     public func restore(_ snapshot: [String: Edit?]) {

@@ -53,6 +53,17 @@ struct TeamBar: View {
                         }
                     }
                 }
+                // One strong Mac can do the face work; the others take its results from the team folder.
+                Section("Face processing") {
+                    let mine = model.isProcessor(team)
+                    Button(mine ? "✓ This Mac processes faces for the team" : "This Mac processes faces for the team") { model.setProcessor(team, thisMac: true) }
+                        .disabled(mine)
+                    if let name = team.processorName, !mine {
+                        Text("Processed by \(name) — this Mac only uses the results")
+                    }
+                    Button(team.processorId == nil ? "✓ Every Mac processes its own files" : "Every Mac processes its own files") { model.setProcessor(team, thisMac: false) }
+                        .disabled(team.processorId == nil)
+                }
                 Divider()
                 Button("Join Another Team…") { model.askJoinTeam = true }
                 Button("Leave Team…", role: .destructive) { confirmLeave = true }
@@ -108,7 +119,10 @@ struct TeamBar: View {
     }
 
     func caption(_ team: TeamRecord?, _ status: TeamSync.TeamStatus?) -> String {
-        if team != nil { return Self.subtitle(status) }
+        if let team {
+            let role = team.processorId == nil ? "" : model.isProcessor(team) ? " · faces: this Mac" : " · faces: \(team.processorName ?? "a teammate")"
+            return Self.subtitle(status) + role
+        }
         return model.currentProject == nil ? "Pick a project to see its team" : "Share to work on it from other Macs"
     }
 

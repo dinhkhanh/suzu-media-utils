@@ -47,7 +47,10 @@ groups them by person, keeps up as new files arrive, and files each person's med
   opening, each match, the awards. The session bar sits above People, person pages, Unassigned Faces, Files, Search
   and Edit & Export (even with a single session): click a session to see, or export, only that stretch of the event;
   Copy/Move follows it too. Right-click a session to name it.
-- **Selecting:** in every grid, ⌘-click adds one item and ⇧-click selects a range.
+- **Selecting:** in every grid, ⌘-click adds one item and ⇧-click selects a range. Right-click: Show in Finder, Copy
+  File Path.
+- **Thumbnails** are made once (while a file is processed, or in idle time) and kept with the library, so folders on
+  the NAS open as fast as in the Finder; the Macs that don't process faces get them from the team folder too.
 - **Best shots:** every face is scored (Vision capture quality, sharpness, eyes open, head angle, smile, size).
   Person pages sort Best First, show Best 10/20/50 and hide near-identical burst shots.
 - **Search & smart albums:** people (all together / any), solo or group shots, photos/videos, dates, folder, best
@@ -73,6 +76,10 @@ and one for landscapes — logo, text or banner watermark, resize — auto tone
   sidebar shows the team above the project, with its Macs and the last sync; the project menu groups projects by
   team. Rename Team, Locate Team Folder… (when the NAS address changes), Stop Sharing a project, Leave Team (keeps
   projects and names).
+- **One Mac processes for the team:** in the team menu, "This Mac processes faces for the team" makes the strong
+  Mac do the recognition while the Macs copying cards or editing only read its results from the team folder, for the
+  files they have: faces, people, groups and crops, with no CPU or GPU spent. Edits made anywhere travel back and
+  everyone converges; the status pill says "Waiting for <Mac>" meanwhile.
 - **Video moments:** per person, a clip of each appearance (cut without re-encoding), a highlight reel of the best
   moments, or the best still frames.
 - **Web gallery:** export a self-contained gallery folder, or share a live gallery on the local network (secret link,
@@ -95,6 +102,9 @@ line along anything that should be level; Return applies, Esc cancels, the arrow
 slider with the result shown live. The crop is remembered per photo for every screen, with Reset crop to go back to
 the automatic one that keeps the people in frame.
 
+Auto tone & enhance measures each photo and sets its tone curve, shadows, highlights, vibrance and exposure on the
+dials themselves, so you see what it did and go on from there (your changes sit on top, and apply to every photo's
+own auto values); Reset All Dials, or double-click a slider or its name, puts things back.
 Light (exposure, contrast, highlights, shadows), Colour (temperature, tint, vibrance, saturation, black & white),
 Detail (sharpen, clarity, vignette) and Orientation (turn, flip) sit beside Auto tone, with a five-point tone curve
 and an HSL panel (hue, saturation and luminance for eight colours) folded under them. Looks are a starting point:

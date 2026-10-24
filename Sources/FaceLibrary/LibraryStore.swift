@@ -6,6 +6,10 @@ public final class LibraryStore: @unchecked Sendable {
     public let db: DatabasePool
     public let directory: URL
     public let facesDirectory: URL
+    /// Small JPEGs of every file (long side `LibraryStore.thumbnailSide`), made when a file is processed and read
+    /// instead of the file when a grid shows it, so folders open as fast as the Finder's.
+    public let thumbsDirectory: URL
+    public static let thumbnailSide = 400
 
     /// `~/Library/Application Support/SuZu Media Utils/Face Grouping`. A library from the earlier stand-alone
     /// "Face Grouping" app is copied over on first use; the old folder is left in place as a backup.
@@ -26,6 +30,8 @@ public final class LibraryStore: @unchecked Sendable {
         self.directory = directory
         facesDirectory = directory.appendingPathComponent("faces", isDirectory: true)
         try FileManager.default.createDirectory(at: facesDirectory, withIntermediateDirectories: true)
+        thumbsDirectory = directory.appendingPathComponent("thumbs", isDirectory: true)
+        try FileManager.default.createDirectory(at: thumbsDirectory, withIntermediateDirectories: true)
         var config = Configuration()
         config.prepareDatabase { db in try db.execute(sql: "PRAGMA foreign_keys = ON") }
         db = try DatabasePool(path: directory.appendingPathComponent("library.sqlite").path, configuration: config)
@@ -34,6 +40,11 @@ public final class LibraryStore: @unchecked Sendable {
 
     public func faceCropURL(_ faceId: Int64) -> URL {
         facesDirectory.appendingPathComponent("\(faceId).jpg")
+    }
+
+    /// The thumbnail of a file (`thumbs/m<id>.jpg`); may not exist yet.
+    public func thumbnailURL(_ mediaId: Int64) -> URL {
+        thumbsDirectory.appendingPathComponent("m\(mediaId).jpg")
     }
 
     static var migrator: DatabaseMigrator {
@@ -350,6 +361,37 @@ public final class LibraryStore: @unchecked Sendable {
                 t.column("groupId", .integer).notNull().references("personGroup", onDelete: .cascade)
                 t.column("personId", .integer).notNull().indexed().references("person", onDelete: .cascade)
                 t.primaryKey(["groupId", "personId"])
+            }
+        }
+        m.registerMigration("v14-shared-faces") { db in
+            /// One Mac can do a team's face work (`team.processorId`); the others take its results from the
+            /// team folder. `media.importedFrom` is the Mac a file's faces came from.
+            try db.execute(sql: "ALTER TABLE team ADD COLUMN processorId TEXT")
+            try db.execute(sql: "ALTER TABLE team ADD COLUMN processorName TEXT")
+            try db.execute(sql: "ALTER TABLE media ADD COLUMN importedFrom TEXT")
+            /// When the file's thumbnail was written (0 = tried and couldn't), see `thumbnailURL`.
+            try db.execute(sql: "ALTER TABLE media ADD COLUMN thumbAt DOUBLE")
+            /// A teammate's exemplar faces of a person (Float16 rows), beside the mean.
+            try db.execute(sql: "ALTER TABLE personRemote ADD COLUMN exemplars BLOB")
+            /// Media whose faces this Mac has yet to publish (processed, or changed since).
+            try db.create(table: "facePublish") { t in t.column("mediaId", .integer).primaryKey() }
+            /// Faces whose person changed, by whoever changed it (a trigger, so no code path is missed).
+            try db.create(table: "faceChange") { t in t.column("faceId", .integer).primaryKey() }
+            try db.execute(sql: """
+                CREATE TRIGGER faceChangeLog AFTER UPDATE OF personId, assignment, rejectedPersonId ON face
+                BEGIN INSERT OR IGNORE INTO faceChange (faceId) VALUES (NEW.id); END
+                """)
+            /// Faces the user moved or rejected here, to tell the Mac that does the processing.
+            try db.create(table: "faceEditPublish") { t in t.column("faceId", .integer).primaryKey() }
+            /// Where a teammate's record for a file sits, by the file's content key, for files this Mac sees later.
+            try db.create(table: "faceIndex") { t in
+                t.column("teamId", .integer).notNull().references("team", onDelete: .cascade)
+                t.column("contentKey", .text).notNull()
+                t.column("deviceId", .text).notNull()
+                t.column("file", .text).notNull()
+                t.column("offset", .integer).notNull()
+                t.column("length", .integer).notNull()
+                t.primaryKey(["teamId", "contentKey"])
             }
         }
         return m

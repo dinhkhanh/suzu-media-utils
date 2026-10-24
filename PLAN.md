@@ -580,3 +580,102 @@ Lag: every tile was handed its own filtered copy of the known-people array and `
 (people² work per click); tiles now share the array (`==` is O(1) on shared storage) and the order is computed
 once. Face crops not yet in memory load off the main thread (`FaceImage.task`), so a long grid scrolls without a
 disk read per tile.
+
+## v0.8.3 (2026-10-25): one Mac processes faces for the team; auto tone as dials; measured non-changes
+**Shared processing (`FaceLibrary/SharedFaces.swift`).** At an event one strong Mac recognises faces while the Macs
+that copy cards and edit only use the results. The team menu has "This Mac processes faces for the team" / "Every
+Mac processes its own files"; the choice lives in `team.json` (`processor`), read by every Mac each pass, and in
+`team.processorId/processorName`. With no Mac chosen nothing changes from before.
+- The processing Mac appends one record per processed file to `faces/<its id>/media-NNNN.jsonl` (rotated at 64 MB):
+  content key, project, size, duration, taken time, feature print, and per face the box, quality, embedding
+  (base64), best-shot measures, person (stable id), assignment and rejected person; crops go to
+  `faces/<id>/crops/<content key>/<n>.jpg`. `facePublish` (filled by the Processor) says which files are new; a
+  trigger (`faceChangeLog` → `faceChange`) catches every change of a face's person, by any code path, and the
+  file's record is written again, at most every 20 s per file. 150 files per pass.
+- Other Macs read the records in order (cursor per file in `syncState`), remember each by content key in
+  `faceIndex`, and take the ones whose file is waiting here: faces inserted in record order (so a face's position
+  in the file identifies it on every Mac), people created by stable id when unknown (unnamed groups included),
+  crops copied, `media.importedFrom` set. Waiting files get their content key computed (300 per pass) and are
+  matched against the index, so it doesn't matter whether the file or its record turns up first. A record for a
+  file already taken from the same Mac updates the faces' people in place; files processed locally are left alone.
+- `Processor.processesLocally` (set by `LibraryService` from `TeamSync.processesLocally(sourceId:)`) keeps the
+  other Macs from processing a team project's files; Known-People folders are always processed locally. The engine
+  gets `passiveProjects` (never reclustered or assigned here) and `processesAnything` (a Mac that processes nothing
+  merges nobody). `localSummary`/`localExemplars` publish own faces only (`importedFrom IS NULL`).
+- Edits on a non-processing Mac ("Not this person", "Move to…", "New Person…") go into `faceEditPublish` and
+  travel as `face` ops in its log (content key, face index, person, assignment, rejected); every Mac applies them to
+  the same face, the processing Mac's trigger republishes, and everyone converges. Names and merges travel as before.
+- Status: the pill and the Overview say "Waiting for <Mac>: N files"; the team bar caption says who does the faces.
+- Tests: `SharedFacesTests` (faces appear on the other Mac whether the file or the record came first, with the same
+  people by stable id and the crops; grouping changes follow; a rejection on the laptop reaches the processing
+  Mac and holds; without a chosen Mac nothing is published and the queues stay empty).
+- Not done: `coverFaceId` picks don't travel; a Mac that was the processor keeps its own faces when the role moves
+  (the new processor's records are taken only for files still waiting).
+
+**Exemplars travel with team summaries.** `summaries/<id>.json` entries gain `e`: up to 8 exemplar faces as
+Float16 rows (`Vector.encodeHalfRows`), kept in `personRemote.exemplars` and added to the person's exemplars on
+the reading Mac, so a profile seen on one Mac matches a profile on another. Older summaries without `e` still work.
+
+**Faces of quality 0.2–0.3 are units.** `minQuality` 0.3 → 0.2: they are matched at the normal bars and clustered;
+exemplars still need 0.3 (`exemplarMinQuality`); a new group made only of such faces needs mean similarity 0.55
+(`lowQualityGroupThreshold`). Measured on the dev library: 206 such faces, clustered alone at 0.45 and 0.55, every
+cluster of ≥ 3 was one person (or one poster); the labelled ones match their person at p10 0.63, no other person
+above 0.32.
+
+**Unassigned Faces: "Seen twice".** `FaceGroupingModel.likelyPairs` clusters the project's clear unassigned faces
+(≤ 3000) with the engine's own linkage and shows the pairs (two photos, not two faces in one) above the grid, each
+with a Name menu (new person / someone known) and click-to-select. The dev event had 32 such guests.
+
+**Measured and not changed** (`scratchpad` scripts `evalmodels.py`, facescan `--flip`; 9 named people / 257 faces
+from the dev library, leave-one-out against the user's own labels):
+- Flip test-time augmentation (average of the face and its mirror): own-person scores +0.01–0.02, other-person max
+  unchanged, margin p1 0.437 → 0.441. Doubles Neural Engine time per face. Not shipped; facescan keeps `--flip`.
+- 3000 px crops for small faces: only faces under 60 px gain (nearest +0.012), 60–112 px nothing; the detect stage
+  took 1.5–3× longer (SUZU 02: 11.8 s → 36.7 s). Not shipped.
+- InsightFace GlintR100 (antelopev2, Glint360K) converted the same way as ArcFaceR50 (`convert_models.py` pattern,
+  mean/std 127.5): profile p5 0.661 → 0.675 nearest, but other-person max 0.30 → 0.32 and margin p1 0.437 → 0.394;
+  with flip, margin p1 0.437, p5 0.531 (+0.02) at 3.3× the embedding time and 3× the model size. ArcFaceR50 stays;
+  any model change would also mean re-embedding every library and recalibrating every bar.
+
+**Editor.** Auto tone no longer runs Core Image's opaque filter chain: `EditPipeline.autoAdjustments` reads what
+`autoAdjustmentFilters` would do (CIToneCurve → the five curve points, CIHighlightShadowAdjust → highlights/shadows,
+CIVibrance, CIExposureAdjust; CIFaceBalance has no dial and is dropped) as `Adjustments`, scaled by Strength, and
+`tone()` applies `look.composed(over: auto)`: sliders add, the user's curve composes over auto's (`compose`),
+black & white / HSL / detail are the user's. The preview keeps each photo's auto values (`AutoToneValues`) and the
+controls show `shown = look.composed(over: auto)`; moving a dial sets `look = shown.subtracting(auto)` (curve by
+inverting the monotone auto curve, `unwind`), so what is shown is what is applied, per photo, with the user's
+changes as a delta that also applies to the other photos' own auto values. "Reset All Dials" and double-click on a
+slider (an NSSlider, `DialSlider`; SwiftUI's swallows the click) reset. Tests: `AutoToneTests` (dials non-empty on
+a dark gradient, strength halves them, compose/subtract round trip, pipeline output identical to the dials).
+Crash fixed: Edit & Export with "All" people listed a photo of two people twice and
+`Dictionary(uniqueKeysWithValues:)` trapped (`CropPlacements.edits`, `EditHistory`, `culled`); the tool's list is
+deduplicated by path and the dictionaries tolerate repeats.
+
+**People/person pages.** Session chips no longer take the focus ring on a new page (`focusEffectDisabled`); the
+person page's photo tiles are `Equatable` and the grid order is computed once, so a click highlights at once.
+
+**Thumbnails like the Finder's.** Grids used to ask Quick Look for each file as it came into view: a full read and
+decode per file, slow on a NAS and not kept. Now every file has a thumbnail file (`thumbs/m<id>.jpg`, long side
+400, `media.thumbAt`): made from the 1500 px decode the Processor already has (a scale, ~free), by the idle-time
+pass for the rest (`enqueueThumbnails`: embedded preview or a reduced ImageIO decode, never a full one, videos a
+frame a moment in), shared with the team next to the face crops (`crops/<key>/thumb.jpg`) so Macs that don't
+process never read the file, and remade when a file changes on disk. `Thumbnails.media(url, id:, time:, side:)`
+reads memory, then that file (six at a time off the main thread), then makes and keeps one; files outside the
+library (a tool given files) get a reduced decode, not Quick Look. The video frame at a person's time still comes
+from the video.
+
+**Bursts keep the RAW.** Of near-identical shots, the one kept is a RAW file before a JPEG/PNG, then the best by
+score: `ImageLoader.rawSQL` in the search and selection queries, `ShotCuller.best`, the person page's Hide bursts.
+
+**Copy File Path** under Show in Finder (person page, selection bars, search, Files, Unassigned): one path per line.
+
+**Responsiveness.** Three things made a click feel late during ingest: the processing rate was a `@Published` on
+the model, so every screen redrew every second (now `ProcessingStatus`, observed by the status pill only); every
+database commit marked the model dirty and the 1 s tick re-read people, stats, sessions, albums, rules and
+overview each time (now at most every 3 s while files are queued; a user's own change still refreshes at once,
+`refresh()` → `urgent`); and grids rebuilt every tile on a selection change (People, person page and Files tiles
+are `Equatable` + `.equatable()`, orders computed once per redraw). Thumbnail decoding measured on 33 MP JPEGs:
+ImageIO straight to 400 px 105–123 ms (it decodes most of the image), to 1500 px 71 ms (quarter-scale DCT) + a
+medium-quality scale to 400 px ~2 ms (high: 9 ms), the camera's EXIF thumbnail 0 ms at 160–256 px. So kept
+thumbnails come from the 1500 px decode, and a grid that finds none yet shows the EXIF one at once while the idle
+pass makes the real one.

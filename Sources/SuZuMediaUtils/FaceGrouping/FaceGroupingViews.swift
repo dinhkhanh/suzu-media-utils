@@ -212,6 +212,17 @@ struct FaceGroupingStatus: View {
     @EnvironmentObject var model: FaceGroupingModel
     @State private var showActivity = false
 
+    var body: some View {
+        // The rate changes every second during ingest; only this pill follows it (see ProcessingStatus).
+        FaceGroupingStatusBody(model: model, processing: model.processing, showActivity: $showActivity)
+    }
+}
+
+struct FaceGroupingStatusBody: View {
+    @ObservedObject var model: FaceGroupingModel
+    @ObservedObject var processing: ProcessingStatus
+    @Binding var showActivity: Bool
+
     /// Title, detail (right-aligned), and a progress fraction (nil: busy without a known end; -1: no bar).
     var state: (title: String, detail: String, progress: Double?) {
         if model.service == nil && model.startupError == nil { return ("Opening library…", "", nil) }
@@ -219,10 +230,14 @@ struct FaceGroupingStatus: View {
             return ("Scanning \(scanning.name)…", "\(scanning.found.formatted()) found", nil)
         }
         if !model.removing.isEmpty { return ("Removing folder…", "", nil) }
+        if model.stats.pending > 0, let mac = model.processingMac {
+            return ("Waiting for \(mac): \(model.stats.pending.formatted()) files", "faces are processed there and read from the team folder",
+                    Double(model.stats.files - model.stats.pending) / Double(max(1, model.stats.files)))
+        }
         if model.stats.pending > 0 {
-            var detail = model.rate > 0.1 ? String(format: "%.0f/s", model.rate) : ""
-            if model.rate > 0.1 {
-                let s = Double(model.stats.pending) / model.rate
+            var detail = processing.rate > 0.1 ? String(format: "%.0f/s", processing.rate) : ""
+            if processing.rate > 0.1 {
+                let s = Double(model.stats.pending) / processing.rate
                 detail += s < 90 ? " · ~\(Int(s.rounded())) s" : s < 5400 ? " · ~\(Int((s / 60).rounded())) min" : " · ~\(Int((s / 3600).rounded())) h"
             }
             return ("Processing \(model.stats.pending.formatted()) files", detail,

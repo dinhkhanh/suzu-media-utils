@@ -143,6 +143,64 @@ public struct Adjustments: Codable, Sendable, Equatable, Hashable {
         return a
     }
 
+    /// The sliders scaled towards nothing (0 = none, 1 = as is) and the curve pulled towards the straight line:
+    /// the strength of an auto tone. Orientation, black & white and HSL are kept.
+    public func scaled(_ k: Double) -> Adjustments {
+        var a = self
+        a.exposure *= k; a.contrast *= k; a.highlights *= k; a.shadows *= k
+        a.temperature *= k; a.tint *= k; a.vibrance *= k; a.saturation *= k
+        a.sharpness *= k; a.clarity *= k; a.vignette *= k
+        if hasCurve { a.tone = zip(tone, Adjustments.straightCurve).map { $1 + ($0 - $1) * k } }
+        return a
+    }
+
+    /// This look on top of `base` (what auto tone set): sliders add up, this curve follows the base's; black &
+    /// white, HSL, detail and orientation are this look's. What the editor shows and the pipeline applies.
+    public func composed(over base: Adjustments?) -> Adjustments {
+        guard let base else { return self }
+        var a = self
+        a.exposure = (exposure + base.exposure).clamped(-2, 2)
+        a.contrast = (contrast + base.contrast).clamped(-1, 1)
+        a.highlights = (highlights + base.highlights).clamped(-1, 1)
+        a.shadows = (shadows + base.shadows).clamped(-1, 1)
+        a.temperature = (temperature + base.temperature).clamped(-1, 1)
+        a.tint = (tint + base.tint).clamped(-1, 1)
+        a.vibrance = (vibrance + base.vibrance).clamped(-1, 1)
+        a.saturation = (saturation + base.saturation).clamped(-1, 1)
+        if base.hasCurve { a.tone = Adjustments.compose(outer: tone, inner: base.tone) }
+        return a
+    }
+
+    /// The look that, composed over `base`, gives this one: what was set on top of auto tone. Inverse of `composed`.
+    public func subtracting(_ base: Adjustments?) -> Adjustments {
+        guard let base else { return self }
+        var a = self
+        a.exposure -= base.exposure; a.contrast -= base.contrast; a.highlights -= base.highlights; a.shadows -= base.shadows
+        a.temperature -= base.temperature; a.tint -= base.tint; a.vibrance -= base.vibrance; a.saturation -= base.saturation
+        if base.hasCurve { a.tone = Adjustments.unwind(tone, inner: base.tone) }
+        return a
+    }
+
+    /// outer(inner(x)) at the five nodes.
+    public static func compose(outer: [Double], inner: [Double]) -> [Double] {
+        straightCurve.map { x in min(1, max(0, Adjustments.curveValue(outer, Adjustments.curveValue(inner, x)))) }
+    }
+
+    /// The outer curve of a composition: `shown` = outer ∘ inner, so outer(t) = shown(inner⁻¹(t)).
+    public static func unwind(_ shown: [Double], inner: [Double]) -> [Double] {
+        straightCurve.map { t in
+            // inner is monotone: bisect for the x with inner(x) = t.
+            var lo = 0.0, hi = 1.0
+            if Adjustments.curveValue(inner, 0) >= t { return min(1, max(0, Adjustments.curveValue(shown, 0))) }
+            if Adjustments.curveValue(inner, 1) <= t { return min(1, max(0, Adjustments.curveValue(shown, 1))) }
+            for _ in 0..<40 {
+                let mid = (lo + hi) / 2
+                if Adjustments.curveValue(inner, mid) < t { lo = mid } else { hi = mid }
+            }
+            return min(1, max(0, Adjustments.curveValue(shown, (lo + hi) / 2)))
+        }
+    }
+
     /// Only the orientation.
     public var orientationOnly: Adjustments {
         var a = Adjustments()
@@ -334,4 +392,13 @@ public struct FocusHint: Sendable {
     public var hasNoFaces: Bool { primary == nil && others.isEmpty }
     /// The crop's magnification, at least 1.
     public var magnification: Double { max(1, zoom ?? 1) }
+}
+
+extension Adjustments {
+    /// The pipeline's tone curve (monotone cubic through the five points) at `x`.
+    public static func curveValue(_ points: [Double], _ x: Double) -> Double { EditPipeline.curveValue(points, x) }
+}
+
+extension Double {
+    func clamped(_ lo: Double, _ hi: Double) -> Double { Swift.min(hi, Swift.max(lo, self)) }
 }

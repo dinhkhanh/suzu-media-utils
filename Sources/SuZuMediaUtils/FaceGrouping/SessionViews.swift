@@ -83,6 +83,8 @@ struct SessionBar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // A new page hands keyboard focus to its first control, which would be this chip: no ring on it.
+        .focusEffectDisabled()
     }
 }
 

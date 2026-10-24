@@ -1,5 +1,6 @@
 import AppKit
 import FaceCore
+import FaceLibrary
 import QuickLookThumbnailing
 import SwiftUI
 
@@ -22,12 +23,32 @@ final class Thumbnails: @unchecked Sendable {
         return img
     }
 
-    /// Photo thumbnail via Quick Look; for videos, the frame at `time` (where the person is).
-    func media(_ url: URL, time: Double?, side: CGFloat) async -> NSImage? {
+    /// The library, for its thumbnail files (set when it opens).
+    var store: LibraryStore?
+    private let diskSlots = AsyncLimiter(6)
+
+    /// A file's thumbnail, the way the Finder shows one: from memory, else from the library's thumbnail file
+    /// (made when the file was processed, or by the idle-time pass), else made now and kept. For videos with a
+    /// `time`, the frame there (where the person is); the file's own thumbnail is the frame a moment in.
+    func media(_ url: URL, id: Int64? = nil, time: Double?, side: CGFloat) async -> NSImage? {
         let key = "\(url.path)#\(time ?? -1)#\(Int(side))" as NSString
         if let img = cache.object(forKey: key) { return img }
         var image: NSImage?
-        if let time {
+        let wantsFrame = time != nil && !(time == 0 && id != nil)
+        if let id, let store, !wantsFrame {
+            // The library's thumbnail: a small local file, read off the main thread, a few at a time.
+            await diskSlots.acquire()
+            defer { Task { await self.diskSlots.release() } }
+            guard !Task.isCancelled else { return nil }
+            let thumb = store.thumbnailURL(id)
+            image = await Task.detached(priority: .userInitiated) { NSImage(contentsOf: thumb) }.value
+            if image == nil, !Task.isCancelled {
+                // Not made yet (an older library, a file that just arrived): the camera's own thumbnail at once
+                // (a few KB read, no decode); the idle-time pass makes and keeps the proper one.
+                let made = await Task.detached(priority: .userInitiated) { MediaAnalyzer.thumbnail(url, quick: true) }.value
+                image = made.map { NSImage(cgImage: $0, size: .zero) }
+            }
+        } else if let time {
             // A grid can ask for hundreds of video frames at once: decode a few at a time, and skip cells that
             // scrolled away (their task is cancelled) instead of decoding frames nobody will see.
             await videoSlots.acquire()
@@ -39,9 +60,12 @@ final class Thumbnails: @unchecked Sendable {
             }
             image = cg.map { NSImage(cgImage: $0, size: .zero) }
         } else {
-            let req = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: side, height: side), scale: 2,
-                                                   representationTypes: .thumbnail)
-            image = try? await QLThumbnailGenerator.shared.generateBestRepresentation(for: req).nsImage
+            // A file outside the library (a tool given files): a reduced decode, not Quick Look's full one.
+            await diskSlots.acquire()
+            defer { Task { await self.diskSlots.release() } }
+            guard !Task.isCancelled else { return nil }
+            let made = await Task.detached(priority: .userInitiated) { MediaAnalyzer.thumbnail(url, maxPixel: max(400, Int(side * 2))) }.value
+            image = made.map { NSImage(cgImage: $0, size: .zero) }
         }
         if let image { cache.setObject(image, forKey: key) }
         return image
@@ -157,7 +181,7 @@ struct MediaThumbnail: View {
         .frame(width: side, height: side)
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .task(id: item.id) {
-            image = await Thumbnails.shared.media(item.url, time: item.kind == .video ? (item.time ?? 0) : nil, side: side)
+            image = await Thumbnails.shared.media(item.url, id: item.id, time: item.kind == .video ? (item.time ?? 0) : nil, side: side)
         }
     }
 

@@ -98,7 +98,8 @@ extension MediaQuery {
             """
         var outer: [String] = []
         if collapseBursts {
-            sql = "SELECT *, ROW_NUMBER() OVER (PARTITION BY burstId ORDER BY score DESC, id) AS burstRank FROM (\(sql))"
+            // The shot kept of a burst: a RAW file first (it holds the most), then the best by score.
+            sql = "SELECT *, ROW_NUMBER() OVER (PARTITION BY burstId ORDER BY \(ImageLoader.rawSQL("path")) DESC, score DESC, id) AS burstRank FROM (\(sql))"
             outer.append("(burstId IS NULL OR burstRank = 1)")
         }
         if bestOnly { outer.append("score >= \(bestThreshold)") }

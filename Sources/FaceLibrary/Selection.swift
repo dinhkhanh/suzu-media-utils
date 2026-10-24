@@ -47,7 +47,7 @@ public enum Selection {
                 FROM face f JOIN media m ON m.id = f.mediaId JOIN person p ON p.id = f.personId LEFT JOIN source src ON src.id = m.sourceId
                 WHERE f.personId IN (\(ids)) AND p.name IS NOT NULL AND m.duplicateOf IS NULL AND m.status = 'done'
                   AND \(ProjectScope.sql(project, source: "src")) AND \(EventSessions.sql(taken)) \(kind.map { "AND m.kind = '\($0.rawValue)'" } ?? "")
-                ORDER BY p.name COLLATE NOCASE, s DESC
+                ORDER BY p.name COLLATE NOCASE, \(ImageLoader.rawSQL("m.path")) DESC, s DESC
                 """)
         }
         let mediaIds = Set(rows.map { $0["id"] as Int64 })

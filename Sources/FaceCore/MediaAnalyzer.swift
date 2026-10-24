@@ -26,6 +26,8 @@ public struct AnalyzedMedia {
     public var takenAt: Date?
     /// Vision image feature print of the whole photo, for finding near-identical shots (bursts).
     public var featurePrint: [Float]?
+    /// A small upright copy (long side `thumbnailSide`) from the same decode, for the grids.
+    public var thumbnail: CGImage?
 }
 
 public enum MediaAnalyzer {
@@ -40,14 +42,47 @@ public enum MediaAnalyzer {
         isVideo(url) ? try analyzeVideo(url, interval: videoInterval) : try analyzePhoto(url)
     }
 
-    public static func analyzePhoto(_ url: URL) throws -> AnalyzedMedia {
+    public static let thumbnailSide = 400
+
+    public static func analyzePhoto(_ url: URL, thumbnail: Bool = true) throws -> AnalyzedMedia {
         let (src, _) = try ImageLoader.source(url)
         guard let image = ImageLoader.decode(src, maxPixel: detectSize) else { throw CocoaError(.fileReadCorruptFile) }
         var out = AnalyzedMedia(width: image.width, height: image.height)
         out.faces = try faces(in: image, time: nil)
         out.takenAt = ImageLoader.captureDate(src)
         // No feature print here: it would cost ~45% of ingest speed. Bursts get theirs in an idle-time pass.
+        // A thumbnail from the decode in hand is nearly free (a scale of 1500 px to 400 px).
+        if thumbnail { out.thumbnail = scaled(image, maxPixel: thumbnailSide) }
         return out
+    }
+
+    /// `image` with its long side at most `maxPixel` (itself when already small enough).
+    public static func scaled(_ image: CGImage, maxPixel: Int) -> CGImage? {
+        let long = max(image.width, image.height)
+        guard long > maxPixel else { return image }
+        let k = Double(maxPixel) / Double(long)
+        let w = max(1, Int((Double(image.width) * k).rounded())), h = max(1, Int((Double(image.height) * k).rounded()))
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        // Medium: a 1500 → 400 scale in a couple of ms (high took 9 ms, a tenth of the decode it rides on).
+        ctx.interpolationQuality = .medium
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return ctx.makeImage()
+    }
+
+    /// A thumbnail of a file on its own. Photos: a reduced decode (ImageIO scales a JPEG to a quarter while
+    /// decoding, 70 ms for 33 MP, where a decode straight to 400 px costs 110 ms) scaled down; videos: a frame a
+    /// moment in. `quick` takes the thumbnail the camera wrote into the file instead when there is one (0 ms,
+    /// usually 160–256 px): good enough to show at once, not to keep.
+    public static func thumbnail(_ url: URL, maxPixel: Int = thumbnailSide, quick: Bool = false) -> CGImage? {
+        if isVideo(url) {
+            let d = VideoSampler.duration(url)
+            return VideoSampler.frameSync(url, at: min(1, (d > 0 ? d : 2) / 2), maxPixel: maxPixel)
+        }
+        guard let (src, _) = try? ImageLoader.source(url) else { return nil }
+        if quick, let e = ImageLoader.embeddedThumbnail(src, maxPixel: maxPixel) { return e }
+        guard let image = ImageLoader.decode(src, maxPixel: max(maxPixel, detectSize)) else { return nil }
+        return scaled(image, maxPixel: maxPixel)
     }
 
     /// Feature print from the small preview embedded in the file (only the start of the file is read), falling

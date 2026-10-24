@@ -155,12 +155,12 @@ public enum ShotCuller {
         return s.squareRoot()
     }
 
-    /// Which of a group's shots to keep: the library's best-shot score, else the sharpest face, else the crispest
-    /// frame, else the first.
+    /// Which of a group's shots to keep: a RAW file over a JPEG/PNG of the same moment (it holds the most), then
+    /// the library's best-shot score, else the sharpest face, else the crispest frame, else the first.
     public static func best(of group: [Int], in shots: [Measure]) -> Int {
-        func key(_ i: Int) -> (Double, Double, Double) {
+        func key(_ i: Int) -> (Int, Double, Double, Double) {
             let m = shots[i]
-            return (m.faceScore ?? -1, m.faceSharpness ?? -1, m.blur.map { 1 - $0 } ?? -1)
+            return (ImageLoader.isRaw(m.url) ? 1 : 0, m.faceScore ?? -1, m.faceSharpness ?? -1, m.blur.map { 1 - $0 } ?? -1)
         }
         return group.max { key($0) < key($1) } ?? group[0]
     }

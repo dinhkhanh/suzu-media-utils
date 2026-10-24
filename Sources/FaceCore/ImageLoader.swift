@@ -12,6 +12,12 @@ public enum ImageLoader {
 
     public static func isRaw(_ url: URL) -> Bool { rawExtensions.contains(url.pathExtension.lowercased()) }
 
+    /// SQL: 1 when the path column names a RAW file, else 0 (extensions are 3 letters, "fff"/"iiq" included).
+    public static func rawSQL(_ column: String) -> String {
+        let list = rawExtensions.map { "'.\($0)'" }.sorted().joined(separator: ",")
+        return "(CASE WHEN LOWER(SUBSTR(\(column), -4)) IN (\(list)) THEN 1 ELSE 0 END)"
+    }
+
     /// The JPEG next to a RAW file from a camera shooting both: same folder, same name, another photo extension.
     /// Case-insensitive, so IMG_0001.CR2 pairs with img_0001.jpg.
     public static func pairKey(_ path: String) -> String { ((path as NSString).deletingPathExtension as String).lowercased() }
@@ -75,6 +81,17 @@ public enum ImageLoader {
         let side = maxPixel.map { long > 0 ? min($0, long) : $0 } ?? long
         guard side > 0 else { return nil }
         return decode(src, maxPixel: side)
+    }
+
+    /// The thumbnail stored in the file by the camera (EXIF), upright, at most `maxPixel`; nil when there is none
+    /// (then ImageIO would decode the image, which this never asks for).
+    public static func embeddedThumbnail(_ src: CGImageSource, maxPixel: Int) -> CGImage? {
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
     }
 
     public static func isRawSource(_ src: CGImageSource) -> Bool {

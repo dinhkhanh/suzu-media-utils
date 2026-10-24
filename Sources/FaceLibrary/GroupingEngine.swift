@@ -17,7 +17,14 @@ public struct GroupingSettings: Sendable {
     /// Stricter bars for low-quality faces, which are never clustered but may join an existing person.
     public var lowQualityAssignThreshold: Float = 0.55
     public var lowQualityNearestThreshold: Float = 0.56
-    public var minQuality = 0.3
+    /// Faces at least this good (Vision capture quality) are units: matched, clustered and counted. Profiles and
+    /// faces half turned away sit at 0.2–0.3; blurred background faces and posters mostly below 0.2.
+    public var minQuality = 0.2
+    /// Only faces this good stand as exemplars (so a muddy profile can't become the thing other faces match).
+    public var exemplarMinQuality = 0.3
+    /// A new group made only of faces below `exemplarMinQuality` needs this mean similarity, not just
+    /// `clusterThreshold`: such faces are alike in their blur as much as in their features.
+    public var lowQualityGroupThreshold: Float = 0.55
     /// Minimum face width in detection pixels (1500 px long side).
     public var minFacePixels = 40.0
     public var minGroupFaces = 3
@@ -50,6 +57,10 @@ public final class GroupingEngine: @unchecked Sendable {
     var exemplars = Rows()
     /// People that gained units or were created since the last consolidation: the only ones worth comparing.
     var touched: Set<Int64> = []
+    /// Projects whose faces another Mac groups (shared processing): their waiting faces are left alone here, and
+    /// with no project of its own to group, this Mac merges nobody either.
+    public var passiveProjects: Set<Int64> = []
+    public var processesAnything = true
     var reclusterWork: DispatchWorkItem?
 
     struct Person {
@@ -163,12 +174,25 @@ public final class GroupingEngine: @unchecked Sendable {
     /// nil when they have no usable face here. What this Mac publishes to its teams.
     public func localSummary(_ personId: Int64) -> (centroid: [Float], count: Int)? {
         queue.sync {
-            guard let rows = try? loadRows("face.personId = ?", [personId]) else { return nil }
+            guard let rows = try? loadRows("face.personId = ? AND media.importedFrom IS NULL", [personId]) else { return nil }
             let us = units(rows)
             guard !us.isEmpty else { return nil }
             var sum = [Float](repeating: 0, count: 512)
             for u in us { for i in 0..<min(512, u.vector.count) { sum[i] += u.vector[i] } }
             return (sum.map { $0 / Float(us.count) }, us.count)
+        }
+    }
+
+    /// Up to `limit` of a person's exemplars from this Mac's own faces, for teammates (see TeamSync summaries).
+    public func localExemplars(_ personId: Int64, limit: Int = 8) -> [[Float]] {
+        queue.sync {
+            guard let rows = try? loadRows("face.personId = ? AND media.importedFrom IS NULL", [personId]) else { return [] }
+            var kept: [[Float]] = []
+            for u in units(rows).sorted(by: { $0.quality > $1.quality }) where u.quality >= settings.exemplarMinQuality {
+                if kept.count >= limit { break }
+                if kept.allSatisfy({ Vector.dot(u.vector, $0) < settings.exemplarNovelty }) { kept.append(u.vector) }
+            }
+            return kept
         }
     }
 
@@ -247,12 +271,12 @@ public final class GroupingEngine: @unchecked Sendable {
         return best
     }
 
-    func add(_ v: [Float], to pid: Int64) {
+    func add(_ v: [Float], to pid: Int64, quality: Double = 1) {
         var p = people[pid] ?? Person(sum: [Float](repeating: 0, count: 512), count: 0, meanRow: means.append([Float](repeating: 0, count: 512), pid))
         for i in 0..<min(512, v.count) { p.sum[i] += v[i] }
         p.count += 1
         means.replace(p.meanRow, with: p.sum.map { $0 / Float(p.count) })
-        addExemplar(v, to: &p, pid)
+        if quality >= settings.exemplarMinQuality { addExemplar(v, to: &p, pid) }
         people[pid] = p
         touched.insert(pid)
     }
@@ -288,7 +312,7 @@ public final class GroupingEngine: @unchecked Sendable {
         let rows = try loadRows("face.personId IS NOT NULL")
         for (pid, rs) in Dictionary(grouping: rows, by: { $0.face.personId! }) {
             // Best faces first, so they are the exemplars when a person has more than fit.
-            for u in units(rs).sorted(by: { $0.quality > $1.quality }) { add(u.vector, to: pid) }
+            for u in units(rs).sorted(by: { $0.quality > $1.quality }) { add(u.vector, to: pid, quality: u.quality) }
         }
         try addRemote("1")
         try addMemory("1")
@@ -297,7 +321,7 @@ public final class GroupingEngine: @unchecked Sendable {
     func rebuild(personIds: Set<Int64>) throws {
         for pid in personIds {
             remove(pid)
-            for u in units(try loadRows("face.personId = ?", [pid])).sorted(by: { $0.quality > $1.quality }) { add(u.vector, to: pid) }
+            for u in units(try loadRows("face.personId = ?", [pid])).sorted(by: { $0.quality > $1.quality }) { add(u.vector, to: pid, quality: u.quality) }
         }
         let list = personIds.map(String.init).joined(separator: ",")
         try addRemote("personId IN (\(list))")
@@ -317,12 +341,15 @@ public final class GroupingEngine: @unchecked Sendable {
     /// (capped, so one Mac's thousands of faces never drown out what this Mac sees).
     func addRemote(_ condition: String) throws {
         let rows = try store.db.read { db in
-            try Row.fetchAll(db, sql: "SELECT personId, centroid, count FROM personRemote WHERE \(condition)")
+            try Row.fetchAll(db, sql: "SELECT personId, centroid, count, exemplars FROM personRemote WHERE \(condition)")
         }
-        for r in rows { addSummary(r["personId"], centroid: Vector.decode(r["centroid"]), count: Int(r["count"] as Int64)) }
+        for r in rows {
+            addSummary(r["personId"], centroid: Vector.decode(r["centroid"]), count: Int(r["count"] as Int64),
+                       exemplars: (r["exemplars"] as Data?).map(Vector.decodeHalfRows) ?? [])
+        }
     }
 
-    func addSummary(_ pid: Int64, centroid: [Float], count: Int) {
+    func addSummary(_ pid: Int64, centroid: [Float], count: Int, exemplars: [[Float]] = []) {
         let n = min(count, Self.remoteWeightCap)
         guard centroid.count == 512, n > 0 else { return }
         var p = people[pid] ?? Person(sum: [Float](repeating: 0, count: 512), count: 0, meanRow: means.append([Float](repeating: 0, count: 512), pid))
@@ -333,6 +360,8 @@ public final class GroupingEngine: @unchecked Sendable {
         // it would score on average against those faces. (Normalizing it would inflate every score by the same
         // factor and made a diverse group on another Mac look like everyone's near match.)
         addExemplar(centroid, to: &p, pid)
+        // Their exemplar faces too, when they sent them: a profile seen there matches a profile here.
+        for e in exemplars where e.count == 512 { addExemplar(e, to: &p, pid) }
         people[pid] = p
         touched.insert(pid)
     }
@@ -347,7 +376,7 @@ public final class GroupingEngine: @unchecked Sendable {
             for u in units(rows) {
                 if let (pid, margin) = bestPerson(for: u.vector, excluding: u.rejected, centroidBar: settings.assignThreshold,
                                                   nearestBar: settings.nearestThreshold), margin >= 0 {
-                    add(u.vector, to: pid)
+                    add(u.vector, to: pid, quality: u.quality)
                     updates.append((pid, u.faceIds))
                 }
             }
@@ -357,8 +386,13 @@ public final class GroupingEngine: @unchecked Sendable {
     }
 
     func assignAllPending() throws {
+        guard processesAnything else { return }
+        let passive = passiveProjects.map(String.init).joined(separator: ",")
         let ids = try store.db.read { db in
-            try Int64.fetchAll(db, sql: "SELECT DISTINCT mediaId FROM face WHERE assignment = 'none' AND embedding IS NOT NULL")
+            try Int64.fetchAll(db, sql: """
+                SELECT DISTINCT face.mediaId FROM face JOIN media ON media.id = face.mediaId LEFT JOIN source s ON s.id = media.sourceId
+                WHERE face.assignment = 'none' AND face.embedding IS NOT NULL AND COALESCE(s.projectId, 0) NOT IN (\(passive.isEmpty ? "-1" : passive))
+                """)
         }
         try assignPending(mediaIds: ids)
     }
@@ -397,6 +431,7 @@ public final class GroupingEngine: @unchecked Sendable {
     /// Never merged: two people with different names (the user's call), and people the user has told apart
     /// ("Not this person", or faces moved from one to the other).
     func consolidate() throws {
+        guard processesAnything else { touched = []; return }
         let candidates = touched.filter { people[$0]?.count ?? 0 > 0 }
         touched = []
         guard !candidates.isEmpty, people.count >= 2 else { return }
@@ -511,7 +546,8 @@ public final class GroupingEngine: @unchecked Sendable {
                 WHERE face.assignment = 'none' AND face.embedding IS NOT NULL
                 GROUP BY 1 ORDER BY MAX(face.id) DESC
                 """)
-        }
+        }.filter { !passiveProjects.contains($0) }
+        guard processesAnything else { return }
         var more = false
         for p in projects { more = try recluster(project: p) || more }
         // New groups may be people already known (formed earlier, or at another event); leftovers may match a
@@ -537,9 +573,15 @@ public final class GroupingEngine: @unchecked Sendable {
             for (_, members) in Dictionary(grouping: pool.indices, by: { labels[$0] }) {
                 let faceIds = members.flatMap { pool[$0].faceIds }
                 guard faceIds.count >= settings.minGroupFaces else { continue }
+                if members.allSatisfy({ pool[$0].quality < settings.exemplarMinQuality }) {
+                    // Nothing sharp in it: only when its faces agree well beyond the usual bar.
+                    var sum: Float = 0, n = 0
+                    for i in members { for j in members where j > i { sum += sim[i * pool.count + j]; n += 1 } }
+                    guard n > 0, sum / Float(n) >= settings.lowQualityGroupThreshold else { continue }
+                }
                 var person = PersonRecord()
                 try store.db.write { db in try person.insert(db) }
-                for m in members.sorted(by: { pool[$0].quality > pool[$1].quality }) { add(pool[m].vector, to: person.id!) }
+                for m in members.sorted(by: { pool[$0].quality > pool[$1].quality }) { add(pool[m].vector, to: person.id!, quality: pool[m].quality) }
                 updates.append((person.id!, faceIds))
             }
             try write(updates)

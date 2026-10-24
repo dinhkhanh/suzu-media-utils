@@ -112,7 +112,7 @@ struct OverviewView: View {
                 let folders = model.projectSources.count
                 let nas = model.projectSources.count { $0.network }
                 Text("\(folders) folder\(folders == 1 ? "" : "s")" + (nas > 0 ? " · \(nas) on the NAS" : "")
-                     + (model.stats.pending > 0 ? " · \(model.stats.pending.formatted()) processing" : " · up to date"))
+                     + (model.stats.pending > 0 ? " · \(model.stats.pending.formatted()) \(model.processingMac.map { "waiting for \($0)" } ?? "processing")" : " · up to date"))
                     .foregroundStyle(.secondary).lineLimit(1)
                 if model.stats.pending > 0 {
                     ProgressView(value: Double(model.stats.files - model.stats.pending), total: Double(max(1, model.stats.files)))

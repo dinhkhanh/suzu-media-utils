@@ -26,9 +26,14 @@ public final class TeamSync: @unchecked Sendable {
     var summariesChecked: [Int64: Date] = [:]
     var wanted = false
     /// Per person: the signature of their faces when the centroid was computed.
-    var centroids: [Int64: (signature: String, centroid: [Float], count: Int)] = [:]
+    var centroids: [Int64: (signature: String, centroid: [Float], count: Int, exemplars: [[Float]])] = [:]
     /// Called off the main thread after a pass changed something or a status.
     public var onChange: (@Sendable () -> Void)?
+    /// Called off the main thread when a team's processing Mac changed (this Mac may now have to process, or stop).
+    public var onRolesChanged: (@Sendable () -> Void)?
+    var rolesVersion = 0
+    /// When each file's record was last written for the team (shared processing).
+    var facesPublishedAt: [Int64: Double] = [:]
     public let deviceId: String
     public var deviceName: String
     public static let passInterval: Double = 5
@@ -58,6 +63,8 @@ public final class TeamSync: @unchecked Sendable {
         public var name: String
         public var createdAt: Double
         public var createdBy: String
+        /// The Mac that does the team's face work, when one was chosen (see SharedFaces).
+        public var processor: Processor?
     }
 
     public enum TeamError: LocalizedError {
@@ -257,10 +264,19 @@ public final class TeamSync: @unchecked Sendable {
             status.reachable = true
             status.error = nil
             do {
-                // A teammate renamed the team.
-                if let info = Self.readInfo(folder), info.uuid == team.uuid, info.name != team.name {
-                    try store.db.write { db in try db.execute(sql: "UPDATE team SET name = ? WHERE id = ?", arguments: [info.name, team.id]) }
-                    changed = true
+                // A teammate renamed the team, or chose the Mac that processes faces.
+                var team = team
+                if let info = Self.readInfo(folder), info.uuid == team.uuid {
+                    if info.name != team.name {
+                        try store.db.write { db in try db.execute(sql: "UPDATE team SET name = ? WHERE id = ?", arguments: [info.name, team.id]) }
+                        changed = true
+                    }
+                    if info.processor?.id != team.processorId || info.processor?.name != team.processorName {
+                        try applyProcessor(info.processor, team: team)
+                        team.processorId = info.processor?.id
+                        team.processorName = info.processor?.name
+                        changed = true
+                    }
                 }
                 if try push(team, forced: forced) { changed = true }
                 if try pull(team) { changed = true }
@@ -315,6 +331,14 @@ public final class TeamSync: @unchecked Sendable {
         var card: CardPayload?
         /// cardFile: one file copied from a card (uuid = the card's, at = when it was copied).
         var file: CardFilePayload?
+        /// face: a face rejected or moved (key = the file's content key, index = the face's position in the file,
+        /// uuid = the person now or none, assign = user/auto, rejected = the person it is not).
+        var key: String?
+        var index: Int?
+        var assign: String?
+        var rejected: String?
+        /// summary: the person's exemplar faces (Float16 rows, base64).
+        var exemplars: String?
     }
 
     struct CardPayload: Codable {
@@ -355,6 +379,8 @@ public final class TeamSync: @unchecked Sendable {
     struct Summary: Codable {
         var c: String
         var n: Int
+        /// Up to 8 exemplar faces (Float16 rows, base64), from 0.8.3 on.
+        var e: String?
     }
 
     /// Everyone with a name on this Mac: people are shared by every project, so what one event taught travels to
@@ -452,6 +478,9 @@ public final class TeamSync: @unchecked Sendable {
                           file: CardFilePayload(path: r["relPath"], size: r["size"], mtime: r["mtime"], key: r["contentKey"], sha: r["sha256"], to: r["copiedTo"])))
         }
         if let last = files.last { updates["pub:cardFiles"] = String(last["id"] as Int64) }
+        // Faces the user moved or rejected here, for the Mac that does the processing (and everyone else).
+        let (faceOps, edited) = try faceEditOps()
+        ops += faceOps
         var wrote = false
         if !ops.isEmpty {
             try append(ops, to: Self.devicesURL(team.url).appendingPathComponent("\(deviceId).jsonl"))
@@ -459,7 +488,11 @@ public final class TeamSync: @unchecked Sendable {
             for (k, v) in updates { state[k] = v }
             wrote = true
         }
+        if !edited.isEmpty {
+            try store.db.write { db in try db.execute(sql: "DELETE FROM faceEditPublish WHERE faceId IN (\(edited.map(String.init).joined(separator: ",")))") }
+        }
         if try publishSummaries(team, people: people, state: state, forced: forced) { wrote = true }
+        if try publishFaces(team) { wrote = true }
         return wrote
     }
 
@@ -505,13 +538,14 @@ public final class TeamSync: @unchecked Sendable {
         for p in people {
             guard let sig = signatures[p.id] else { continue }
             let cached = lock.withLock { centroids[p.id] }
-            let entry: (signature: String, centroid: [Float], count: Int)
+            let entry: (signature: String, centroid: [Float], count: Int, exemplars: [[Float]])
             if let cached, cached.signature == sig { entry = cached } else {
                 guard let s = engine.localSummary(p.id) else { continue }
-                entry = (sig, s.centroid, s.count)
+                entry = (sig, s.centroid, s.count, engine.localExemplars(p.id))
                 lock.withLock { centroids[p.id] = entry }
             }
-            out[p.uuid] = Summary(c: Vector.encode(entry.centroid).base64EncodedString(), n: entry.count)
+            out[p.uuid] = Summary(c: Vector.encode(entry.centroid).base64EncodedString(), n: entry.count,
+                                  e: entry.exemplars.isEmpty ? nil : Vector.encodeHalfRows(entry.exemplars).base64EncodedString())
         }
         let summaries = Summaries(model: Self.model, device: deviceName, people: out)
         let url = Self.summariesURL(team.url).appendingPathComponent("\(deviceId).json")
@@ -603,7 +637,8 @@ public final class TeamSync: @unchecked Sendable {
                 remoteChanged.formUnion(before)
                 if s.model == Self.model {
                     for (uuid, summary) in s.people {
-                        let op = Op(t: "summary", at: 0, uuid: uuid, device: id, centroid: summary.c, count: summary.n)
+                        var op = Op(t: "summary", at: 0, uuid: uuid, device: id, centroid: summary.c, count: summary.n)
+                        op.exemplars = summary.e
                         switch try apply(op, team: team, device: id, db: db) {
                         case .applied(_, let remote): remoteChanged.formUnion(remote)
                         case .deferred:
@@ -638,6 +673,7 @@ public final class TeamSync: @unchecked Sendable {
         }
         if !affected.isEmpty { engine.peopleChanged(affected) }
         if !remoteChanged.isEmpty { engine.remoteChanged(remoteChanged) }
+        if try pullFaces(team) { changed = true }
         return changed
     }
 
@@ -815,11 +851,14 @@ public final class TeamSync: @unchecked Sendable {
                 """, arguments: [cardId, f.path, f.size, f.mtime, f.key, f.sha, Date(timeIntervalSince1970: op.at), f.to, device])
             return .applied(people: [], remote: [])
 
+        case "face":
+            return try applyFaceOp(op, team: team, db: db)
+
         case "summary":
             guard let uuid = op.uuid, let c = op.centroid, let data = Data(base64Encoded: c), let n = op.count else { return .ignored }
             guard let pid = try Self.resolve(uuid, db: db) else { return .deferred }
-            try db.execute(sql: "INSERT OR REPLACE INTO personRemote (personId, teamId, deviceId, centroid, count) VALUES (?, ?, ?, ?, ?)",
-                           arguments: [pid, team.id, device, data, n])
+            try db.execute(sql: "INSERT OR REPLACE INTO personRemote (personId, teamId, deviceId, centroid, count, exemplars) VALUES (?, ?, ?, ?, ?, ?)",
+                           arguments: [pid, team.id, device, data, n, op.exemplars.flatMap { Data(base64Encoded: $0) }])
             return .applied(people: [], remote: [pid])
 
         default:
