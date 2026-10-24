@@ -1,3 +1,4 @@
+import Accelerate
 import Foundation
 import GRDB
 
@@ -168,8 +169,16 @@ public enum Vector {
     public static func decode(_ d: Data) -> [Float] { d.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) } }
 
     public static func dot(_ a: [Float], _ b: [Float]) -> Float {
+        let n = min(a.count, b.count)
         var s: Float = 0
-        for i in 0..<min(a.count, b.count) { s += a[i] * b[i] }
+        a.withUnsafeBufferPointer { pa in b.withUnsafeBufferPointer { pb in vDSP_dotpr(pa.baseAddress!, 1, pb.baseAddress!, 1, &s, vDSP_Length(n)) } }
+        return s
+    }
+
+    public static func dot(_ a: [Float], _ b: ArraySlice<Float>) -> Float {
+        let n = min(a.count, b.count)
+        var s: Float = 0
+        a.withUnsafeBufferPointer { pa in b.withUnsafeBufferPointer { pb in vDSP_dotpr(pa.baseAddress!, 1, pb.baseAddress!, 1, &s, vDSP_Length(n)) } }
         return s
     }
 

@@ -33,6 +33,7 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Nhận diện khuôn mặt | Tìm mọi khuôn mặt trong ảnh (JPEG, HEIC, PNG, TIFF) và video, bằng Apple Vision + mô hình ArcFace. |
 | Hỗ trợ video | MP4/MOV sẵn có; AV1, WebM, MKV, AVI… qua ffmpeg. Lấy 1 khung hình/giây, mỗi người tính một lần mỗi video. |
 | Tự động nhóm | Các khuôn mặt giống nhau tự gom thành một người. |
+| Nhận ra dù đổi kiểu | Mỗi người được nhớ bằng nhiều "kiểu mặt" tiêu biểu (chính diện, nghiêng, đội mũ, đeo kính, trang điểm khác…), không chỉ một mặt trung bình: một khuôn mặt chỉ cần giống các ảnh cùng kiểu đã có của người đó là được xếp vào. Nhóm hình thành ở các đợt khác nhau nhưng là cùng một người sẽ tự gộp lại; không bao giờ tự gộp hai người đã đặt tên khác nhau, hay hai nhóm bạn đã tách ("Không phải người này", "Chuyển sang…"). |
 | Đặt tên một lần | Người được dùng chung giữa các dự án: đã đặt tên ở sự kiện trước thì sự kiện sau tự nhận ra. |
 | Gợi ý tên | Khi gõ tên sẽ gợi ý những người đã đặt tên trước đó; chọn một gợi ý là lưu ngay, không cần Enter. |
 | Nhớ mặt người đã đặt tên | Bỏ thư mục, xóa hay sửa file trên đĩa thì vẫn nhớ khuôn mặt của người đã đặt tên: thêm lại đúng ảnh đó, hay gặp lại họ ở sự kiện sau, đều được nhận ra với đúng tên. |

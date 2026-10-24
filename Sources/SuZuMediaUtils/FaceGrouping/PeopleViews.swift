@@ -66,9 +66,12 @@ struct PeopleGrid: View {
             SessionBar(divider: true)
             if unnamed > 0 && filter != .named && search.isEmpty && scope == .all { namingBanner }
             ScrollView {
+                // Filtered once per redraw, not once per tile.
+                let shown = self.shown
+                let order = shown.map(\.id)
                 if shown.isEmpty { empty.padding(.top, 80) }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 170), spacing: 6)], spacing: 6) {
-                    ForEach(shown) { p in cell(p) }
+                    ForEach(shown) { p in cell(p, order: order) }
                 }
                 .padding(.horizontal, 18).padding(.vertical, 14)
                 // Room for the selection bar.
@@ -78,6 +81,8 @@ struct PeopleGrid: View {
             .background { Color.clear.contentShape(Rectangle()).onTapGesture { selected = []; editing = nil } }
         }
         .overlay(alignment: .bottom) { if !selected.isEmpty { selectionBar } }
+        // Clicking into a name field selects that person (the click lands in the field, not on the tile).
+        .onChange(of: editing) { _, now in if let now, selected != [now] { selected = [now] } }
         .navigationTitle(model.currentSession.map { "\(title) · \(model.sessionTitle($0))" } ?? title)
         .navigationSubtitle("\(named + unnamed) · \(named) named" + (unnamed > 0 ? " · \(unnamed) to name" : ""))
         .searchable(text: $search, prompt: "Search names")
@@ -121,13 +126,19 @@ struct PeopleGrid: View {
         }
     }
 
-    func cell(_ p: PersonSummary) -> some View {
-        let known: [PersonSummary] = model.knownPeople.filter { $0.id != p.id }
+    func cell(_ p: PersonSummary, order: [Int64]) -> some View {
         let mergeCount: Int = selected.count > 1 && selected.contains(p.id) ? selected.count : 0
+        // The known-people array is passed whole (shared storage compares in O(1)); the tile leaves itself out
+        // only when its menu opens. Filtering it per tile made every click cost people² work.
         return PersonGridCell(person: p, selected: selected.contains(p.id), mergeCount: mergeCount,
-                              known: known, groups: model.groups, editing: editing == p.id, focus: $editing,
+                              known: model.knownPeople, groups: model.groups, editing: editing == p.id, focus: $editing,
                               open: { path.append(PersonRoute(id: p.id)) },
-                              click: { selected.click(p.id, in: shown.map(\.id)) },
+                              click: {
+                                  selected.click(p.id, in: order)
+                                  // Typing a name and clicking another tile moves the typing there; a ⌘/⇧-click
+                                  // that builds a selection ends it.
+                                  if editing != nil { editing = selected == [p.id] ? p.id : nil }
+                              },
                               mergeSelected: { model.merge(selected); selected = [] },
                               thisIs: { model.mergeInto(p.id, $0) },
                               rename: { commitName($0, for: p) },
@@ -294,7 +305,7 @@ struct PersonGridCell: View, Equatable {
             .contextMenu {
                 Button("Open", action: open)
                 if mergeCount > 1 { Button("Merge \(mergeCount) People", action: mergeSelected) }
-                ThisIsMenu(others: known, merge: thisIs)
+                ThisIsMenu(others: known.filter { $0.id != person.id }, merge: thisIs)
                 Divider()
                 Button(person.pinned ? "Unpin" : "Pin") { pin(!person.pinned) }
                 Menu("Add to List") {

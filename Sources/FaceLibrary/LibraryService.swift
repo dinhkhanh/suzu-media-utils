@@ -365,12 +365,16 @@ public final class LibraryService: @unchecked Sendable {
         deleteEmptyPeople()
     }
 
-    /// Puts faces (and, for videos, nothing else) under a person and locks them there.
+    /// Puts faces (and, for videos, nothing else) under a person and locks them there. A face moved out of another
+    /// person is also marked as not theirs, so the two are never merged back together automatically.
     public func assign(faceIds: [Int64], to personId: Int64) throws {
         let previous = try store.db.write { db -> Set<Int64> in
             let ids = faceIds.map(String.init).joined(separator: ",")
             let prev = Set(try Int64.fetchAll(db, sql: "SELECT DISTINCT personId FROM face WHERE id IN (\(ids)) AND personId IS NOT NULL"))
-            try db.execute(sql: "UPDATE face SET personId = ?, assignment = 'user' WHERE id IN (\(ids))", arguments: [personId])
+            try db.execute(sql: """
+                UPDATE face SET rejectedPersonId = CASE WHEN personId IS NOT NULL AND personId != ? THEN personId ELSE rejectedPersonId END,
+                    personId = ?, assignment = 'user' WHERE id IN (\(ids))
+                """, arguments: [personId, personId])
             return prev
         }
         engine.peopleChanged(previous.union([personId]))

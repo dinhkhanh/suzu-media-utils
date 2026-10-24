@@ -523,3 +523,60 @@ and after every feature below; same 92 people.
   looks in UserDefaults ("looks"); `EditHistory` registers recipe and per-photo edit snapshots with the window's
   UndoManager, coalescing changes of one kind within 0.8 s (a slider drag is one step).
 
+
+## v0.8.2 (2026-10-25): recognition across looks; People grid responsiveness
+Problem reported from an event: the same artist in a new outfit, make-up, accessories or a turned head was split
+into several groups, or left in Unassigned Faces, although the faces are plainly the same person.
+
+Measured on the dev library (4,466 faces, 169 people, 96 hand merges) before changing anything:
+- Replaying its faces in arrival order through the old flow (batches of 5–100 photos) split only 2 people, so a
+  single average-linkage threshold is not the weak spot: the people the user merged by hand cluster as one at 0.45
+  when clustered together.
+- Among named people, leave-one-out: a face's mean similarity to its own person's other faces ≥ 0.50 in 99.2% of
+  cases, the mean of its 3 nearest ≥ 0.50 in 100%; to any *other* named person the centroid never exceeds 0.30 and
+  the 3-nearest never 0.32. There is a lot of margin below 0.50.
+- 327 faces of usable quality (≥ 0.3, ≥ 40 px) were unassigned. Nearly all (310) resemble nobody at 0.40 and are
+  people with 1–2 photos (32 such pairs in the event; groups need 3 faces). The rest are profiles, goggles, hands
+  over the mouth, a cap: 0.39–0.49 to their person's centroid, 0.50–0.64 to their person's nearest faces. Checked
+  by eye on contact sheets: nearest-3 ≥ 0.50 was right in every row; low-quality (< 0.3) faces at ≥ 0.55 too.
+- A person's mean vector is a poor stand-in for a person photographed many ways: the centroid of 50 frontal shots
+  is 0.4 from their profile even though their 5 profile shots are 0.6–0.7 from each other.
+
+Changes (`GroupingEngine`):
+- **Exemplars**: each person keeps up to 32 unit vectors chosen for diversity (a face joins the set when it is
+  < 0.80 similar to every exemplar so far; best quality first on rebuild), so profiles, hats, glasses and make-up
+  each get a representative. Teammates' and remembered summaries add their raw mean as an exemplar (normalizing
+  it inflated every score by 1/‖mean‖ and made a diverse 213-face person on another Mac the near match of an
+  unrelated group, found in the first run on the real library; raw, a score against it is exactly the mean
+  similarity to those faces).
+- **Assignment** takes a face when its centroid score ≥ 0.50 *or* the mean of its 2 nearest exemplars ≥ 0.50
+  (`nearestThreshold`); low-quality faces need 0.55 / 0.56. On the dev library this names 41 more faces (profiles,
+  goggles, eyes shut, hand over mouth), all right by eye.
+- **Consolidation** (`consolidate`, replaces `autoName`): after every recluster, each person that gained units is
+  compared with every person. Two merge when their mean pairwise similarity reaches the clustering threshold
+  (0.45: the clustering they would have formed together) or when most (and ≥ 2) of the smaller group's exemplars
+  have a near match (≥ 0.50) among the larger's exemplars. Never merged: two people with different names, and two
+  people the user told apart ("Not this person", or faces moved between them: `LibraryService.assign` now marks
+  moved faces as rejected from the person they left). Unnamed groups join named people as before, and now also
+  each other; the named one survives, else the larger, else the older.
+- **Speed**: every person's mean and every exemplar live in two flat Float matrices (`Rows`) scored with one
+  `cblas_sgemv` each; dead rows of rebuilt or merged people are compacted when they outnumber the live ones.
+  `Vector.dot` is `vDSP_dotpr`. Assigning the dev library's 738 waiting faces: 32 s → 0.33 s in a debug build.
+  Consolidation at launch (everyone is a candidate) scores candidates in chunks of 256 against all means.
+- Replay of the dev library with the new flow, batches of 5: 0 people split, 0 wrong merges (the two "mixed"
+  groups it reported were the same man in profile vs frontal, and the same poster, that the user had not merged).
+- Tests: `GroupingTests` (new look joins through exemplars, groups formed apart merge, user decisions kept,
+  exemplars cover looks and survive rebuild/merge).
+
+Not changed, worth knowing: groups still need 3 faces (an event has dozens of guests with exactly two photos, each
+would become a tile); faces below quality 0.3 are never clustered, only matched (≈ 19% of units; posters and
+blurred background faces live there); faces are embedded from the 1500 px detection decode (a 40 px face is a
+40 px face). Teammates share only a mean per person; sharing exemplars would let a profile seen on one Mac match a
+profile on another.
+
+People grid: clicking into a name field now selects that tile (the click lands in the field, not the tile, so the
+old selection stayed highlighted); clicking another tile while typing moves the typing there (⌘/⇧-click ends it).
+Lag: every tile was handed its own filtered copy of the known-people array and `shown` was recomputed per tile
+(people² work per click); tiles now share the array (`==` is O(1) on shared storage) and the order is computed
+once. Face crops not yet in memory load off the main thread (`FaceImage.task`), so a long grid scrolls without a
+disk read per tile.

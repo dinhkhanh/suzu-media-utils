@@ -12,6 +12,8 @@ final class Thumbnails: @unchecked Sendable {
 
     init() { cache.countLimit = 4000 }
 
+    func cachedFace(_ id: Int64) -> NSImage? { cache.object(forKey: "f\(id)" as NSString) }
+
     func face(_ id: Int64, store: URL) -> NSImage? {
         let key = "f\(id)" as NSString
         if let img = cache.object(forKey: key) { return img }
@@ -66,10 +68,18 @@ struct FaceImage: View {
     @EnvironmentObject var model: FaceGroupingModel
     let faceId: Int64?
     var side: CGFloat = 96
+    @State private var loaded: NSImage?
+
+    /// A crop already in memory draws at once; one that isn't is read off the main thread, so a grid of hundreds
+    /// of people scrolls without waiting on the disk for each tile.
+    var cached: NSImage? {
+        guard let id = faceId else { return nil }
+        return Thumbnails.shared.cachedFace(id)
+    }
 
     var body: some View {
         Group {
-            if let id = faceId, let dir = model.store?.facesDirectory, let img = Thumbnails.shared.face(id, store: dir) {
+            if let img = cached ?? loaded {
                 Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
             } else {
                 Image(systemName: "person.crop.square").resizable().foregroundStyle(.tertiary).padding(side / 5)
@@ -77,6 +87,12 @@ struct FaceImage: View {
         }
         .frame(width: side, height: side)
         .clipped()
+        .task(id: faceId) {
+            loaded = nil
+            guard let id = faceId, cached == nil, let dir = model.store?.facesDirectory else { return }
+            let img = await Task.detached(priority: .userInitiated) { Thumbnails.shared.face(id, store: dir) }.value
+            if !Task.isCancelled { loaded = img }
+        }
     }
 }
 

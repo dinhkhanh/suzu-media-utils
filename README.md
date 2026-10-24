@@ -30,7 +30,10 @@ groups them by person, keeps up as new files arrive, and files each person's med
   stays recognised after their folder is removed or their files are deleted or changed on disk.
 - Photos (JPEG, HEIC, PNG, TIFF) and videos (MP4/MOV natively; AV1, WebM, MKV, AVI… via ffmpeg). Videos are sampled
   at 1 frame per second; a person counts once per video.
-- Groups form automatically; known people are recognised as soon as a file finishes copying.
+- Groups form automatically; known people are recognised as soon as a file finishes copying. A person is
+  remembered by several exemplar faces (frontal, profile, hat, glasses, another make-up), not just an average, so a
+  shot only has to resemble their earlier shots taken that way. Groups that formed at different moments but are one
+  person merge by themselves; two people you named differently, or told apart, never do.
 - Name people right in the grid, built for a run: click a tile, type, ⏎ — the cursor moves to the next unnamed
   person; ⇥ skips one; names from every project are suggested as you type; "Start Naming" on the banner begins
   with the first unnamed. Select several (⌘-click, ⇧-click) for a floating bar: Merge into One, This Is…, Open.
