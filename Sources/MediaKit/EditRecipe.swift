@@ -21,6 +21,8 @@ public struct EditRecipe: Codable, Sendable, Equatable, Hashable {
     /// Crop for portrait photos when cropping by orientation; nil keeps their frame.
     public var portraitAspect: AspectPreset?
     public var watermark: WatermarkSpec?
+    /// Light, colour, detail and orientation (see Adjustments); nil is none.
+    public var adjustments: Adjustments?
     /// Long side in pixels after cropping; nil keeps the size.
     public var maxLongSide: Int?
     public var jpegQuality = 0.9
@@ -34,7 +36,15 @@ public struct EditRecipe: Codable, Sendable, Equatable, Hashable {
     public var outputFormat: OutputFormat { format ?? .jpeg }
     public var fileExtension: String { outputFormat.fileExtension }
 
-    public var isPassthrough: Bool { !autoTone && !crops && watermark == nil && maxLongSide == nil && straighten != true && rotation == nil }
+    public var isPassthrough: Bool {
+        !autoTone && !crops && watermark == nil && maxLongSide == nil && straighten != true && rotation == nil && look.isEmpty
+    }
+
+    /// The adjustments, empty when none.
+    public var look: Adjustments {
+        get { adjustments ?? Adjustments() }
+        set { adjustments = newValue.isEmpty ? nil : newValue }
+    }
 
     /// Some photos get cropped.
     public var crops: Bool { aspect != nil || (cropByOrientation == true && portraitAspect != nil) }
@@ -50,6 +60,128 @@ public struct EditRecipe: Codable, Sendable, Equatable, Hashable {
         guard crops else { return nil }
         return "\(portraitAspect?.rawValue ?? "original") portraits, \(aspect?.rawValue ?? "original") landscapes"
     }
+}
+
+/// The dials of a quick edit, as in any photo editor: light, colour, detail, and which way up the photo is. Every
+/// value is 0 (or false) when it does nothing, so an empty set of adjustments is skipped.
+public struct Adjustments: Codable, Sendable, Equatable, Hashable {
+    // Light (-1…1; exposure in stops, -2…2)
+    public var exposure = 0.0
+    public var contrast = 0.0
+    public var highlights = 0.0
+    public var shadows = 0.0
+    // Colour (-1…1)
+    public var temperature = 0.0
+    public var tint = 0.0
+    public var vibrance = 0.0
+    public var saturation = 0.0
+    public var monochrome = false
+    // Detail (0…1)
+    public var sharpness = 0.0
+    public var clarity = 0.0
+    public var vignette = 0.0
+    /// Tone curve: the output of the inputs 0, ¼, ½, ¾ and 1 (nil is the straight line). Applied after the light.
+    public var curve: [Double]?
+    /// Hue, saturation and luminance per colour (see HSLAdjust); nil is none.
+    public var hsl: HSLAdjust?
+    /// Quarter turns clockwise (0…3), applied before anything else.
+    public var turns = 0
+    public var flipHorizontal = false
+    public var flipVertical = false
+
+    public init() {}
+
+    /// Saved by older versions without some of the keys: those keep their defaults.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        exposure = try c.decodeIfPresent(Double.self, forKey: .exposure) ?? 0
+        contrast = try c.decodeIfPresent(Double.self, forKey: .contrast) ?? 0
+        highlights = try c.decodeIfPresent(Double.self, forKey: .highlights) ?? 0
+        shadows = try c.decodeIfPresent(Double.self, forKey: .shadows) ?? 0
+        temperature = try c.decodeIfPresent(Double.self, forKey: .temperature) ?? 0
+        tint = try c.decodeIfPresent(Double.self, forKey: .tint) ?? 0
+        vibrance = try c.decodeIfPresent(Double.self, forKey: .vibrance) ?? 0
+        saturation = try c.decodeIfPresent(Double.self, forKey: .saturation) ?? 0
+        monochrome = try c.decodeIfPresent(Bool.self, forKey: .monochrome) ?? false
+        sharpness = try c.decodeIfPresent(Double.self, forKey: .sharpness) ?? 0
+        clarity = try c.decodeIfPresent(Double.self, forKey: .clarity) ?? 0
+        vignette = try c.decodeIfPresent(Double.self, forKey: .vignette) ?? 0
+        curve = try c.decodeIfPresent([Double].self, forKey: .curve)
+        if curve?.count != 5 || curve == Adjustments.straightCurve { curve = nil }
+        hsl = try c.decodeIfPresent(HSLAdjust.self, forKey: .hsl)
+        if hsl?.isEmpty == true { hsl = nil }
+        turns = try c.decodeIfPresent(Int.self, forKey: .turns) ?? 0
+        flipHorizontal = try c.decodeIfPresent(Bool.self, forKey: .flipHorizontal) ?? false
+        flipVertical = try c.decodeIfPresent(Bool.self, forKey: .flipVertical) ?? false
+    }
+
+    public var isEmpty: Bool { !changesPixels && !changesOrientation }
+    /// Light, colour or detail set.
+    public var changesPixels: Bool {
+        exposure != 0 || contrast != 0 || highlights != 0 || shadows != 0 || temperature != 0 || tint != 0 || vibrance != 0
+            || saturation != 0 || monochrome || sharpness != 0 || clarity != 0 || vignette != 0 || hasCurve || hsl?.isEmpty == false
+    }
+    public static let straightCurve = [0.0, 0.25, 0.5, 0.75, 1.0]
+    public var hasCurve: Bool { curve.map { $0.count == 5 && $0 != Adjustments.straightCurve } ?? false }
+    /// The curve's points, straight when none is set; setting the straight line clears it.
+    public var tone: [Double] {
+        get { curve?.count == 5 ? curve! : Adjustments.straightCurve }
+        set { curve = newValue.count == 5 && newValue != Adjustments.straightCurve ? newValue : nil }
+    }
+    public var colours: HSLAdjust {
+        get { hsl ?? HSLAdjust() }
+        set { hsl = newValue.isEmpty ? nil : newValue }
+    }
+    public var changesOrientation: Bool { turns % 4 != 0 || flipHorizontal || flipVertical }
+    /// The photo ends up the other way round (taller instead of wider).
+    public var swapsSides: Bool { turns % 2 != 0 }
+
+    /// The light, colour and detail of `other` with this one's orientation.
+    public func withLook(of other: Adjustments) -> Adjustments {
+        var a = other
+        a.turns = turns; a.flipHorizontal = flipHorizontal; a.flipVertical = flipVertical
+        return a
+    }
+
+    /// Only the orientation.
+    public var orientationOnly: Adjustments {
+        var a = Adjustments()
+        a.turns = turns; a.flipHorizontal = flipHorizontal; a.flipVertical = flipVertical
+        return a
+    }
+
+    /// Where a normalized, top-left-origin rect of the photo as shot ends up after the flips and turns.
+    public func map(_ r: CGRect) -> CGRect {
+        var x = r.minX, y = r.minY, w = r.width, h = r.height
+        if flipHorizontal { x = 1 - x - w }
+        if flipVertical { y = 1 - y - h }
+        for _ in 0..<((turns % 4 + 4) % 4) { (x, y, w, h) = (1 - y - h, x, h, w) }  // a quarter turn clockwise
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+}
+
+/// Hue, saturation and luminance of eight colours (red, orange, yellow, green, aqua, blue, purple, magenta), each
+/// -1…1, as the HSL panel of any editor. Applied as a colour cube (see EditPipeline.hslCube).
+public struct HSLAdjust: Codable, Sendable, Equatable, Hashable {
+    public static let names = ["Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta"]
+    /// Hue of each band's centre, degrees.
+    public static let hues: [Double] = [0, 30, 60, 120, 180, 240, 275, 310]
+    public var hue = [Double](repeating: 0, count: 8)
+    public var saturation = [Double](repeating: 0, count: 8)
+    public var luminance = [Double](repeating: 0, count: 8)
+
+    public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func eight(_ k: CodingKeys) throws -> [Double] {
+            let v = try c.decodeIfPresent([Double].self, forKey: k) ?? []
+            return v.count == 8 ? v : [Double](repeating: 0, count: 8)
+        }
+        hue = try eight(.hue); saturation = try eight(.saturation); luminance = try eight(.luminance)
+    }
+
+    public var isEmpty: Bool { hue.allSatisfy { $0 == 0 } && saturation.allSatisfy { $0 == 0 } && luminance.allSatisfy { $0 == 0 } }
 }
 
 public enum OutputFormat: String, Codable, Sendable, CaseIterable, Identifiable, Hashable {
@@ -193,8 +325,10 @@ public struct FocusHint: Sendable {
     /// Zoom set by hand: the crop is 1/zoom of the largest one that fits (1 or nil: the largest). Trims the edges
     /// of a photo even when it keeps its shape.
     public var zoom: Double?
-    public init(primary: CGRect?, others: [CGRect] = [], center: CGPoint? = nil, zoom: Double? = nil) {
-        self.primary = primary; self.others = others; self.center = center; self.zoom = zoom
+    /// A crop drawn by hand (normalized, top-left origin, of the levelled photo): used as it is, whatever shape.
+    public var rect: CGRect?
+    public init(primary: CGRect?, others: [CGRect] = [], center: CGPoint? = nil, zoom: Double? = nil, rect: CGRect? = nil) {
+        self.primary = primary; self.others = others; self.center = center; self.zoom = zoom; self.rect = rect
     }
     /// Nothing known about the people in the photo (only a hand-set crop, if that).
     public var hasNoFaces: Bool { primary == nil && others.isEmpty }

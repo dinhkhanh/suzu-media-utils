@@ -18,7 +18,7 @@ groups them by person, keeps up as new files arrive, and files each person's med
   that does it); the sessions as a timeline (click one to see its files); what needs you (unnamed people, a card
   that was handed over, an offline folder, a rule waiting for its folder); and what happened on this Mac (names,
   merges, deliveries, folders). The sidebar follows the same order: Overview and Files, then People (People,
-  To Name, Unassigned Faces, Search, Smart Albums, Auto Rules), then Tools; folders fold away under Folders. The
+  To Name, Pinned, Unassigned Faces, Search, Auto Rules, Lists, Smart Albums), then Tools; folders fold away under Folders. The
   status pill at the bottom shows what the library is doing with a rate and time left, plus the team's sync; click it
   for tonight's activity.
 - **Appearance:** Settings → General: System (follows macOS, Auto included), Light or Dark, also under View →
@@ -42,7 +42,7 @@ groups them by person, keeps up as new files arrive, and files each person's med
   for Open in Edit & Export; the toolbar opens the best shots shown.
 - **Sessions:** each project splits itself into sessions wherever nobody shot for 30 minutes (adjustable): the
   opening, each match, the awards. The session bar sits above People, person pages, Unassigned Faces, Files, Search
-  and Batch Export (even with a single session): click a session to see, or export, only that stretch of the event;
+  and Edit & Export (even with a single session): click a session to see, or export, only that stretch of the event;
   Copy/Move follows it too. Right-click a session to name it.
 - **Selecting:** in every grid, ⌘-click adds one item and ⇧-click selects a range.
 - **Best shots:** every face is scored (Vision capture quality, sharpness, eyes open, head angle, smile, size).
@@ -82,17 +82,28 @@ and one for landscapes — logo, text or banner watermark, resize — auto tone
 - One name, one person: names match in any case or Unicode form (a name typed in the app and the same name from a
   Finder folder), and "New Person…" with a name in use adds to that person.
 
-### Batch Export
-Auto tone, face-aware social crops, watermark and resize for any photos or people's photos: a large preview of the
-result (film strip, before/after, click the photo to place the watermark, drag it to move the crop, pinch or use Zoom
-to crop in closer — even on a photo that keeps its shape, to trim the edges of an event shot — remembered per photo
-for every screen, with Reset crop to go back to the automatic one) with the settings beside it. Tick or untick
-photos in the strip or in a grid of all of them (⇧-click for a range, Select All / None; arrow keys step through them,
-Space ticks the shown one, Return opens a grid photo large) to export only some; save as
-JPEG or as lossless PNG (the photo's own colour space, 16-bit when the original is). It remembers what it exported
-(a green tick on the thumbnail, the date in the preview): exporting a photo into a folder that already has it asks,
-photo by photo or for all, whether to skip it or overwrite it. Originals are never overwritten, and another camera's
-photo of the same name gets " (2)".
+### Edit & Export
+A quick photo editor and batch exporter in one, for any photos or people's photos. The preview behaves like any editor:
+⌘+ and ⌘− zoom, ⌘0 fits, ⌘1 is 100% (one photo pixel per screen pixel), ⌥-scroll or pinch zooms about the cursor,
+scrolling or Space-drag pans, double-click toggles 100% and fit. The preview is rendered at the screen's resolution
+however far it is zoomed, so the watermark stays sharp. C opens the crop tool: handles to resize (in the export's
+shape, the photo's own, a preset, or free), drag inside to move, drag outside to turn the photo, Straighten to draw a
+line along anything that should be level; Return applies, Esc cancels, the arrow keys nudge. Level turns a photo by a
+slider with the result shown live. The crop is remembered per photo for every screen, with Reset crop to go back to
+the automatic one that keeps the people in frame.
+
+Light (exposure, contrast, highlights, shadows), Colour (temperature, tint, vibrance, saturation, black & white),
+Detail (sharpen, clarity, vignette) and Orientation (turn, flip) sit beside Auto tone, with a five-point tone curve
+and an HSL panel (hue, saturation and luminance for eight colours) folded under them. Looks are a starting point:
+seven built in, plus your own saved from the sliders (Save Current Look…), and Copy Look / Paste Look between photos;
+double-click a slider's name to zero it. With several photos the sliders set every photo, or "This photo only". ⌘Z
+undoes any of it, a slider drag at a time.
+Tick or untick photos in the strip or in a grid of all of them (⇧-click for a range, Select All / None; arrow keys
+step through them, Space ticks the shown one, Return opens a grid photo large) to export only some; save as JPEG or
+as lossless PNG (the photo's own colour space, 16-bit when the original is). It remembers what it exported (a green
+tick on the thumbnail, the date in the preview): exporting a photo into a folder that already has it asks, photo by
+photo or for all, whether to skip it or overwrite it. Originals are never overwritten, and another camera's photo of
+the same name gets " (2)".
 
 Camera RAW files (Canon, Nikon, Sony, Fujifilm, Olympus, Panasonic, Pentax, Leica, Hasselblad, Phase One, Sigma, DNG…)
 are photos like any other: recognised, searched, exported and edited (an edited RAW comes out as a JPEG). The camera's
@@ -111,7 +122,7 @@ and banner edges — and trims the corners; it only turns a photo when many line
 was never more than 0.2° off), and leaves the rest alone. Level in the preview turns any photo by hand.
 
 Right-click → Open on any photo in the library (a person's photos or faces, unassigned faces, search, smart albums)
-opens it in an Edit & Export window, Batch Export with just that photo — or every ⌘-click-selected one — and the
+opens it in an Edit & Export window with just that photo — or every ⌘-click-selected one — and the
 faces the library already knows, so crops keep everyone in frame.
 
 ### Watermarks
@@ -235,7 +246,7 @@ About $1 per 1,000 faces; up to 3 face crops per unnamed group are sent, each fa
 | `Sources/FaceLibrary` | SQLite library (GRDB), folder monitor, processor, grouping, best shots, bursts, search, delivery, export, gallery, Rekognition |
 | `Sources/SuZuMediaUtils/App` | App shell: window, sidebar, Overview, appearance settings, headless mode |
 | `Sources/SuZuMediaUtils/FaceGrouping` | Face Grouping UI |
-| `Sources/SuZuMediaUtils/Tools` | Copy from Cards, Batch Export, Batch Rename, Copy Verifier, Video Tools |
+| `Sources/SuZuMediaUtils/Tools` | Copy from Cards, Edit & Export, Batch Rename, Copy Verifier, Video Tools |
 | `Sources/facescan` | Research CLI used to benchmark and tune thresholds |
 | `Tests/FaceLibraryTests`, `Tests/MediaKitTests` | Tests (28) |
 | `tools/` | Model conversion, icon, evaluation scripts |

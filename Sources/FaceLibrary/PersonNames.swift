@@ -42,6 +42,7 @@ public enum PersonNames {
         try db.execute(sql: "UPDATE OR IGNORE personRemote SET personId = ? WHERE personId IN (\(list))", arguments: [target])
         try db.execute(sql: "UPDATE face SET personId = ? WHERE personId IN (\(list))", arguments: [target])
         try PersonMemory.merge(others, into: target, db: db)
+        try PersonGroups.merge(others, into: target, db: db)
         try db.execute(sql: "UPDATE face SET rejectedPersonId = ? WHERE rejectedPersonId IN (\(list))", arguments: [target])
         try db.execute(sql: "UPDATE person SET coverFaceId = (SELECT coverFaceId FROM person WHERE id IN (\(list)) AND coverFaceId IS NOT NULL LIMIT 1) WHERE id = ? AND coverFaceId IS NULL", arguments: [target])
         // Rules follow the person instead of being deleted with them (the foreign key cascades).

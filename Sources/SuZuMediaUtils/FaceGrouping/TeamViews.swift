@@ -77,9 +77,12 @@ struct TeamBar: View {
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
+        // Newly opened windows hand keyboard focus to the first control; a focus ring on this label looks wrong.
+        .focusEffectDisabled()
         .padding(.horizontal, 10).padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.accent.opacity(team == nil ? 0.04 : 0.12)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.accent.opacity(team == nil ? 0.15 : 0.35), lineWidth: 1))
+        // A faint tint, not a ring: a coral outline here reads as keyboard focus.
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.accent.opacity(team == nil ? 0.04 : 0.1)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.accent.opacity(team == nil ? 0.12 : 0.2), lineWidth: 1))
         .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 2)
         .help(team.map { "Names, people, projects, session names and rules are shared with every Mac in the team through \($0.folder)" }
               ?? "A team is a folder every Mac can reach; its projects, people and rules are shared between those Macs.")

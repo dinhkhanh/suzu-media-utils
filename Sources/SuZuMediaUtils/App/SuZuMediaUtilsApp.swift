@@ -43,7 +43,7 @@ struct SuZuMediaUtilsApp: App {
                 }
             }
         }
-        // Photos opened from the library: Batch Export with just them.
+        // Photos opened from the library: Edit & Export with just them.
         WindowGroup("Edit & Export", id: "edit", for: EditRequest.self) { $request in
             EditWindow(request: request).environmentObject(faces).styled(appearance, accent)
         }

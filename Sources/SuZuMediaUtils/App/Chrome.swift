@@ -91,6 +91,28 @@ struct ChipRow<Content: View>: View {
     }
 }
 
+/// A switch at the right edge of its row, the label at the left, the way Settings lays them out.
+struct LabeledSwitch: View {
+    let title: String
+    @Binding var isOn: Bool
+    var help: String? = nil
+
+    init(_ title: String, isOn: Binding<Bool>, help: String? = nil) {
+        self.title = title
+        _isOn = isOn
+        self.help = help
+    }
+
+    var body: some View {
+        HStack {
+            Text(title).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 12)
+            Toggle(title, isOn: $isOn).labelsHidden().toggleStyle(.switch).controlSize(.small)
+        }
+        .help(help ?? "")
+    }
+}
+
 /// "FILES", "LOOK": the label above a group of controls.
 struct SectionLabel: View {
     let text: String

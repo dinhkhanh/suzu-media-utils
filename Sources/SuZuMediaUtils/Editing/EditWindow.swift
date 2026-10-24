@@ -4,7 +4,7 @@ import MediaKit
 import SwiftUI
 
 /// Photos opened from the library (right-click → Open in People, faces, search, albums): edited and exported in a
-/// window of their own, the Batch Export screen with just them.
+/// window of their own, the Edit & Export screen with just them.
 struct EditRequest: Codable, Hashable {
     var paths: [String]
     /// The face to keep in frame first, per photo: the person or face it was opened from.

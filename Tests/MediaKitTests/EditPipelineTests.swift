@@ -151,6 +151,134 @@ final class EditPipelineTests: XCTestCase {
         XCTAssertEqual(size(out), CGSize(width: 3000, height: 2000))
     }
 
+    func testAdjustmentsChangeThePixelsAndEmptyOnesDoNothing() throws {
+        let photo = CIImage(color: CIColor(red: 0.3, green: 0.3, blue: 0.3)).cropped(to: CGRect(x: 0, y: 0, width: 64, height: 64))
+        /// The mean red level (0–1) of the image as a JPEG would have it.
+        func gray(_ img: CIImage) -> Double {
+            let cg = EditPipeline.pixels(img, format: .jpeg)!
+            let ctx = CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            ctx.interpolationQuality = .high
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+            return Double(ctx.data!.assumingMemoryBound(to: UInt8.self)[0]) / 255
+        }
+        var a = Adjustments()
+        XCTAssertTrue(a.isEmpty)
+        XCTAssertEqual(gray(EditPipeline.adjust(photo, a)), gray(photo), accuracy: 0.01)
+        a.exposure = 1
+        XCTAssertFalse(a.isEmpty)
+        XCTAssertGreaterThan(gray(EditPipeline.adjust(photo, a)), gray(photo) + 0.08, "a stop up is brighter")
+        a = Adjustments(); a.exposure = -1
+        XCTAssertLessThan(gray(EditPipeline.adjust(photo, a)), gray(photo) - 0.05)
+        var r = EditRecipe()
+        XCTAssertTrue(r.isPassthrough)
+        r.look.vibrance = 0.5
+        XCTAssertFalse(r.isPassthrough)
+        r.look = Adjustments()
+        XCTAssertNil(r.adjustments, "an empty look is stored as none")
+        // Old saved recipes have no adjustments; new ones may lack keys added later.
+        let old = try JSONDecoder().decode(EditRecipe.self, from: Data(#"{"autoTone":false,"autoToneStrength":1,"jpegQuality":0.9,"writePeopleNames":true}"#.utf8))
+        XCTAssertTrue(old.look.isEmpty)
+        let partial = try JSONDecoder().decode(Adjustments.self, from: Data(#"{"contrast":0.5}"#.utf8))
+        XCTAssertEqual(partial.contrast, 0.5); XCTAssertEqual(partial.turns, 0)
+    }
+
+    func testOrientationTurnsThePhotoAndItsFaces() throws {
+        let wide = CIImage(color: .gray).cropped(to: CGRect(x: 0, y: 0, width: 300, height: 200))
+        var a = Adjustments()
+        a.turns = 1
+        let face = FocusHint(primary: CGRect(x: 0.1, y: 0.2, width: 0.2, height: 0.3))
+        let (turned, f) = EditPipeline.orient(wide, a, focus: face)
+        XCTAssertEqual(turned.extent, CGRect(x: 0, y: 0, width: 200, height: 300), "a quarter turn swaps the sides, origin at zero")
+        // Top-left of a landscape photo turned clockwise ends up top-right.
+        let p = try XCTUnwrap(f?.primary)
+        XCTAssertEqual(p.minX, 1 - 0.2 - 0.3, accuracy: 0.001)
+        XCTAssertEqual(p.minY, 0.1, accuracy: 0.001)
+        XCTAssertEqual(p.size, CGSize(width: 0.3, height: 0.2))
+        a.turns = 4
+        XCTAssertFalse(a.changesOrientation, "four turns is none")
+        a.turns = 0; a.flipHorizontal = true
+        XCTAssertEqual(a.map(CGRect(x: 0.1, y: 0.2, width: 0.2, height: 0.3)).minX, 0.7, accuracy: 0.001)
+        var r = EditRecipe()
+        r.look.turns = 1
+        let out = try EditPipeline.apply(r, to: wide, focus: nil)
+        XCTAssertEqual(out.extent.size, CGSize(width: 200, height: 300))
+    }
+
+    func testACropDrawnByHandIsUsedAsDrawn() throws {
+        let photo = try makeJPEG("drawn.jpg", w: 3000, h: 2000)
+        CropPlacements.shared.set(rect: CGRect(x: 0.1, y: 0.2, width: 0.5, height: 0.25), for: photo)
+        defer { CropPlacements.shared.resetPlacement(for: photo) }
+        XCTAssertNotNil(CropPlacements.shared.rect(for: photo))
+        XCTAssertTrue(CropPlacements.shared.edit(for: photo)!.cropEdited)
+        let size = CGSize(width: 3000, height: 2000)
+        let focus = CropPlacements.shared.focus(for: photo, given: nil)
+        XCTAssertEqual(try XCTUnwrap(EditPipeline.cropRatio(EditRecipe(), size: size, focus: focus)), 3, accuracy: 0.001, "its own shape, whatever the export's")
+        var square = EditRecipe(); square.aspect = .square
+        XCTAssertEqual(try XCTUnwrap(EditPipeline.cropRatio(square, size: size, focus: focus)), 3, accuracy: 0.001)
+        XCTAssertEqual(EditPipeline.cropRect(imageSize: size, ratio: 3, focus: focus), CGRect(x: 300, y: 400, width: 1500, height: 500))
+        let out = tmp.appendingPathComponent("drawn-out.jpg")
+        try EditPipeline.render(photo, recipe: square, focus: nil, to: out)
+        XCTAssertEqual(self.size(out), CGSize(width: 1500, height: 500))
+        // Resized exports decode only what the drawn crop needs, and still come out right.
+        var small = EditRecipe(); small.maxLongSide = 600
+        try EditPipeline.render(photo, recipe: small, focus: nil, to: out)
+        XCTAssertEqual(self.size(out), CGSize(width: 600, height: 200))
+        // A zoom set afterwards replaces the drawn crop.
+        CropPlacements.shared.set(zoom: 2, for: photo)
+        XCTAssertNil(CropPlacements.shared.rect(for: photo))
+    }
+
+    func testPreviewScaleDrawsTheWatermarkAtScreenSize() throws {
+        let small = CIImage(color: .gray).cropped(to: CGRect(x: 0, y: 0, width: 300, height: 200))
+        var r = EditRecipe()
+        r.watermark = WatermarkSpec(text: "SuZu")
+        let out = try EditPipeline.apply(r, to: small, focus: nil, previewLongSide: 1200)
+        XCTAssertEqual(out.extent.size, CGSize(width: 1200, height: 800), "scaled up to the screen before the watermark goes on")
+        let plain = try EditPipeline.apply(r, to: small, focus: nil)
+        XCTAssertEqual(plain.extent.size, CGSize(width: 300, height: 200), "exports never upscale")
+    }
+
+    func testToneCurveAndHSLTouchOnlyWhatTheyShould() throws {
+        func mean(_ img: CIImage, _ what: String = #function) throws -> [Double] {
+            let cg = try XCTUnwrap(EditPipeline.pixels(img, format: .jpeg), "no pixels for \(what): \(img.extent)")
+            let ctx = CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            ctx.interpolationQuality = .high
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+            let p = ctx.data!.assumingMemoryBound(to: UInt8.self)
+            return [Double(p[0]) / 255, Double(p[1]) / 255, Double(p[2]) / 255]
+        }
+        let grey = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5)).cropped(to: CGRect(x: 0, y: 0, width: 32, height: 32))
+        var a = Adjustments()
+        a.tone = [0, 0.25, 0.7, 0.75, 1]
+        XCTAssertTrue(a.hasCurve)
+        XCTAssertGreaterThan(try mean(EditPipeline.adjust(grey, a), "curve")[0], try mean(grey, "grey")[0] + 0.1, "the middle of the curve lifted brightens a mid grey")
+        a.tone = Adjustments.straightCurve
+        XCTAssertNil(a.curve, "the straight line is no curve")
+        // HSL: red less saturated leaves blue and grey alone.
+        let red = CIImage(color: CIColor(red: 0.8, green: 0.2, blue: 0.2)).cropped(to: CGRect(x: 0, y: 0, width: 32, height: 32))
+        let blue = CIImage(color: CIColor(red: 0.2, green: 0.2, blue: 0.8)).cropped(to: CGRect(x: 0, y: 0, width: 32, height: 32))
+        var h = HSLAdjust()
+        h.saturation[0] = -1
+        a = Adjustments(); a.colours = h
+        XCTAssertFalse(a.isEmpty)
+        let r = try mean(EditPipeline.adjust(red, a), "hsl red"), b = try mean(EditPipeline.adjust(blue, a), "hsl blue"), g = try mean(EditPipeline.adjust(grey, a), "hsl grey")
+        XCTAssertLessThan(r[0] - r[1], 0.15, "red drained of colour")
+        XCTAssertGreaterThan(b[2] - b[0], 0.5, "blue untouched")
+        XCTAssertEqual(g[0], try mean(grey)[0], accuracy: 0.02, "grey untouched")
+        // Hue: red turned towards orange gains green.
+        h = HSLAdjust(); h.hue[0] = 1
+        a.colours = h
+        XCTAssertGreaterThan(try mean(EditPipeline.adjust(red, a), "hue")[1], try mean(red, "red")[1] + 0.1)
+        // Round trips and old data.
+        let (hh, ss, vv) = EditPipeline.hsv(0.8, 0.2, 0.2)
+        let back = EditPipeline.rgb(hh, ss, vv)
+        XCTAssertEqual(back.0, 0.8, accuracy: 0.001); XCTAssertEqual(back.1, 0.2, accuracy: 0.001)
+        let decoded = try JSONDecoder().decode(Adjustments.self, from: Data(#"{"curve":[0,0.25,0.5,0.75,1],"hsl":{"hue":[1,2]}}"#.utf8))
+        XCTAssertNil(decoded.curve, "a straight saved curve is none"); XCTAssertNil(decoded.hsl, "a malformed HSL is none")
+    }
+
     func testCropAddsPeopleNearestFirstWhenNotAllFit() {
         // Main person in the middle, one neighbour close by, another at the far edge: the crop can't hold all three.
         let r = EditPipeline.cropRect(imageSize: CGSize(width: 6000, height: 4000), ratio: 0.8,

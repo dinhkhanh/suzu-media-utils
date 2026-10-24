@@ -34,7 +34,7 @@ public enum EditPipeline {
         }
         let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
         let focus = CropPlacements.shared.focus(for: url, given: focus)
-        guard var image = decode(src, data: data, recipe: recipe, properties: props, zoom: focus?.magnification ?? 1) else {
+        guard var image = decode(src, data: data, recipe: recipe, properties: props, zoom: focus?.magnification ?? 1, rect: focus?.rect) else {
             throw Failure.unreadable(url.lastPathComponent)
         }
         let sourceSpace = image.colorSpace
@@ -65,17 +65,20 @@ public enum EditPipeline {
 
     /// Upright image at the resolution the recipe needs (full size when it keeps the original size). `zoom`: the
     /// photo's own crop zoom, which keeps a smaller part of it.
-    static func decode(_ src: CGImageSource, data: Data, recipe: EditRecipe, properties p: [CFString: Any]?, zoom: Double = 1) -> CIImage? {
+    static func decode(_ src: CGImageSource, data: Data, recipe: EditRecipe, properties p: [CFString: Any]?, zoom: Double = 1, rect: CGRect? = nil) -> CIImage? {
         var w = Double(p?[kCGImagePropertyPixelWidth] as? Int ?? 0), h = Double(p?[kCGImagePropertyPixelHeight] as? Int ?? 0)
         if let o = p?[kCGImagePropertyOrientation] as? Int, o >= 5 { swap(&w, &h) }
+        if recipe.look.swapsSides { swap(&w, &h) }
         if let target = recipe.maxLongSide, w > 0, h > 0 {
             // Share of the long side the crop keeps (crops never upscale, so this is how much detail is needed).
             var keep = 1.0
-            if let a = recipe.aspect(for: CGSize(width: w, height: h)) {
+            if let rect {
+                keep = max(rect.width * w, rect.height * h) / max(w, h)
+            } else if let a = recipe.aspect(for: CGSize(width: w, height: h)) {
                 let cw = min(w, h * a.ratio), ch = min(h, w / a.ratio)
                 keep = max(cw, ch) / max(w, h)
             }
-            keep /= max(1, zoom)
+            if rect == nil { keep /= max(1, zoom) }
             // Straightening trims up to about 15% (at 10°).
             let turn = recipe.straighten == true || recipe.rotation != nil ? 1 / 0.85 : 1
             let needed = Int((Double(target) / keep * 1.05 * turn).rounded(.up))
@@ -95,18 +98,22 @@ public enum EditPipeline {
         return CIImage(data: data, options: [.applyOrientationProperty: true])
     }
 
-    /// The recipe applied to an image in memory (also used for video frames and previews).
-    public static func apply(_ recipe: EditRecipe, to input: CIImage, focus: FocusHint?) throws -> CIImage {
-        var image = input, focus = focus
-        if recipe.autoTone { image = autoTone(image, strength: recipe.autoToneStrength) }
+    /// The recipe applied to an image in memory (also used for video frames and previews): turned the right way up,
+    /// toned, levelled, cropped, resized, watermarked.
+    ///
+    /// `previewLongSide`: for previews, the cropped photo is scaled to exactly this long side (up or down) before the
+    /// watermark goes on, so the watermark is drawn at the screen's resolution however far the preview is zoomed.
+    public static func apply(_ recipe: EditRecipe, to input: CIImage, focus: FocusHint?, previewLongSide: Int? = nil) throws -> CIImage {
+        var (image, focus) = orient(input, recipe.look, focus: focus)
+        image = tone(image, recipe)
         if let degrees = rotation(recipe, image) { (image, focus) = rotate(image, degrees: degrees, focus: focus) }
         let size = image.extent.size
         // Cropped to the export's shape, or, zoomed in by hand, to the photo's own shape.
         if let ratio = cropRatio(recipe, size: size, focus: focus) {
             var hint = focus
             // Nothing known about the faces (none given, or only a zoom set by hand): find them, so the zoomed crop
-            // keeps the people in frame too.
-            if hint == nil || (hint!.hasNoFaces && hint!.center == nil) {
+            // keeps the people in frame too. A crop drawn by hand needs none.
+            if hint?.rect == nil, hint == nil || (hint!.hasNoFaces && hint!.center == nil) {
                 hint = detectFaces(image).map { var d = $0; d.zoom = focus?.zoom; return d } ?? hint
             }
             let r = cropRect(imageSize: size, ratio: ratio, focus: hint)
@@ -115,9 +122,9 @@ public enum EditPipeline {
                                              width: r.width, height: r.height))
             image = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
         }
-        if let long = recipe.maxLongSide, long > 0 {
+        if let long = previewLongSide ?? recipe.maxLongSide, long > 0 {
             let scale = Double(long) / Double(max(image.extent.width, image.extent.height))
-            if scale < 1 {
+            if scale < 1 || (previewLongSide != nil && scale > 1.001) {
                 // Exact output size (e.g. 1080 x 1350): Lanczos leaves fractional edges that rounding would grow.
                 let w = (image.extent.width * scale).rounded(), h = (image.extent.height * scale).rounded()
                 image = image.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1])
@@ -128,7 +135,189 @@ public enum EditPipeline {
         return image
     }
 
-    // MARK: - Auto tone
+    // MARK: - Tone
+
+    /// Auto tone, then the adjustments' light, colour and detail.
+    public static func tone(_ image: CIImage, _ recipe: EditRecipe) -> CIImage {
+        var out = image
+        if recipe.autoTone { out = autoTone(out, strength: recipe.autoToneStrength) }
+        if recipe.look.changesPixels { out = adjust(out, recipe.look) }
+        return out
+    }
+
+    /// Flips and quarter turns, with the face rects turned along. The result's origin is zero.
+    public static func orient(_ image: CIImage, _ a: Adjustments, focus: FocusHint?) -> (CIImage, FocusHint?) {
+        guard a.changesOrientation else { return (image, focus) }
+        var out = image
+        if a.flipHorizontal { out = out.oriented(.upMirrored) }
+        if a.flipVertical { out = out.oriented(.downMirrored) }
+        for _ in 0..<((a.turns % 4 + 4) % 4) { out = out.oriented(.right) }
+        out = out.transformed(by: CGAffineTransform(translationX: -out.extent.minX, y: -out.extent.minY))
+        guard var f = focus else { return (out, nil) }
+        f.primary = f.primary.map(a.map)
+        f.others = f.others.map(a.map)
+        return (out, f)
+    }
+
+    /// Light, colour and detail, in the order editors apply them: exposure and tone, then colour, then sharpening and
+    /// the vignette.
+    public static func adjust(_ image: CIImage, _ a: Adjustments) -> CIImage {
+        var out = image
+        let ext = image.extent
+        if a.exposure != 0 { out = out.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: a.exposure]) }
+        if a.highlights < 0 || a.shadows != 0 {
+            out = out.applyingFilter("CIHighlightShadowAdjust", parameters: ["inputHighlightAmount": 1 + max(-1, a.highlights) * 0.7,
+                                                                             "inputShadowAmount": a.shadows, "inputRadius": 2.5])
+        }
+        if a.highlights > 0 {
+            // Brighter highlights: the top of the curve lifted, the rest untouched.
+            out = curve(out, [0, 0.25, 0.5, 0.75 + min(1, a.highlights) * 0.12, 1])
+        }
+        if a.contrast != 0 || a.saturation != 0 {
+            out = out.applyingFilter("CIColorControls", parameters: [kCIInputContrastKey: 1 + a.contrast * 0.5, kCIInputSaturationKey: 1 + a.saturation])
+        }
+        if a.hasCurve { out = curve(out, a.tone) }
+        if let hsl = a.hsl, !hsl.isEmpty {
+            out = out.applyingFilter("CIColorCubeWithColorSpace", parameters: [
+                "inputCubeDimension": hslCubeSize, "inputCubeData": hslCube(hsl), "inputColorSpace": CGColorSpace(name: CGColorSpace.sRGB)!])
+        }
+        if a.temperature != 0 || a.tint != 0 {
+            // Warmer = the neutral point moved to a cooler light (6500 K daylight is "as shot").
+            out = out.applyingFilter("CITemperatureAndTint", parameters: ["inputNeutral": CIVector(x: 6500, y: 0),
+                                                                          "inputTargetNeutral": CIVector(x: 6500 - a.temperature * 2500, y: a.tint * 60)])
+        }
+        if a.vibrance != 0 { out = out.applyingFilter("CIVibrance", parameters: [kCIInputAmountKey: a.vibrance]) }
+        if a.monochrome { out = out.applyingFilter("CIPhotoEffectMono") }
+        if a.clarity > 0 {
+            // Local contrast: a wide, gentle unsharp mask.
+            let r = max(ext.width, ext.height) / 100
+            out = out.applyingFilter("CIUnsharpMask", parameters: [kCIInputRadiusKey: r, kCIInputIntensityKey: a.clarity * 0.8])
+        }
+        if a.sharpness > 0 {
+            out = out.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: a.sharpness * 1.2, kCIInputRadiusKey: 1.5])
+        }
+        if a.vignette > 0 {
+            out = out.applyingFilter("CIVignette", parameters: [kCIInputIntensityKey: a.vignette * 1.6, kCIInputRadiusKey: 1.6])
+        }
+        return out.cropped(to: ext)
+    }
+
+    // MARK: Tone curve
+
+    nonisolated(unsafe) static var curveCache: ([Double], Data)?
+
+    /// The image through a tone curve: five outputs for the inputs 0, ¼, ½, ¾ and 1, joined by a monotone cubic
+    /// (no overshoot between points), as a 256-step lookup. (CIToneCurveAdjust is not used: it returns an empty
+    /// image on recent macOS.)
+    public static func curve(_ image: CIImage, _ points: [Double]) -> CIImage {
+        guard points.count == 5 else { return image }
+        return image.applyingFilter("CIColorCurves", parameters: [
+            "inputCurvesData": curveLUT(points), "inputCurvesDomain": CIVector(x: 0, y: 1), "inputColorSpace": CGColorSpace(name: CGColorSpace.sRGB)!])
+    }
+
+    /// 256 RGB triples of the curve.
+    public static func curveLUT(_ points: [Double]) -> Data {
+        hslLock.lock(); defer { hslLock.unlock() }
+        if let c = curveCache, c.0 == points { return c.1 }
+        var lut = [Float]()
+        lut.reserveCapacity(256 * 3)
+        for i in 0..<256 {
+            let v = Float(min(1, max(0, curveValue(points, Double(i) / 255))))
+            lut.append(v); lut.append(v); lut.append(v)
+        }
+        let data = lut.withUnsafeBufferPointer { Data(buffer: $0) }
+        curveCache = (points, data)
+        return data
+    }
+
+    /// Fritsch–Carlson monotone cubic interpolation of (i/4, points[i]) at `x`.
+    public static func curveValue(_ y: [Double], _ x: Double) -> Double {
+        let n = y.count, h = 1.0 / Double(n - 1)
+        var d = [Double](repeating: 0, count: n - 1), m = [Double](repeating: 0, count: n)
+        for i in 0..<(n - 1) { d[i] = (y[i + 1] - y[i]) / h }
+        m[0] = d[0]; m[n - 1] = d[n - 2]
+        for i in 1..<(n - 1) { m[i] = d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2 }
+        for i in 0..<(n - 1) where d[i] != 0 {
+            let a = m[i] / d[i], b = m[i + 1] / d[i]
+            let s = a * a + b * b
+            if s > 9 { let t = 3 / s.squareRoot(); m[i] = t * a * d[i]; m[i + 1] = t * b * d[i] }
+        }
+        let i = min(max(Int(x / h), 0), n - 2)
+        let t = (x - Double(i) * h) / h, t2 = t * t, t3 = t2 * t
+        return (2 * t3 - 3 * t2 + 1) * y[i] + (t3 - 2 * t2 + t) * h * m[i] + (-2 * t3 + 3 * t2) * y[i + 1] + (t3 - t2) * h * m[i + 1]
+    }
+
+    // MARK: HSL
+
+    static let hslCubeSize = 32
+    nonisolated(unsafe) static var hslCubeCache: (HSLAdjust, Data)?
+    static let hslLock = NSLock()
+
+    /// A colour cube that turns, saturates and lightens each colour band as asked: every colour of the cube goes
+    /// through HSV, its band weights (a triangle between neighbouring bands), the shifts, and back. Grey is left
+    /// alone, and the nearly grey nearly so.
+    public static func hslCube(_ a: HSLAdjust) -> Data {
+        hslLock.lock(); defer { hslLock.unlock() }
+        if let c = hslCubeCache, c.0 == a { return c.1 }
+        let n = hslCubeSize
+        var cube = [Float](repeating: 0, count: n * n * n * 4)
+        let centres = HSLAdjust.hues
+        var i = 0
+        for b in 0..<n { for g in 0..<n { for r in 0..<n {
+            let rf = Double(r) / Double(n - 1), gf = Double(g) / Double(n - 1), bf = Double(b) / Double(n - 1)
+            var (h, s, v) = hsv(rf, gf, bf)
+            if s > 0.001 && v > 0.001 {
+                // Band weights: 1 at a band's hue, 0 at its neighbours'.
+                var shift = 0.0, sat = 0.0, lum = 0.0
+                for k in 0..<8 {
+                    let c0 = centres[k], prev = centres[(k + 7) % 8], next = centres[(k + 1) % 8]
+                    let left = ((c0 - prev) + 360).truncatingRemainder(dividingBy: 360), right = ((next - c0) + 360).truncatingRemainder(dividingBy: 360)
+                    var d = h - c0
+                    if d > 180 { d -= 360 } else if d < -180 { d += 360 }
+                    let w = d < 0 ? max(0, 1 + d / left) : max(0, 1 - d / right)
+                    shift += w * a.hue[k] * 30
+                    sat += w * a.saturation[k]
+                    lum += w * a.luminance[k]
+                }
+                // Nearly grey colours are barely touched, so skies and skin don't tear at the edges.
+                let k = min(1, s * 2.5)
+                h = (h + shift * k + 360).truncatingRemainder(dividingBy: 360)
+                s = min(1, max(0, s * (1 + sat * k)))
+                v = min(1, max(0, v * (1 + lum * 0.6 * k)))
+            }
+            let (ro, go, bo) = rgb(h, s, v)
+            cube[i] = Float(ro); cube[i + 1] = Float(go); cube[i + 2] = Float(bo); cube[i + 3] = 1
+            i += 4
+        } } }
+        let data = cube.withUnsafeBufferPointer { Data(buffer: $0) }
+        hslCubeCache = (a, data)
+        return data
+    }
+
+    static func hsv(_ r: Double, _ g: Double, _ b: Double) -> (Double, Double, Double) {
+        let mx = max(r, g, b), mn = min(r, g, b), d = mx - mn
+        var h = 0.0
+        if d > 0 {
+            if mx == r { h = 60 * ((g - b) / d).truncatingRemainder(dividingBy: 6) }
+            else if mx == g { h = 60 * ((b - r) / d + 2) }
+            else { h = 60 * ((r - g) / d + 4) }
+            if h < 0 { h += 360 }
+        }
+        return (h, mx > 0 ? d / mx : 0, mx)
+    }
+
+    static func rgb(_ h: Double, _ s: Double, _ v: Double) -> (Double, Double, Double) {
+        let c = v * s, x = c * (1 - abs((h / 60).truncatingRemainder(dividingBy: 2) - 1)), m = v - c
+        let (r, g, b): (Double, Double, Double) = switch Int(h / 60) % 6 {
+        case 0: (c, x, 0)
+        case 1: (x, c, 0)
+        case 2: (0, c, x)
+        case 3: (0, x, c)
+        case 4: (x, 0, c)
+        default: (c, 0, x)
+        }
+        return (r + m, g + m, b + m)
+    }
 
     public static func autoTone(_ image: CIImage, strength: Double) -> CIImage {
         var out = image
@@ -198,6 +387,7 @@ public enum EditPipeline {
     /// Width / height of the crop a photo of this size gets: the recipe's shape, else (zoomed in by hand) its own;
     /// nil when it isn't cropped at all.
     public static func cropRatio(_ recipe: EditRecipe, size: CGSize, focus: FocusHint?) -> Double? {
+        if let r = focus?.rect, r.width > 0, r.height > 0, size.height > 0 { return (r.width * size.width) / (r.height * size.height) }
         if let a = recipe.aspect(for: size) { return a.ratio }
         guard (focus?.magnification ?? 1) > 1, size.height > 0 else { return nil }
         return size.width / size.height
@@ -208,6 +398,12 @@ public enum EditPipeline {
     /// face's height (smaller ones are people in the background), nearest first, as many as fit. Top-left origin, pixels.
     public static func cropRect(imageSize: CGSize, ratio: Double, focus: FocusHint?) -> CGRect {
         let W = imageSize.width, H = imageSize.height
+        if let r = focus?.rect {
+            // Drawn by hand: as drawn, kept inside the photo and at least a few pixels.
+            let w = min(max(r.width * W, 4), W), h = min(max(r.height * H, 4), H)
+            let x = min(max(r.minX * W, 0), W - w), y = min(max(r.minY * H, 0), H - h)
+            return CGRect(x: x.rounded(), y: y.rounded(), width: w.rounded(), height: h.rounded()).intersection(CGRect(origin: .zero, size: imageSize))
+        }
         var cw = W, ch = W / ratio
         if ch > H { ch = H; cw = H * ratio }
         let zoom = focus?.magnification ?? 1

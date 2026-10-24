@@ -400,6 +400,34 @@ public final class LibraryService: @unchecked Sendable {
         }
     }
 
+    // MARK: Lists and pins (see PersonGroups)
+
+    public func pin(_ people: [Int64], _ on: Bool) throws {
+        try store.db.write { db in try PersonGroups.pin(people, on, db: db) }
+    }
+
+    /// Makes a list (or finds the one of that name) and puts `people` on it.
+    @discardableResult
+    public func createGroup(_ name: String, people: [Int64] = []) throws -> Int64 {
+        try store.db.write { db in
+            let id = try PersonGroups.create(name, db: db)
+            try PersonGroups.set(id, people: people, member: true, db: db)
+            return id
+        }
+    }
+
+    public func renameGroup(_ id: Int64, to name: String) throws {
+        try store.db.write { db in try PersonGroups.rename(id, to: name, db: db) }
+    }
+
+    public func deleteGroup(_ id: Int64) throws {
+        try store.db.write { db in try PersonGroups.delete(id, db: db) }
+    }
+
+    public func setGroup(_ id: Int64, people: [Int64], member: Bool) throws {
+        try store.db.write { db in try PersonGroups.set(id, people: people, member: member, db: db) }
+    }
+
     /// Unnamed people with no faces left are clutter; named ones are kept so their name is not lost.
     public func deleteEmptyPeople() {
         try? store.db.write { db in

@@ -6,58 +6,69 @@ enum PeopleFilter: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// Everyone in the project as face tiles. Naming is the night's main job, so it is built for a run: click a tile,
-/// type, ⏎ — the cursor moves to the next unnamed person; ⇥ skips one; names from every project are suggested.
-/// Several tiles selected (⌘-click, ⇧-click) bring up a bar to merge them, or say who they are.
+/// Which people a grid shows: everyone, the pinned, or one list.
+enum PeopleScope: Hashable {
+    case all, pinned, group(Int64)
+}
+
+/// Everyone in the project as face tiles. Naming is the night's main job, so it is built for a run: click a tile's
+/// name field, type, ⏎ — the cursor moves to the next unnamed person; ⇥ skips one; names from every project are
+/// suggested. Several tiles selected (⌘-click, ⇧-click) bring up a bar to merge them, pin them, or put them on a list.
 struct PeopleGrid: View {
     @EnvironmentObject var model: FaceGroupingModel
     @Binding var path: NavigationPath
     @State private var search = ""
     @State private var filter: PeopleFilter
+    let scope: PeopleScope
     @State private var selected: Set<Int64> = []
     @FocusState private var editing: Int64?
     @State private var suggesting = false
     @State private var exportAll: ExportMode?
     @State private var galleryExport = false
 
-    init(path: Binding<NavigationPath>, filter: PeopleFilter = .all) {
+    init(path: Binding<NavigationPath>, filter: PeopleFilter = .all, scope: PeopleScope = .all) {
         _path = path
         _filter = State(initialValue: filter)
+        self.scope = scope
     }
 
-    var shown: [PersonSummary] {
+    var inScope: [PersonSummary] {
         model.people.filter { p in
-            p.faces > 0
-                && (filter == .all || (filter == .named) == (p.name != nil))
+            p.faces > 0 && {
+                switch scope {
+                case .all: true
+                case .pinned: p.pinned
+                case .group(let g): p.groups.contains(g)
+                }
+            }()
+        }
+    }
+    var shown: [PersonSummary] {
+        inScope.filter { p in
+            (filter == .all || (filter == .named) == (p.name != nil))
                 && (search.isEmpty || (p.name ?? "").localizedCaseInsensitiveContains(search))
         }
     }
-    var unnamed: Int { model.people.count { $0.faces > 0 && $0.name == nil } }
-    var named: Int { model.people.count { $0.faces > 0 && $0.name != nil } }
+    var unnamed: Int { inScope.count { $0.name == nil } }
+    var named: Int { inScope.count { $0.name != nil } }
+    var group: PersonGroupSummary? { if case .group(let g) = scope { model.groups.first { $0.id == g } } else { nil } }
+
+    var title: String {
+        switch scope {
+        case .all: "People"
+        case .pinned: "Pinned"
+        case .group: group?.name ?? "List"
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             SessionBar(divider: true)
-            if unnamed > 0 && filter != .named && search.isEmpty { namingBanner }
+            if unnamed > 0 && filter != .named && search.isEmpty && scope == .all { namingBanner }
             ScrollView {
-                if shown.isEmpty {
-                    ContentUnavailableView(model.people.isEmpty ? "No people yet" : filter == .unnamed ? "Everyone has a name" : "No matches",
-                                           systemImage: filter == .unnamed ? "checkmark.circle" : "person.2",
-                                           description: Text(model.people.isEmpty ? "Add a folder; groups appear as files are processed." : ""))
-                        .padding(.top, 80)
-                }
+                if shown.isEmpty { empty.padding(.top, 80) }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 170), spacing: 6)], spacing: 6) {
-                    ForEach(shown) { p in
-                        PersonGridCell(person: p, selected: selected.contains(p.id), mergeCount: selected.count > 1 && selected.contains(p.id) ? selected.count : 0,
-                                       known: model.knownPeople.filter { $0.id != p.id }, editing: editing == p.id, focus: $editing,
-                                       open: { path.append(PersonRoute(id: p.id)) },
-                                       click: { selected.click(p.id, in: shown.map(\.id)) },
-                                       mergeSelected: { model.merge(selected); selected = [] },
-                                       thisIs: { model.mergeInto(p.id, $0) },
-                                       rename: { commitName($0, for: p) },
-                                       skip: { skip(from: p) })
-                            .equatable()
-                    }
+                    ForEach(shown) { p in cell(p) }
                 }
                 .padding(.horizontal, 18).padding(.vertical, 14)
                 // Room for the selection bar.
@@ -67,7 +78,7 @@ struct PeopleGrid: View {
             .background { Color.clear.contentShape(Rectangle()).onTapGesture { selected = []; editing = nil } }
         }
         .overlay(alignment: .bottom) { if !selected.isEmpty { selectionBar } }
-        .navigationTitle(model.currentSession.map { "People · \(model.sessionTitle($0))" } ?? "People")
+        .navigationTitle(model.currentSession.map { "\(title) · \(model.sessionTitle($0))" } ?? title)
         .navigationSubtitle("\(named + unnamed) · \(named) named" + (unnamed > 0 ? " · \(unnamed) to name" : ""))
         .searchable(text: $search, prompt: "Search names")
         .sheet(isPresented: $suggesting) { CelebritySheet() }
@@ -81,6 +92,16 @@ struct PeopleGrid: View {
                     }
                 }
                 .pickerStyle(.segmented)
+            }
+            if let group {
+                ToolbarItem {
+                    Menu {
+                        Button("Rename List…") { model.askRenameGroup = group }
+                        Button("Delete List", role: .destructive) { model.deleteGroup(group.id) }
+                    } label: {
+                        Label("List", systemImage: "ellipsis.circle")
+                    }
+                }
             }
             ToolbarItem {
                 Button { suggesting = true } label: { Label("Suggest Names", systemImage: "sparkles") }
@@ -100,13 +121,48 @@ struct PeopleGrid: View {
         }
     }
 
+    func cell(_ p: PersonSummary) -> some View {
+        let known: [PersonSummary] = model.knownPeople.filter { $0.id != p.id }
+        let mergeCount: Int = selected.count > 1 && selected.contains(p.id) ? selected.count : 0
+        return PersonGridCell(person: p, selected: selected.contains(p.id), mergeCount: mergeCount,
+                              known: known, groups: model.groups, editing: editing == p.id, focus: $editing,
+                              open: { path.append(PersonRoute(id: p.id)) },
+                              click: { selected.click(p.id, in: shown.map(\.id)) },
+                              mergeSelected: { model.merge(selected); selected = [] },
+                              thisIs: { model.mergeInto(p.id, $0) },
+                              rename: { commitName($0, for: p) },
+                              skip: { skip(from: p) },
+                              pin: { model.pin(targets(p), $0) },
+                              list: { g, on in model.setGroup(g, people: targets(p), member: on) },
+                              newList: { model.askNewGroup = targets(p) })
+            .equatable()
+    }
+
+    /// Right-click acts on the whole selection when the clicked person is part of it.
+    func targets(_ p: PersonSummary) -> Set<Int64> { selected.contains(p.id) ? selected : [p.id] }
+
+    @ViewBuilder var empty: some View {
+        switch scope {
+        case .pinned:
+            ContentUnavailableView("Nobody pinned", systemImage: "star",
+                                   description: Text("Pin the people who matter tonight — right-click a tile, or ★ on their page — and they come first in every grid."))
+        case .group:
+            ContentUnavailableView("Nobody on this list yet", systemImage: "list.bullet",
+                                   description: Text("Select people in People and use Add to List, or right-click a tile."))
+        case .all:
+            ContentUnavailableView(model.people.isEmpty ? "No people yet" : filter == .unnamed ? "Everyone has a name" : "No matches",
+                                   systemImage: filter == .unnamed ? "checkmark.circle" : "person.2",
+                                   description: Text(model.people.isEmpty ? "Add a folder; groups appear as files are processed." : ""))
+        }
+    }
+
     /// "24 people still need a name" with the keys, and a button that starts the run.
     var namingBanner: some View {
         HStack(spacing: 12) {
             Image(systemName: "pencil").foregroundStyle(Color.amber)
             VStack(alignment: .leading, spacing: 1) {
                 Text("\(unnamed) \(unnamed == 1 ? "person still needs" : "people still need") a name").fontWeight(.semibold)
-                Text("Click a tile, type, press ⏎ — the cursor moves to the next unnamed person. ⇥ skips one; names from every project are suggested as you type.")
+                Text("Click a tile's name, type, press ⏎ — the cursor moves to the next unnamed person. ⇥ skips one; names from every project are suggested as you type.")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
             Spacer()
@@ -119,7 +175,9 @@ struct PeopleGrid: View {
     }
 
     var selectionBar: some View {
-        SelectionBar(title: selected.count == 1 ? "1 person selected" : "\(selected.count) people selected", clear: { selected = [] }) {
+        let chosen = model.people.filter { selected.contains($0.id) }
+        let allPinned = !chosen.isEmpty && chosen.allSatisfy(\.pinned)
+        return SelectionBar(title: selected.count == 1 ? "1 person selected" : "\(selected.count) people selected", clear: { selected = [] }) {
             Button("Merge into One") { model.merge(selected); selected = [] }
                 .buttonStyle(.borderedProminent)
                 .disabled(selected.count < 2)
@@ -135,6 +193,15 @@ struct PeopleGrid: View {
             .fixedSize()
             .disabled(model.knownPeople.allSatisfy { selected.contains($0.id) })
             .help("The selected people are someone already named, here or in another project")
+            Button { model.pin(selected, !allPinned) } label: { Label(allPinned ? "Unpin" : "Pin", systemImage: allPinned ? "star.slash" : "star") }
+                .help(allPinned ? "Take the selected people off the top of the grids" : "Pinned people come first in every grid")
+            Menu {
+                ListsMenu(people: selected, groups: model.groups, chosen: chosen)
+            } label: {
+                Label("Add to List", systemImage: "list.bullet")
+            }
+            .fixedSize()
+            .help("Put the selected people on a list: cast, sponsors, VIP…")
             if selected.count == 1, let id = selected.first {
                 Button("Open") { path.append(PersonRoute(id: id)) }
             }
@@ -167,6 +234,30 @@ extension PeopleGrid {
     }
 }
 
+/// The lists, ticked for the people who are on them, then "New List…" and the usual names not made yet.
+struct ListsMenu: View {
+    @EnvironmentObject var model: FaceGroupingModel
+    let people: Set<Int64>
+    let groups: [PersonGroupSummary]
+    /// The people's summaries (for the ticks).
+    let chosen: [PersonSummary]
+
+    var body: some View {
+        ForEach(groups) { g in
+            let on = !chosen.isEmpty && chosen.allSatisfy { $0.groups.contains(g.id) }
+            Toggle(g.name, isOn: Binding(get: { on }, set: { model.setGroup(g.id, people: people, member: $0) }))
+        }
+        if !groups.isEmpty { Divider() }
+        Button("New List…") { model.askNewGroup = people }
+        let missing = PersonGroups.suggestedNames.filter { n in !groups.contains { PersonNames.key($0.name) == PersonNames.key(n) } }
+        if !missing.isEmpty {
+            Section("Suggested") {
+                ForEach(missing, id: \.self) { n in Button(n) { model.createGroup(n, people: people) } }
+            }
+        }
+    }
+}
+
 /// One person in the grid, with its clicks and right-click menu. Equatable on its data alone, so the model's
 /// background updates (counts, progress) don't redraw it, and don't rebuild its menu while that is open: a menu
 /// rebuilt under the mouse flashes, and its "This Is ▸ name" submenu can't be clicked.
@@ -177,6 +268,7 @@ struct PersonGridCell: View, Equatable {
     let mergeCount: Int
     /// Everyone named, in any project, other than this person.
     let known: [PersonSummary]
+    let groups: [PersonGroupSummary]
     /// This person's name is being edited.
     let editing: Bool
     var focus: FocusState<Int64?>.Binding
@@ -186,27 +278,42 @@ struct PersonGridCell: View, Equatable {
     let thisIs: (Int64) -> Void
     let rename: (String) -> Void
     let skip: () -> Void
+    let pin: (Bool) -> Void
+    let list: (Int64, Bool) -> Void
+    let newList: () -> Void
 
     static func == (a: PersonGridCell, b: PersonGridCell) -> Bool {
-        a.person == b.person && a.selected == b.selected && a.mergeCount == b.mergeCount && a.known == b.known && a.editing == b.editing
+        a.person == b.person && a.selected == b.selected && a.mergeCount == b.mergeCount && a.known == b.known
+            && a.groups == b.groups && a.editing == b.editing
     }
 
     var body: some View {
-        PersonCell(person: person, selected: selected, editing: focus, onRename: rename, onSkip: skip)
+        PersonCell(person: person, selected: selected, groups: groups, editing: focus, onRename: rename, onSkip: skip)
             .onTapGesture(count: 2, perform: open)
             .onTapGesture(perform: click)
             .contextMenu {
                 Button("Open", action: open)
                 if mergeCount > 1 { Button("Merge \(mergeCount) People", action: mergeSelected) }
                 ThisIsMenu(others: known, merge: thisIs)
+                Divider()
+                Button(person.pinned ? "Unpin" : "Pin") { pin(!person.pinned) }
+                Menu("Add to List") {
+                    ForEach(groups) { g in
+                        Toggle(g.name, isOn: Binding(get: { person.groups.contains(g.id) }, set: { list(g.id, $0) }))
+                    }
+                    if !groups.isEmpty { Divider() }
+                    Button("New List…", action: newList)
+                }
             }
     }
 }
 
-/// A face, the name (or a dashed "Add name" that turns into a field), and the counts.
+/// A face, the name field (click into it and type; "Add name" while empty) and the counts. A star marks a pinned
+/// person; the lists they are on sit under the counts.
 struct PersonCell: View {
     let person: PersonSummary
     let selected: Bool
+    var groups: [PersonGroupSummary] = []
     var editing: FocusState<Int64?>.Binding?
     var onRename: ((String) -> Void)?
     var onSkip: (() -> Void)?
@@ -221,38 +328,44 @@ struct PersonCell: View {
                 .overlay(Circle().stroke(.separator, lineWidth: 1))
                 .overlay(Circle().stroke(selected ? Color.accent : isEditing ? Color.amber : .clear, lineWidth: 3))
                 .shadow(color: .black.opacity(selected ? 0.25 : 0), radius: 6, y: 2)
-            if let editing, let onRename {
-                if isEditing {
-                    // Inline name field: click, type, Return. Escape restores the old name.
-                    TextField("Add name", text: $name)
-                        .textFieldStyle(.plain)
-                        .multilineTextAlignment(.center)
-                        .font(.headline)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(isEditing ? Color.primary.opacity(0.06) : .clear))
-                        .focused(editing, equals: person.id)
-                        .knownNameSuggestions(for: name) { onRename($0) }
-                        .onSubmit { onRename(name) }
-                        .onKeyPress(.tab) {
-                            // Skip to the next unnamed person; an unsaved name is left behind.
-                            if person.name == nil { name = ""; onSkip?(); return .handled }
-                            return .ignored
-                        }
-                        .onExitCommand { name = person.name ?? ""; editing.wrappedValue = nil }
-                        .onAppear { name = person.name ?? "" }
-                        .onChange(of: person.name) { name = person.name ?? "" }
-                } else if let n = person.name {
-                    Text(n).font(.headline).lineLimit(1)
-                        .onTapGesture { editing.wrappedValue = person.id }
-                        .help("Click to rename")
-                } else {
-                    Button("Add name") { editing.wrappedValue = person.id }
-                        .buttonStyle(.plain)
-                        .font(.callout.weight(.medium))
-                        .foregroundStyle(Color.amber)
-                        .padding(.horizontal, 10).padding(.vertical, 3)
-                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.amber.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [3, 2])))
+                .overlay(alignment: .topTrailing) {
+                    if person.pinned {
+                        Image(systemName: "star.fill")
+                            .font(.caption2.weight(.bold)).foregroundStyle(.white)
+                            .padding(5).background(Circle().fill(Color.amber))
+                            .overlay(Circle().stroke(Color.panel, lineWidth: 2))
+                            .offset(x: 2, y: -2)
+                            .help("Pinned: comes first in every grid")
+                    }
                 }
+            if let editing, let onRename {
+                // Inline name field, always there: click, type, Return. Escape restores the old name. Unnamed, it
+                // shows as a dashed "Add name" until it has focus.
+                TextField("Add name", text: $name)
+                    .textFieldStyle(.plain)
+                    .multilineTextAlignment(.center)
+                    .font(person.name == nil && !isEditing ? .callout.weight(.medium) : .headline)
+                    .foregroundStyle(person.name == nil && !isEditing ? Color.amber : .primary)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(isEditing ? Color.primary.opacity(0.06) : .clear))
+                    .overlay {
+                        if person.name == nil && !isEditing {
+                            RoundedRectangle(cornerRadius: 6).strokeBorder(Color.amber.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+                        }
+                    }
+                    .fixedSize(horizontal: person.name == nil && !isEditing, vertical: false)
+                    .focused(editing, equals: person.id)
+                    .knownNameSuggestions(for: name) { onRename($0) }
+                    .onSubmit { onRename(name) }
+                    .onKeyPress(.tab) {
+                        // Skip to the next unnamed person; an unsaved name is left behind.
+                        if person.name == nil { name = ""; onSkip?(); return .handled }
+                        return .ignored
+                    }
+                    .onExitCommand { name = person.name ?? ""; editing.wrappedValue = nil }
+                    .onAppear { name = person.name ?? "" }
+                    .onChange(of: person.name) { name = person.name ?? "" }
+                    .help(person.name == nil ? "Click and type a name" : "Click to rename")
             } else {
                 Text(person.displayName)
                     .font(.headline)
@@ -260,9 +373,13 @@ struct PersonCell: View {
                     .lineLimit(1)
             }
             Text(counts).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            if !listNames.isEmpty {
+                Text(listNames).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+            }
         }
         .padding(.vertical, 12).padding(.horizontal, 6)
-        .frame(maxWidth: .infinity)
+        // Top-aligned, so a tile with a list line under it doesn't push its neighbours' faces down.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(RoundedRectangle(cornerRadius: 12).fill(selected ? Color.accent.opacity(0.12) : .clear))
         .contentShape(Rectangle())
     }
@@ -272,6 +389,8 @@ struct PersonCell: View {
         if person.videos > 0 { parts.append("\(person.videos) video\(person.videos == 1 ? "" : "s")") }
         return parts.joined(separator: " · ")
     }
+
+    var listNames: String { groups.filter { person.groups.contains($0.id) }.map(\.name).joined(separator: " · ") }
 }
 
 enum MediaSort: String, CaseIterable, Identifiable {
@@ -380,6 +499,12 @@ struct PersonDetail: View {
                         .onSubmit(commitName)
                         .fixedSize()
                         .help("Click to rename; the name applies in every project")
+                    Button { model.pin([personId], !(person?.pinned ?? false)) } label: {
+                        Image(systemName: person?.pinned == true ? "star.fill" : "star")
+                            .font(.title3).foregroundStyle(person?.pinned == true ? Color.amber : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(person?.pinned == true ? "Pinned: comes first in every grid. Click to unpin" : "Pin: comes first in every grid")
                     if !otherProjects.isEmpty {
                         Label("Known in \(otherProjects.count + 1) projects", systemImage: "checkmark.seal")
                             .font(.caption.weight(.medium))
@@ -389,6 +514,19 @@ struct PersonDetail: View {
                     }
                 }
                 Text(summary).foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    ForEach(model.groups.filter { person?.groups.contains($0.id) == true }) { g in
+                        Chip(g.name, on: true, help: "On the list \(g.name) — click to take off") { model.setGroup(g.id, people: [personId], member: false) }
+                    }
+                    Menu {
+                        if let p = person { ListsMenu(people: [personId], groups: model.groups, chosen: [p]) }
+                    } label: {
+                        Label("Add to list", systemImage: "plus.circle").font(.callout.weight(.medium)).foregroundStyle(.secondary)
+                    }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().tint(.primary)
+                    .help("Cast, sponsors, VIP…: the lists this person is on")
+                }
+                .padding(.top, 2)
                 if !companions.isEmpty || !alsoWith.isEmpty {
                     HStack(spacing: 6) {
                         Text("Often with").font(.callout).foregroundStyle(.secondary).padding(.trailing, 2)

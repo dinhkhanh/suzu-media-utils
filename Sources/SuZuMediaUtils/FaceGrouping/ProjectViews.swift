@@ -63,6 +63,8 @@ struct ProjectSwitcher: View {
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
+        // Newly opened windows hand keyboard focus to the first control; a focus ring on this label looks wrong.
+        .focusEffectDisabled()
         .padding(.horizontal, 10).padding(.vertical, 8)
         .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.6)))
         .padding(.horizontal, 10).padding(.top, 4).padding(.bottom, 6)

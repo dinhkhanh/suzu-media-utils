@@ -12,7 +12,17 @@ struct PersonSummary: Identifiable, Hashable {
     var photos: Int
     var videos: Int
     var coverFaceId: Int64?
+    /// Pinned people sort first in every grid.
+    var pinned = false
+    /// The lists this person is on (PersonGroupSummary ids).
+    var groups: Set<Int64> = []
     var displayName: String { name ?? "Unnamed" }
+}
+
+/// A list of people (cast, sponsors, VIP…), see PersonGroups. Counts come from the people list where shown.
+struct PersonGroupSummary: Identifiable, Hashable {
+    var id: Int64
+    var name: String
 }
 
 struct ProjectSummary: Identifiable, Hashable {
@@ -134,6 +144,12 @@ final class FaceGroupingModel: ObservableObject {
     @Published var people: [PersonSummary] = []
     /// Everyone with a name, in any project: names are given once and shared by all projects.
     @Published var knownPeople: [PersonSummary] = []
+    /// Lists of people, in sidebar order.
+    @Published var groups: [PersonGroupSummary] = []
+    /// Set to ask for a new list's name; the people in it are put on the list once it is made.
+    @Published var askNewGroup: Set<Int64>?
+    /// Set to ask for a list's new name.
+    @Published var askRenameGroup: PersonGroupSummary?
     @Published var sources: [SourceSummary] = []
     @Published var stats = LibraryStats()
     @Published var rate: Double = 0
@@ -213,7 +229,8 @@ final class FaceGroupingModel: ObservableObject {
         guard let db = store?.db else { return }
         regionObserver = DatabaseRegionObservation(tracking: Table("face"), Table("person"), Table("media"), Table("source"),
                                                    Table("smartAlbum"), Table("deliveryRule"), Table("project"),
-                                                   Table("sessionLabel"), Table("team"), Table("delivery"))
+                                                   Table("sessionLabel"), Table("team"), Table("delivery"),
+                                                   Table("personGroup"), Table("personGroupMember"))
             .start(in: db, onError: { _ in }, onChange: { [weak self] _ in
                 DispatchQueue.main.async { self?.dirty = true }
             })
@@ -255,13 +272,14 @@ final class FaceGroupingModel: ObservableObject {
                  try Self.fetchProjects(db), try Self.fetchKnownPeople(db),
                  project == nil ? [] : try EventSessions.list(db, project: project, gap: gap),
                  try TeamRecord.order(Column("joinedAt")).fetchAll(db),
-                 try Self.fetchOverview(db, project: project))
+                 try Self.fetchOverview(db, project: project),
+                 try Self.fetchGroups(db))
             }
             await MainActor.run {
                 defer { self.refreshing = false }
                 // The project changed while reading: the next tick reads the new one.
                 guard project == self.currentProject, range == self.sessionRange else { self.dirty = true; return }
-                if let (people, sources, stats, albums, rules, projects, known, sessions, teams, overview) = result {
+                if let (people, sources, stats, albums, rules, projects, known, sessions, teams, overview, groups) = result {
                     if teams != self.teams { self.teams = teams; self.applyTeamStatus() }
                     if sessions != self.sessions {
                         if sessions.count > self.sessions.count, !self.sessions.isEmpty, let s = sessions.last {
@@ -283,6 +301,7 @@ final class FaceGroupingModel: ObservableObject {
                         return
                     }
                     if known != self.knownPeople { self.knownPeople = known }
+                    if groups != self.groups { self.groups = groups }
                     if people != self.people { self.people = people }
                     self.applySources(sources)
                     if stats != self.stats { self.stats = stats }
@@ -367,22 +386,29 @@ final class FaceGroupingModel: ObservableObject {
     nonisolated static func fetchPeople(_ db: Database, project: Int64?, taken: ClosedRange<Double>? = nil) throws -> [PersonSummary] {
         let scope = "\(ProjectScope.sql(project)) AND \(EventSessions.sql(taken))"
         return try Row.fetchAll(db, sql: """
-            SELECT p.id, p.name, COUNT(*) AS faces,
+            SELECT p.id, p.name, p.pinnedAt IS NOT NULL AS pinned, COUNT(*) AS faces,
                 COUNT(DISTINCT CASE WHEN m.kind = 'photo' THEN m.id END) AS photos,
                 COUNT(DISTINCT CASE WHEN m.kind = 'video' THEN m.id END) AS videos,
                 COALESCE((SELECT c.id FROM face c WHERE c.id = p.coverFaceId AND c.personId = p.id),
-                         \(BestShot.coverSubquery(project: project))) AS cover
+                         \(BestShot.coverSubquery(project: project))) AS cover,
+                (SELECT group_concat(groupId) FROM personGroupMember gm WHERE gm.personId = p.id) AS groups
             FROM person p
             JOIN face f ON f.personId = p.id
             JOIN media m ON m.id = f.mediaId
             LEFT JOIN source s ON s.id = m.sourceId
             WHERE \(scope)
             GROUP BY p.id
-            ORDER BY (p.name IS NULL), faces DESC
+            ORDER BY (p.pinnedAt IS NULL), (p.name IS NULL), faces DESC
             """).map {
             PersonSummary(id: $0["id"], name: $0["name"], faces: $0["faces"], photos: $0["photos"], videos: $0["videos"],
-                          coverFaceId: $0["cover"])
+                          coverFaceId: $0["cover"], pinned: $0["pinned"],
+                          groups: Set((($0["groups"] as String?) ?? "").split(separator: ",").compactMap { Int64($0) }))
         }
+    }
+
+    nonisolated static func fetchGroups(_ db: Database) throws -> [PersonGroupSummary] {
+        try Row.fetchAll(db, sql: "SELECT id, name FROM personGroup ORDER BY sortOrder, id")
+            .map { PersonGroupSummary(id: $0["id"], name: $0["name"]) }
     }
 
     nonisolated static func fetchProjects(_ db: Database) throws -> [ProjectSummary] {
@@ -664,6 +690,38 @@ final class FaceGroupingModel: ObservableObject {
     func mergeInto(_ id: Int64, _ target: Int64) {
         perform { try $0.merge([id], into: target) }
         if let name = knownPeople.first(where: { $0.id == target })?.name { log("This is \(name) · group merged", icon: "person.2") }
+    }
+
+    // MARK: Lists and pins
+
+    func pin(_ ids: Set<Int64>, _ on: Bool) {
+        perform { try $0.pin(Array(ids), on) }
+        let who = ids.count == 1 ? (people.first { $0.id == ids.first }?.displayName ?? "1 person") : "\(ids.count) people"
+        log(on ? "Pinned \(who)" : "Unpinned \(who)", icon: on ? "star.fill" : "star")
+    }
+
+    /// Makes a list (or finds the one of that name) and puts `ids` on it.
+    func createGroup(_ name: String, people ids: Set<Int64> = []) {
+        let n = name.trimmingCharacters(in: .whitespaces)
+        guard !n.isEmpty else { return }
+        perform { try $0.createGroup(n, people: Array(ids)) }
+        log(ids.isEmpty ? "List \(n) made" : "\(ids.count == 1 ? "1 person" : "\(ids.count) people") put on \(n)", icon: "list.bullet")
+    }
+
+    func renameGroup(_ id: Int64, to name: String) { perform { try $0.renameGroup(id, to: name) } }
+
+    func deleteGroup(_ id: Int64) {
+        let name = groups.first { $0.id == id }?.name ?? "list"
+        perform { try $0.deleteGroup(id) }
+        log("List \(name) deleted", icon: "list.bullet")
+    }
+
+    func setGroup(_ id: Int64, people ids: Set<Int64>, member: Bool) {
+        perform { try $0.setGroup(id, people: Array(ids), member: member) }
+        if let name = groups.first(where: { $0.id == id })?.name {
+            let who = ids.count == 1 ? (people.first { $0.id == ids.first }?.displayName ?? "1 person") : "\(ids.count) people"
+            log(member ? "\(who) put on \(name)" : "\(who) taken off \(name)", icon: "list.bullet")
+        }
     }
 
     func merge(_ ids: Set<Int64>) {

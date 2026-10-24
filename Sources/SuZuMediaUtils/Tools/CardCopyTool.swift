@@ -122,8 +122,8 @@ struct CardCopyTool: View {
                 VStack(alignment: .leading, spacing: 8) {
                     SectionLabel("Destination")
                     DestinationBox(title: splitVideos ? "Photos" : "Photos & videos", url: Binding(get: { destination }, set: { destinationPath = $0?.path ?? "" }))
-                    Toggle("Videos go to their own folder", isOn: $splitVideos)
-                        .help("Photos to one place, videos to another (an editor's drive, say); a clip's XML goes with the clip")
+                    LabeledSwitch("Videos go to their own folder", isOn: $splitVideos,
+                                  help: "Photos to one place, videos to another (an editor's drive, say); a clip's XML goes with the clip")
                     if splitVideos {
                         DestinationBox(title: "Videos", url: Binding(get: { videoDestinationPath.isEmpty ? nil : URL(fileURLWithPath: videoDestinationPath, isDirectory: true) },
                                                                  set: { videoDestinationPath = $0?.path ?? "" }))
@@ -133,16 +133,14 @@ struct CardCopyTool: View {
                 }
                 VStack(alignment: .leading, spacing: 10) {
                     SectionLabel("Options")
-                    Toggle("Verify each copy", isOn: $verify).help("Reads every copy back and compares its SHA-256 with the original")
-                    Toggle("A folder per hand-over", isOn: $perHandover).help("“2026-10-24 14.05” inside the card's folder, so each hand-over is its own session")
-                    Toggle("Keep the card's folders", isOn: $keepLayout).help("DCIM/100CANON/… as on the card, instead of files side by side")
+                    LabeledSwitch("Verify each copy", isOn: $verify, help: "Reads every copy back and compares its SHA-256 with the original")
+                    LabeledSwitch("A folder per hand-over", isOn: $perHandover, help: "“2026-10-24 14.05” inside the card's folder, so each hand-over is its own session")
+                    LabeledSwitch("Keep the card's folders", isOn: $keepLayout, help: "DCIM/100CANON/… as on the card, instead of files side by side")
                     if let p = faces.currentProject {
-                        Toggle("Add the card's folder to “\(faces.projectName)”", isOn: $addToProject)
-                            .help("Faces are found and names given as the files land")
+                        LabeledSwitch("Add the card's folder to “\(faces.projectName)”", isOn: $addToProject, help: "Faces are found and names given as the files land")
                             .id(p)
                     }
                 }
-                .toggleStyle(.switch).controlSize(.small)
                 Text("Cards are known by the serial the camera wrote when it formatted them, so the next hand-over copies only what was shot since — however the earlier copies were moved or edited. Files already in the library are matched by contents and never copied twice.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     .padding(12)

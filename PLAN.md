@@ -494,3 +494,32 @@ and after every feature below; same 92 people.
   column, Copy New Files from All. Batch Export: cull switches and count live in the bottom bar.
 - Found while verifying: a `Text + Text` with `.fixedSize` inside the People banner blanked the whole
   `NavigationSplitView` on macOS 15; plain `Text`s in a `VStack` instead.
+
+## v0.8.1 (2026-10-25): lists and pins; redesign follow-ups
+- Lists of people (`FaceLibrary/PersonGroups.swift`, migration `v13-lists-pins`): `personGroup`, `personGroupMember`,
+  `person.pinnedAt`. `PersonSummary` carries `pinned` and `groups`; `PersonGroupSummary` is read in the tick and the
+  two tables join the region observation. Routes `FaceRoute.pinned` / `.group(id)` (keys `pinned`, `group.<id>`);
+  `PeopleGrid(scope:)`; `ListsMenu` is the shared "Add to List" menu (lists ticked, New List…, suggested names);
+  new/rename-list alerts live on `AppShell` (`askNewGroup` / `askRenameGroup`). `PersonNames.merge` moves lists and the
+  pin onto the survivor. Not synced to the team (local to the Mac, like marks).
+- People grid: the name field is always present again (the dashed "Add name" is the empty field), so a click lands in
+  it directly; tiles are top-aligned so a list line under one doesn't shift its neighbours.
+- `.focusEffectDisabled()` on the team/project menus and the appearance cards (first-responder ring at launch).
+- `LabeledSwitch` (`App/Chrome.swift`): label left, switch right; used by Copy from Cards' options column.
+- Settings › Watermarks: the fields column is a fixed-height scroll view, so Banner no longer resizes the window;
+  banner Opacity/Margin sit side by side.
+- Edit & Export (was Batch Export) as a photo editor. `MediaKit/EditRecipe.swift`: `Adjustments` (light, colour,
+  detail, quarter turns, flips) on the recipe and, per photo, on `CropPlacements.Edit`; `FocusHint.rect` /
+  `Edit.rect` is a crop drawn by hand in any shape. `EditPipeline.apply` = orient → tone (auto + adjust) → level →
+  crop → resize → watermark; `previewLongSide` scales the cropped photo to the screen before the watermark so previews
+  are sharp at any zoom. `EditPreview`: view zoom/pan (⌘+ ⌘− ⌘0 ⌘1, ⌥-scroll, pinch, Space-drag via `EventCatcher`'s
+  local event monitor), renders at `renderLongSide` screen pixels (detail decode up to 5000 px when zoomed or
+  cropped tight), crop tool (C) with handles / move / rotate-outside / straighten line, live level, Zoom and Level
+  buttons with fixed-width labels so their popovers stay put. `EditControls`: Light/Colour/Detail/Orientation sliders
+  (`AdjustSlider`), `Look` presets, "All photos | This photo only" (`photo`/`photoCount`, reported by the preview's
+  `shown` binding). Settings › Watermarks: list the full pane height, bigger preview.
+- Tone curve (`Adjustments.curve`, five outputs for CIToneCurveAdjust's fixed inputs) and HSL (`HSLAdjust`, applied
+  as a 32³ `CIColorCubeWithColorSpace` cube built in `EditPipeline.hslCube`, cached by value). `UserLooks` saves
+  looks in UserDefaults ("looks"); `EditHistory` registers recipe and per-photo edit snapshots with the window's
+  UndoManager, coalescing changes of one kind within 0.8 s (a slider drag is one step).
+

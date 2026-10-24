@@ -141,6 +141,8 @@ struct AppearanceOption: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // The selected card is its own highlight; the first-responder ring on top of it looks like a glitch.
+        .focusEffectDisabled()
         .accessibilityLabel(appearance.title)
         .accessibilityAddTraits(selected ? .isSelected : [])
     }

@@ -9,10 +9,12 @@ enum AppRoute: Hashable {
     case faces(FaceRoute)
     case tool(ToolRoute)
 
-    /// "overview" | "files" | "people" | "unassigned" | "search" | "rules" | "album.<id>" | "source.<id>" | "tool.<name>".
+    /// "overview" | "files" | "people" | "toname" | "pinned" | "unassigned" | "search" | "rules" | "album.<id>" | "group.<id>" |
+    /// "source.<id>" | "tool.<name>".
     init?(key r: String) {
         if r.hasPrefix("album."), let id = Int64(r.dropFirst(6)) { self = .faces(.album(id)); return }
         if r.hasPrefix("source."), let id = Int64(r.dropFirst(7)) { self = .faces(.source(id)); return }
+        if r.hasPrefix("group."), let id = Int64(r.dropFirst(6)) { self = .faces(.group(id)); return }
         if r.hasPrefix("tool."), let t = ToolRoute(rawValue: String(r.dropFirst(5))) { self = .tool(t); return }
         switch r {
         case "overview": self = .overview
@@ -21,6 +23,7 @@ enum AppRoute: Hashable {
         case "rules": self = .faces(.rules)
         case "unassigned": self = .faces(.unassigned)
         case "toname": self = .faces(.toName)
+        case "pinned": self = .faces(.pinned)
         case "people": self = .faces(.people)
         default: return nil
         }
@@ -32,6 +35,8 @@ enum AppRoute: Hashable {
         case .files: "files"
         case .faces(.people): "people"
         case .faces(.toName): "toname"
+        case .faces(.pinned): "pinned"
+        case .faces(.group(let id)): "group.\(id)"
         case .faces(.unassigned): "unassigned"
         case .faces(.search): "search"
         case .faces(.rules): "rules"
@@ -50,6 +55,8 @@ enum AppRoute: Hashable {
 struct AppShell: View {
     @State private var route: AppRoute? = AppShell.startRoute
     @State private var path = NavigationPath()
+    /// The name being typed for a new or renamed list.
+    @State private var listName = ""
     @EnvironmentObject var faces: FaceGroupingModel
     @Environment(\.openWindow) private var openWindow
 
@@ -93,7 +100,8 @@ struct AppShell: View {
         // Another project: a person, album or folder page from the old one would show the wrong files.
         .onChange(of: faces.currentProject) {
             path = NavigationPath()
-            if case .faces(let r) = route, r != .people, r != .toName, r != .unassigned, r != .search, r != .rules { route = .faces(.people) }
+            if case .faces(let r) = route, r != .people, r != .toName, r != .pinned, r != .unassigned, r != .search, r != .rules,
+               !{ if case .group = r { true } else { false } }() { route = .faces(.people) }
         }
         // SUZU_START_EDIT=/a.jpg:/b.jpg (testing): open those photos in the Edit & Export window at once.
         // SUZU_START_PERSON=<id> (testing): open that person's page.
@@ -114,6 +122,20 @@ struct AppShell: View {
         .sheet(isPresented: $faces.askNewProject) { NewProjectSheet() }
         .sheet(isPresented: $faces.askShareTeam) { ShareTeamSheet() }
         .sheet(isPresented: $faces.askJoinTeam) { JoinTeamSheet() }
+        .alert("New List", isPresented: Binding(get: { faces.askNewGroup != nil }, set: { if !$0 { faces.askNewGroup = nil } })) {
+            TextField("Name", text: $listName, prompt: Text("Cast, Sponsors, VIP…"))
+            Button("Create") { faces.createGroup(listName, people: faces.askNewGroup ?? []); listName = "" }
+            Button("Cancel", role: .cancel) { listName = "" }
+        } message: {
+            let n = faces.askNewGroup?.count ?? 0
+            Text(n == 0 ? "A list of people to find again among hundreds." : "\(n == 1 ? "The selected person goes" : "The \(n) selected people go") on the new list.")
+        }
+        .alert("Rename List", isPresented: Binding(get: { faces.askRenameGroup != nil }, set: { if !$0 { faces.askRenameGroup = nil } })) {
+            TextField("Name", text: $listName)
+            Button("Rename") { if let g = faces.askRenameGroup { faces.renameGroup(g.id, to: listName) }; listName = "" }
+            Button("Cancel", role: .cancel) { listName = "" }
+        }
+        .onChange(of: faces.askRenameGroup) { if let g = faces.askRenameGroup { listName = g.name } }
     }
 }
 

@@ -143,6 +143,29 @@ final class SafetyTests: XCTestCase {
         }
     }
 
+    // MARK: - Lists and pins
+
+    func testListsAndPinsSurviveAMerge() throws {
+        let an = try person("An"), twin = try person(nil), other = try person("Bình")
+        try store.db.write { db in
+            let cast = try PersonGroups.create("Cast", db: db)
+            XCTAssertEqual(try PersonGroups.create(" cast ", db: db), cast, "one list per name, any case")
+            let vip = try PersonGroups.create("VIP", db: db)
+            try PersonGroups.set(cast, people: [twin, other], member: true, db: db)
+            try PersonGroups.set(vip, people: [an], member: true, db: db)
+            try PersonGroups.pin([twin], true, db: db)
+            try PersonNames.merge([twin], into: an, db: db)
+            let lists = try Int64.fetchAll(db, sql: "SELECT groupId FROM personGroupMember WHERE personId = ? ORDER BY groupId", arguments: [an])
+            XCTAssertEqual(lists, [cast, vip], "the survivor keeps both people's lists")
+            XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM personGroupMember WHERE personId = ?", arguments: [twin]), 0)
+            XCTAssertNotNil(try Double.fetchOne(db, sql: "SELECT pinnedAt FROM person WHERE id = ?", arguments: [an]), "and the pin")
+            try PersonGroups.pin([an], false, db: db)
+            XCTAssertNil(try Double.fetchOne(db, sql: "SELECT pinnedAt FROM person WHERE id = ?", arguments: [an]) ?? nil)
+            try PersonGroups.delete(cast, db: db)
+            XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM personGroupMember WHERE personId = ?", arguments: [other]), 0, "members go with the list")
+        }
+    }
+
     func testDuplicateNamesAreMergedWithTheirRulesAndAlbums() throws {
         let photo = try makeFile("a.jpg")
         scan()

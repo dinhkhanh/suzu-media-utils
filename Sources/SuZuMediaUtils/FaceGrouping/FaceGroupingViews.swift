@@ -6,6 +6,10 @@ enum FaceRoute: Hashable {
     case people
     /// The people grid showing only the unnamed, for a naming run.
     case toName
+    /// Pinned people only.
+    case pinned
+    /// One list of people (cast, sponsors…).
+    case group(Int64)
     case unassigned
     case search
     case album(Int64)
@@ -32,6 +36,8 @@ struct FaceGroupingDetail: View {
                 switch route {
                 case .people: PeopleGrid(path: $path)
                 case .toName: PeopleGrid(path: $path, filter: .unnamed).id("toName")
+                case .pinned: PeopleGrid(path: $path, scope: .pinned).id("pinned")
+                case .group(let id): PeopleGrid(path: $path, scope: .group(id)).id("group.\(id)")
                 case .unassigned: UnassignedView()
                 case .search: SearchView(albumId: nil)
                 case .album(let id): SearchView(albumId: id)
@@ -56,6 +62,7 @@ struct FaceGroupingSidebar: View {
     @EnvironmentObject var model: FaceGroupingModel
     @AppStorage("sidebar.folders") private var foldersOpen = false
     @AppStorage("sidebar.known") private var knownOpen = false
+    @AppStorage("sidebar.lists") private var listsOpen = true
 
     /// The open project's albums (all of them in "All Projects").
     var albums: [SmartAlbum] { model.albums.filter { model.currentProject == nil || $0.projectId == model.currentProject } }
@@ -70,6 +77,10 @@ struct FaceGroupingSidebar: View {
                 .badge(Text(unnamed.formatted()).foregroundStyle(unnamed > 0 ? Color.amber : .secondary))
                 .tag(AppRoute.faces(.toName))
                 .help("People without a name yet")
+            Label("Pinned", systemImage: "star")
+                .badge(model.people.count { $0.faces > 0 && $0.pinned })
+                .tag(AppRoute.faces(.pinned))
+                .help("The people who matter tonight; they come first in every grid")
             Label("Unassigned Faces", systemImage: "questionmark.square.dashed")
                 .badge(model.stats.unassignedFaces)
                 .tag(AppRoute.faces(.unassigned))
@@ -78,6 +89,24 @@ struct FaceGroupingSidebar: View {
             Label("Auto Rules", systemImage: "wand.and.stars")
                 .badge(model.rules.filter(\.enabled).count)
                 .tag(AppRoute.faces(.rules))
+        }
+        Section("Lists", isExpanded: $listsOpen) {
+            ForEach(model.groups) { g in
+                Label(g.name, systemImage: "list.bullet")
+                    .badge(model.people.count { $0.faces > 0 && $0.groups.contains(g.id) })
+                    .tag(AppRoute.faces(.group(g.id)))
+                    .contextMenu {
+                        Button("Rename List…") { model.askRenameGroup = g }
+                        Button("Delete List", role: .destructive) { model.deleteGroup(g.id) }
+                    }
+            }
+            Button { model.askNewGroup = [] } label: { Label("New List…", systemImage: "plus") }
+                .buttonStyle(.borderless).foregroundStyle(.secondary)
+                .help("A list of people to find again among hundreds: cast, producers, sponsors, guests, VIP (right-click for the usual names)")
+                .contextMenu {
+                    let missing = PersonGroups.suggestedNames.filter { n in !model.groups.contains { PersonNames.key($0.name) == PersonNames.key(n) } }
+                    ForEach(missing, id: \.self) { n in Button(n) { model.createGroup(n) } }
+                }
         }
         if !albums.isEmpty {
             Section("Smart Albums") {

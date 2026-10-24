@@ -337,6 +337,21 @@ public final class LibraryStore: @unchecked Sendable {
             try db.execute(sql: "ALTER TABLE cardFile ADD COLUMN device TEXT")
             try db.execute(sql: "ALTER TABLE card ADD COLUMN labelAt DOUBLE")
         }
+        m.registerMigration("v13-lists-pins") { db in
+            /// Lists of people (cast, sponsors, VIPs…) and pinned people (see PersonGroups). This Mac's own.
+            try db.alter(table: "person") { t in t.add(column: "pinnedAt", .double) }
+            try db.create(table: "personGroup") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("name", .text).notNull()
+                t.column("sortOrder", .integer).notNull().defaults(to: 0)
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.create(table: "personGroupMember") { t in
+                t.column("groupId", .integer).notNull().references("personGroup", onDelete: .cascade)
+                t.column("personId", .integer).notNull().indexed().references("person", onDelete: .cascade)
+                t.primaryKey(["groupId", "personId"])
+            }
+        }
         return m
     }
 }

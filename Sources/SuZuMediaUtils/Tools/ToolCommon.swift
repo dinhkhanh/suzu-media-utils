@@ -11,7 +11,7 @@ enum ToolRoute: String, Hashable, CaseIterable {
     var title: String {
         switch self {
         case .cards: "Copy from Cards"
-        case .batchExport: "Batch Export"
+        case .batchExport: "Edit & Export"
         case .rename: "Batch Rename"
         case .verify: "Copy Verifier"
         case .video: "Video Tools"

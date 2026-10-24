@@ -26,20 +26,92 @@ struct InspectorSection<Content: View>: View {
     }
 }
 
-/// The edit settings, as an inspector column: look, crop, watermark, size.
+/// The edit settings, as an inspector column: look (light, colour, detail), orientation, crop, watermark, size.
+/// With `photo` and more than one photo, the look can be set for that photo alone.
 struct EditControls: View {
     @Binding var recipe: EditRecipe
     var sections: EditSections = .all
+    /// The photo shown in the preview, for "This photo only".
+    var photo: URL? = nil
+    var photoCount = 1
+    /// Edits the shown photo's own look instead of the export's.
+    @State private var thisPhoto = false
+    @State private var placements = 0
+    @AppStorage("edit.curveOpen") private var curveOpen = false
+    @AppStorage("edit.hslOpen") private var hslOpen = false
+    @ObservedObject private var userLooks = UserLooks.shared
+    @State private var savingLook = false
+    @State private var lookName = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             if sections.contains(.tone) {
                 InspectorSection(title: "Look") {
-                    Toggle("Auto tone & enhance", isOn: $recipe.autoTone)
-                        .help("Exposure, contrast, shadows/highlights, vibrance and skin-tone balance; on automatically with crops and watermarks")
+                    scopePicker
+                    HStack {
+                        Toggle("Auto tone & enhance", isOn: $recipe.autoTone)
+                            .help("Exposure, contrast, shadows/highlights, vibrance and skin-tone balance; on automatically with crops and watermarks")
+                        Spacer()
+                        looksMenu
+                    }
                     if recipe.autoTone { PercentSlider(label: "Strength", value: $recipe.autoToneStrength, range: 0.2...1) }
                     Toggle("Straighten tilted photos", isOn: Binding(get: { recipe.straighten == true }, set: { recipe.straighten = $0 ? true : nil }))
                         .help("Levels photos turned up to 10° off, by their vertical lines (pillars, door frames, screen edges), and trims the corners. Photos without clear lines are left as they are; turn any photo by hand with Level in the preview.")
+                }
+                InspectorSection(title: "Light") {
+                    AdjustSlider("Exposure", value: look.exposure, range: -2...2, unit: " EV")
+                    AdjustSlider("Contrast", value: look.contrast)
+                    AdjustSlider("Highlights", value: look.highlights)
+                    AdjustSlider("Shadows", value: look.shadows)
+                }
+                InspectorSection(title: "Colour") {
+                    AdjustSlider("Temperature", value: look.temperature, help: "Left cooler (bluer), right warmer (more yellow)")
+                    AdjustSlider("Tint", value: look.tint, help: "Left greener, right more magenta")
+                    AdjustSlider("Vibrance", value: look.vibrance, help: "Boosts muted colours and spares skin tones")
+                    AdjustSlider("Saturation", value: look.saturation)
+                    Toggle("Black & white", isOn: look.monochrome)
+                }
+                DisclosureGroup(isExpanded: $curveOpen) {
+                    CurveEditor(points: look.tone).padding(.top, 6)
+                } label: {
+                    HStack {
+                        Text("TONE CURVE").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        Spacer()
+                        if look.wrappedValue.hasCurve { Button("Reset") { look.tone.wrappedValue = Adjustments.straightCurve }.controlSize(.small) }
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture { curveOpen.toggle() }
+                }
+                DisclosureGroup(isExpanded: $hslOpen) {
+                    HSLControls(hsl: look.colours).padding(.top, 6)
+                } label: {
+                    HStack {
+                        Text("HSL · COLOUR BY COLOUR").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        Spacer()
+                        if look.wrappedValue.hsl != nil { Button("Reset") { look.colours.wrappedValue = HSLAdjust() }.controlSize(.small) }
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture { hslOpen.toggle() }
+                }
+                InspectorSection(title: "Detail") {
+                    AdjustSlider("Sharpen", value: look.sharpness, range: 0...1)
+                    AdjustSlider("Clarity", value: look.clarity, range: 0...1, help: "Local contrast: more bite in the midtones")
+                    AdjustSlider("Vignette", value: look.vignette, range: 0...1, help: "Darkens the corners")
+                }
+                InspectorSection(title: "Orientation") {
+                    HStack(spacing: 6) {
+                        Button { turn(-1) } label: { Image(systemName: "rotate.left") }.help("Turn anticlockwise (⌘[)")
+                        Button { turn(1) } label: { Image(systemName: "rotate.right") }.help("Turn clockwise (⌘])")
+                        Button { look.flipHorizontal.wrappedValue.toggle() } label: { Image(systemName: "arrow.left.and.right.righttriangle.left.righttriangle.right") }
+                            .help("Flip left to right")
+                        Button { look.flipVertical.wrappedValue.toggle() } label: { Image(systemName: "arrow.up.and.down.righttriangle.up.righttriangle.down") }
+                            .help("Flip top to bottom")
+                        Spacer()
+                        if look.wrappedValue.changesOrientation {
+                            Button("Reset") { var a = look.wrappedValue; a.turns = 0; a.flipHorizontal = false; a.flipVertical = false; look.wrappedValue = a }
+                                .controlSize(.small)
+                        }
+                    }
                 }
             }
             if sections.contains(.crop) {
@@ -91,6 +163,281 @@ struct EditControls: View {
             }
         }
         .onChange(of: recipe.watermark == nil) { wasNil, isNil in if wasNil && !isNil { recipe.autoTone = true } }
+        // A photo with a look of its own shows it; the others show the export's.
+        .onChange(of: photo, initial: true) { thisPhoto = photo.flatMap { CropPlacements.shared.adjustments(for: $0) } != nil }
+        .onReceive(NotificationCenter.default.publisher(for: CropPlacements.changed)) { _ in placements += 1 }
+    }
+
+    /// "All photos | This photo": whose light, colour and detail the sliders set.
+    @ViewBuilder var scopePicker: some View {
+        if photoCount > 1, let photo {
+            Picker("", selection: Binding(get: { thisPhoto }, set: { setThisPhoto($0, photo) })) {
+                Text("All \(photoCount) photos").tag(false)
+                Text("This photo only").tag(true)
+            }
+            .pickerStyle(.segmented).labelsHidden()
+            .help("Light, colour, detail and orientation for every photo of the export, or for the one shown only")
+            if thisPhoto {
+                Text("This photo keeps its own look, whatever the export's.").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    func setThisPhoto(_ on: Bool, _ photo: URL) {
+        if on {
+            // Starts from the export's look, so the sliders go on from where they are.
+            var a = recipe.look
+            if a.isEmpty { a.exposure = 0 }
+            CropPlacements.shared.set(adjustments: a.isEmpty ? Adjustments() : a, for: photo)
+            if CropPlacements.shared.adjustments(for: photo) == nil { ownLook = Adjustments() }
+        } else {
+            CropPlacements.shared.set(adjustments: nil, for: photo)
+            ownLook = nil
+        }
+        thisPhoto = on
+    }
+
+    /// The shown photo's own look while it has one that is still empty (so the sliders can start from zero).
+    @State private var ownLook: Adjustments?
+
+    /// The look being edited: the shown photo's own, or the export's.
+    var look: Binding<Adjustments> {
+        _ = placements
+        if thisPhoto, let photo {
+            return Binding(get: { CropPlacements.shared.adjustments(for: photo) ?? ownLook ?? recipe.look },
+                           set: { ownLook = $0; CropPlacements.shared.set(adjustments: $0, for: photo) })
+        }
+        return Binding(get: { recipe.look }, set: { recipe.look = $0 })
+    }
+
+    func turn(_ by: Int) {
+        var a = look.wrappedValue
+        a.turns = ((a.turns + by) % 4 + 4) % 4
+        look.wrappedValue = a
+    }
+
+    /// Ready-made and saved looks, saving the sliders as one, copying a look from photo to photo, and back to none.
+    var looksMenu: some View {
+        Menu {
+            Section("Looks") { ForEach(Look.all) { l in Button(l.name) { apply(l) } } }
+            if !userLooks.looks.isEmpty {
+                Section("My Looks") { ForEach(userLooks.looks) { l in Button(l.name) { apply(l.look) } } }
+            }
+            Divider()
+            Button("Save Current Look…") { lookName = ""; savingLook = true }.disabled(!look.wrappedValue.changesPixels)
+            if !userLooks.looks.isEmpty {
+                Menu("Delete Look") { ForEach(userLooks.looks) { l in Button(l.name) { userLooks.delete(l.id) } } }
+            }
+            Divider()
+            Button("Copy Look") { UserLooks.clipboard = look.wrappedValue }.disabled(!look.wrappedValue.changesPixels)
+            Button("Paste Look") { if let c = UserLooks.clipboard { look.wrappedValue = look.wrappedValue.orientationOnly.withLook(of: c) } }
+                .disabled(UserLooks.clipboard == nil)
+            Divider()
+            Button("Reset Light, Colour & Detail") { look.wrappedValue = look.wrappedValue.orientationOnly }
+                .disabled(!look.wrappedValue.changesPixels)
+        } label: {
+            Label("Looks", systemImage: "wand.and.stars")
+        }
+        .menuStyle(.borderlessButton).fixedSize()
+        .help("A starting point: the sliders can be tuned from it. Save your own, or copy a look onto another photo")
+        .alert("Save Look", isPresented: $savingLook) {
+            TextField("Name", text: $lookName, prompt: Text("e.g. Gala warm"))
+            Button("Save") { userLooks.save(Look(name: lookName.isEmpty ? "Look \(userLooks.looks.count + 1)" : lookName, autoTone: recipe.autoTone, adjustments: look.wrappedValue)) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The light, colour, detail, tone curve and HSL sliders as they are now, to pick from Looks in every editing screen.")
+        }
+    }
+
+    func apply(_ l: Look) {
+        look.wrappedValue = look.wrappedValue.orientationOnly.withLook(of: l.adjustments)
+        if l.autoTone { recipe.autoTone = true }
+    }
+}
+
+/// Looks saved by the user, kept in UserDefaults like watermark presets.
+@MainActor
+final class UserLooks: ObservableObject {
+    static let shared = UserLooks()
+    struct Saved: Codable, Identifiable, Hashable {
+        var id = UUID().uuidString
+        var name: String
+        var autoTone = false
+        var adjustments: Adjustments
+        var look: Look { Look(name: name, autoTone: autoTone, adjustments: adjustments) }
+    }
+    @Published private(set) var looks: [Saved] = []
+    /// The look copied with "Copy Look", for "Paste Look" on another photo.
+    static var clipboard: Adjustments?
+
+    init() {
+        looks = UserDefaults.standard.data(forKey: "looks").flatMap { try? JSONDecoder().decode([Saved].self, from: $0) } ?? []
+    }
+
+    func save(_ l: Look) {
+        if let i = looks.firstIndex(where: { $0.name == l.name }) { looks[i].adjustments = l.adjustments; looks[i].autoTone = l.autoTone }
+        else { looks.append(Saved(name: l.name, autoTone: l.autoTone, adjustments: l.adjustments)) }
+        persist()
+    }
+
+    func delete(_ id: String) {
+        looks.removeAll { $0.id == id }
+        persist()
+    }
+
+    private func persist() { UserDefaults.standard.set(try? JSONEncoder().encode(looks), forKey: "looks") }
+}
+
+/// The tone curve: five points at 0, ¼, ½, ¾ and 1 of the input, dragged up or down. Double-click one to put it
+/// back on the line.
+struct CurveEditor: View {
+    @Binding var points: [Double]
+    @State private var dragging: Int?
+
+    var body: some View {
+        GeometryReader { g in
+            let w = g.size.width, h = g.size.height
+            let pt: (Int) -> CGPoint = { i in CGPoint(x: w * CGFloat(i) / 4, y: h * (1 - CGFloat(points[i]))) }
+            ZStack {
+                // Grid, the straight line, the curve.
+                Path { p in
+                    for i in 1...3 {
+                        p.move(to: CGPoint(x: w * CGFloat(i) / 4, y: 0)); p.addLine(to: CGPoint(x: w * CGFloat(i) / 4, y: h))
+                        p.move(to: CGPoint(x: 0, y: h * CGFloat(i) / 4)); p.addLine(to: CGPoint(x: w, y: h * CGFloat(i) / 4))
+                    }
+                }
+                .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                Path { p in p.move(to: CGPoint(x: 0, y: h)); p.addLine(to: CGPoint(x: w, y: 0)) }
+                    .stroke(Color.secondary.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                Path { p in
+                    // The very curve the pipeline applies.
+                    for i in 0...64 {
+                        let x = Double(i) / 64, y = min(1, max(0, EditPipeline.curveValue(points, x)))
+                        let q = CGPoint(x: w * x, y: h * (1 - y))
+                        if i == 0 { p.move(to: q) } else { p.addLine(to: q) }
+                    }
+                }
+                .stroke(Color.accent, lineWidth: 2)
+                ForEach(0..<5, id: \.self) { i in
+                    Circle().fill(Color.accent).frame(width: 9, height: 9)
+                        .overlay(Circle().stroke(.white, lineWidth: 1.5))
+                        .position(pt(i))
+                }
+                Color.clear.contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0)
+                        .onChanged { v in
+                            if dragging == nil { dragging = Int(((v.startLocation.x / w) * 4).rounded()) }
+                            guard let i = dragging, (0...4).contains(i) else { return }
+                            var p = points
+                            p[i] = min(1, max(0, Double(1 - v.location.y / h)))
+                            points = p
+                        }
+                        .onEnded { _ in dragging = nil })
+                    .simultaneousGesture(SpatialTapGesture(count: 2).onEnded { v in
+                        let i = Int(((v.location.x / w) * 4).rounded())
+                        guard (0...4).contains(i) else { return }
+                        var p = points
+                        p[i] = Adjustments.straightCurve[i]
+                        points = p
+                    })
+            }
+        }
+        .frame(height: 150)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.secondary.opacity(0.25)))
+        .help("Drag a point up to brighten those tones, down to darken them: shadows on the left, highlights on the right. Double-click a point to put it back")
+    }
+}
+
+/// Hue, saturation or luminance for each of eight colours.
+struct HSLControls: View {
+    @Binding var hsl: HSLAdjust
+    @AppStorage("edit.hslTab") private var tab = 1
+
+    static let swatches: [Color] = [.red, .orange, .yellow, .green, .cyan, .blue, .purple, .pink]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Picker("", selection: $tab) {
+                Text("Hue").tag(0)
+                Text("Saturation").tag(1)
+                Text("Luminance").tag(2)
+            }
+            .pickerStyle(.segmented).labelsHidden()
+            ForEach(0..<8, id: \.self) { i in
+                HStack(spacing: 8) {
+                    HStack(spacing: 6) {
+                        Circle().fill(Self.swatches[i]).frame(width: 9, height: 9)
+                        Text(HSLAdjust.names[i])
+                    }
+                    .frame(width: 84, alignment: .leading)
+                    .onTapGesture(count: 2) { value(i).wrappedValue = 0 }
+                    Slider(value: value(i), in: -1...1).controlSize(.small)
+                    let v = value(i).wrappedValue
+                    Text(v == 0 ? "0" : String(format: "%+.0f", v * 100)).monospacedDigit().font(.caption)
+                        .foregroundStyle(v == 0 ? .tertiary : .secondary).frame(width: 44, alignment: .trailing)
+                }
+            }
+        }
+        .help("Hue turns a colour towards its neighbours, Saturation makes it stronger or weaker, Luminance lighter or darker. Greys are left alone. Double-click a name to reset")
+    }
+
+    func value(_ i: Int) -> Binding<Double> {
+        Binding(get: {
+            switch tab { case 0: hsl.hue[i]; case 1: hsl.saturation[i]; default: hsl.luminance[i] }
+        }, set: { v in
+            switch tab { case 0: hsl.hue[i] = v; case 1: hsl.saturation[i] = v; default: hsl.luminance[i] = v }
+        })
+    }
+}
+
+/// A named set of adjustments.
+struct Look: Identifiable {
+    let name: String
+    var autoTone = false
+    let adjustments: Adjustments
+    var id: String { name }
+
+    static let all: [Look] = [
+        Look(name: "Natural", autoTone: true, adjustments: { var a = Adjustments(); a.vibrance = 0.15; a.clarity = 0.1; return a }()),
+        Look(name: "Vivid", adjustments: { var a = Adjustments(); a.contrast = 0.25; a.vibrance = 0.45; a.clarity = 0.3; a.sharpness = 0.2; return a }()),
+        Look(name: "Soft", adjustments: { var a = Adjustments(); a.contrast = -0.15; a.highlights = -0.35; a.shadows = 0.25; a.saturation = -0.1; return a }()),
+        Look(name: "Warm", adjustments: { var a = Adjustments(); a.temperature = 0.3; a.vibrance = 0.15; a.shadows = 0.1; return a }()),
+        Look(name: "Cool", adjustments: { var a = Adjustments(); a.temperature = -0.3; a.contrast = 0.1; return a }()),
+        Look(name: "Black & White", adjustments: { var a = Adjustments(); a.monochrome = true; a.contrast = 0.3; a.clarity = 0.35; return a }()),
+        Look(name: "Stage", adjustments: { var a = Adjustments(); a.exposure = 0.3; a.shadows = 0.4; a.highlights = -0.4; a.vibrance = 0.3; a.vignette = 0.25; return a }()),
+    ]
+}
+
+/// A slider centred on zero (or from zero), with its value; double-click the label to put it back to zero.
+struct AdjustSlider: View {
+    let label: String
+    @Binding var value: Double
+    var range: ClosedRange<Double> = -1...1
+    var unit = ""
+    var help: String? = nil
+
+    init(_ label: String, value: Binding<Double>, range: ClosedRange<Double> = -1...1, unit: String = "", help: String? = nil) {
+        self.label = label
+        _value = value
+        self.range = range
+        self.unit = unit
+        self.help = help
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(label).frame(width: 84, alignment: .leading)
+                .onTapGesture(count: 2) { value = 0 }
+                .help(help ?? "Double-click the name to reset")
+            Slider(value: $value, in: range).controlSize(.small)
+            Text(text).monospacedDigit().font(.caption).foregroundStyle(value == 0 ? .tertiary : .secondary).frame(width: 44, alignment: .trailing)
+        }
+    }
+
+    var text: String {
+        if value == 0 { return "0" }
+        return unit.isEmpty ? String(format: "%+.0f", value * 100) : String(format: "%+.1f%@", value, unit)
     }
 }
 
@@ -305,9 +652,9 @@ struct WatermarkFields: View {
                     Text("Height").lineLimit(1).frame(width: 76, alignment: .leading)
                     TextField("", value: bannerPixels, format: .number).textFieldStyle(.roundedBorder).frame(width: 56)
                     Stepper("", value: bannerPixels, in: 20...400).labelsHidden()
-                    Text("px per \(Int(WatermarkSpec.bannerReferenceSide)) px").foregroundStyle(.secondary)
+                    Text("px per \(Int(WatermarkSpec.bannerReferenceSide)) px").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
-                Text("The same height on every photo, measured on the long side. The banner is centred and its sides are trimmed to the photo's width, so make it wider than any photo and keep text and logos in the middle (one too narrow is stretched sideways). Photos taller than wide get the portrait banner.")
+                Text("Same height on every photo (long side). Centred, sides trimmed to the photo's width: make it wider than any photo, content in the middle. Portrait photos get the portrait banner.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Picker("Position", selection: Binding(get: { [.top, .center, .bottom][WatermarkSpec.Position.allCases.firstIndex(of: spec.position)! / 3] },
                                                       set: { spec.position = $0 })) {
@@ -316,8 +663,10 @@ struct WatermarkFields: View {
                     Text("Bottom").tag(WatermarkSpec.Position.bottom)
                 }
                 .pickerStyle(.segmented)
-                CompactSlider(label: "Opacity", value: $spec.opacity, range: 0.15...1)
-                CompactSlider(label: "Margin", value: $spec.margin, range: 0...0.12)
+                HStack(spacing: 12) {
+                    CompactSlider(label: "Opacity", value: $spec.opacity, range: 0.15...1)
+                    CompactSlider(label: "Margin", value: $spec.margin, range: 0...0.12)
+                }
             } else if spec.text != nil {
                 TextField("Text", text: Binding(get: { spec.text ?? "" }, set: { spec.text = $0 }), prompt: Text("© SuZu Media"))
                     .textFieldStyle(.roundedBorder)
@@ -464,7 +813,6 @@ struct WatermarkSettings: View {
                             Label(p.name, systemImage: p.spec.isText ? "textformat" : p.spec.isBanner ? "rectangle.bottomthird.inset.filled" : "photo").tag(p.id)
                         }
                     }
-                    .frame(width: 190)
                     HStack(spacing: 0) {
                         Menu {
                             Button("Logo…") { chooseLogo { add(WatermarkSpec(logoPath: $0), name: (($0 as NSString).lastPathComponent as NSString).deletingPathExtension) } }
@@ -478,6 +826,8 @@ struct WatermarkSettings: View {
                     }
                     .padding(4)
                 }
+                .frame(width: 190)
+                .frame(maxHeight: .infinity)
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.secondary.opacity(0.3)))
                 if let binding = draftBinding {
                     VStack(alignment: .leading, spacing: 10) {
@@ -485,9 +835,13 @@ struct WatermarkSettings: View {
                         HStack(alignment: .top, spacing: 14) {
                             EditPreview(recipe: Binding(get: { previewRecipe }, set: { r in if let w = r.watermark { draft?.spec = w } }),
                                         samples: samples, filmstrip: false, perPhotoCrop: false)
-                                .frame(width: 320, height: 260)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
-                            WatermarkFields(spec: binding.spec).frame(width: 260)
+                            // The fields column is the preview's height whatever the kind, so the pane never grows
+                            // and shrinks as the kind changes.
+                            ScrollView { WatermarkFields(spec: binding.spec).padding(.trailing, 4) }
+                                .frame(width: 264)
+                                .frame(maxHeight: .infinity)
                         }
                     }
                 } else {
@@ -496,18 +850,18 @@ struct WatermarkSettings: View {
                         .frame(maxWidth: .infinity)
                 }
             }
-            .frame(height: 320)
+            .frame(height: 400)
             Divider()
             HStack {
                 Text("Default auto-tone strength for new screens")
                 Slider(value: $strength, in: 0.2...1).frame(width: 180)
                 Text("\(Int(strength * 100))%").monospacedDigit().frame(width: 40)
             }
-            Text("Each editing screen (Batch Export, Copy/Move, delivery rules, web gallery, video stills) remembers its own crop, size and watermark.")
+            Text("Each editing screen (Edit & Export, Copy/Move, delivery rules, web gallery, video stills) remembers its own crop, size and watermark.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(20)
-        .frame(width: 820)
+        .frame(width: 860)
         .onAppear { selection = selection ?? presets.presets.first?.id }
         .onChange(of: selection, initial: true) { draft = presets.preset(selection) }
         .onChange(of: draft) { if let d = draft, d != presets.preset(d.id) { presets.upsert(d) } }

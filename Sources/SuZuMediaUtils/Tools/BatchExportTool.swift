@@ -7,12 +7,12 @@ import SwiftUI
 /// result on the left, source, edits and output in an inspector on the right.
 struct BatchExportTool: View {
     @State private var items: [ToolItem]
-    var title = "Batch Export"
+    var title = "Edit & Export"
     /// The event's session bar on top: a session can be exported on its own. Not for photos opened from the library
     /// (the Edit & Export window), which are exactly the ones asked for.
     var sessionBar = true
     /// `initial`: photos opened from the library (the Edit & Export window).
-    init(initial: [ToolItem] = [], title: String = "Batch Export") {
+    init(initial: [ToolItem] = [], title: String = "Edit & Export") {
         _items = State(initialValue: initial)
         self.title = title
         sessionBar = initial.isEmpty
@@ -26,6 +26,10 @@ struct BatchExportTool: View {
     @AppStorage("batchExport.skipSimilar") private var skipSimilar = false
     @AppStorage("batchExport.skipBlurry") private var skipBlurry = false
     @State private var recipe = EditRecipe()
+    /// The photo in the preview, for "This photo only" in the controls.
+    @State private var shownPhoto: URL?
+    @StateObject private var history = EditHistory()
+    @Environment(\.undoManager) private var undoManager
     @State private var output: URL?
     @State private var suffix = ""
     @State private var folderPerPerson = true
@@ -53,7 +57,7 @@ struct BatchExportTool: View {
         VStack(spacing: 0) {
             if sessionBar { SessionBar(divider: true) }
             HStack(spacing: 0) {
-                EditPreview(recipe: $recipe, samples: items, excluded: $excluded, notes: culled.mapValues(Self.label))
+                EditPreview(recipe: $recipe, samples: items, excluded: $excluded, notes: culled.mapValues(Self.label), shown: $shownPhoto)
                     .frame(minWidth: 260, maxWidth: .infinity)
                 Divider()
                 ScrollView {
@@ -61,7 +65,7 @@ struct BatchExportTool: View {
                         InspectorSection(title: "Photos") {
                             ToolInputView(items: $items, kinds: MediaTypes.photos, mediaKind: .photo, label: "photos")
                         }
-                        EditControls(recipe: $recipe)
+                        EditControls(recipe: $recipe, photo: shownPhoto, photoCount: items.count)
                         Text(fromPeople ? "Crops keep each person's face in frame; names are written into the files."
                                         : "Crops find the faces in each photo (or the most eye-catching area) and keep them in frame.")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -132,8 +136,14 @@ struct BatchExportTool: View {
             }
         }
         .navigationTitle(title)
-        .navigationSubtitle("Auto tone · social crops · watermark · resize")
+        .navigationSubtitle("Light, colour & detail · crop & straighten · watermark · resize")
         .rememberEdits("batchExport", recipe: $recipe)
+        // ⌘Z / ⇧⌘Z (Edit menu) step back through the sliders, crops and looks.
+        .onChange(of: undoManager, initial: true) { history.undoManager = undoManager }
+        .onChange(of: items, initial: true) { history.urls = items.map(\.url) }
+        .onAppear { history.setRecipe = { recipe = $0 } }
+        .onChange(of: recipe) { old, new in history.recipeChanged(from: old, to: new) }
+        .onReceive(NotificationCenter.default.publisher(for: CropPlacements.changed)) { _ in history.editsChanged(recipe: recipe) }
         // Only photos still in the list can be left out.
         .onChange(of: items) { if !excluded.isEmpty { excluded.formIntersection(items) } }
         .task(id: "\(skipSimilar)|\(skipBlurry)|\(items.map(\.url.path).hashValue)") { await check() }
@@ -399,5 +409,77 @@ struct ExistingSheet: View {
         .padding(20)
         .frame(width: 460)
         .onChange(of: existing.id) { all = false }
+    }
+}
+
+
+/// Undo for the editing screen: the recipe (every slider, crop shape, watermark, size) and the photos' own edits
+/// (crops, levels, looks). A slider drag is one step, not one per pixel: changes within a moment of each other
+/// coalesce into the first.
+@MainActor
+final class EditHistory: ObservableObject {
+    struct State {
+        var recipe: EditRecipe
+        /// Each photo's own edit, nil for none, so restoring removes edits made since.
+        var edits: [String: CropPlacements.Edit?]
+    }
+
+    weak var undoManager: UndoManager?
+    var urls: [URL] = [] { didSet { lastEdits = currentEdits() } }
+    var setRecipe: ((EditRecipe) -> Void)?
+    private var lastEdits: [String: CropPlacements.Edit?] = [:]
+    private var lastTime = Date.distantPast
+    private var lastKind = ""
+    /// The recipe an undo is putting back: its own change is not a new step.
+    private var restoring: EditRecipe?
+
+    func currentEdits() -> [String: CropPlacements.Edit?] {
+        let found = CropPlacements.shared.edits(for: urls)
+        return Dictionary(uniqueKeysWithValues: urls.map { ($0.path, found[$0.path]) })
+    }
+
+    func recipeChanged(from old: EditRecipe, to new: EditRecipe) {
+        if let r = restoring, r == new { restoring = nil; return }
+        guard old != new else { return }
+        step(kind: "recipe", before: State(recipe: old, edits: lastEdits))
+    }
+
+    func editsChanged(recipe: EditRecipe) {
+        let now = currentEdits()
+        guard now != lastEdits else { return }
+        let before = lastEdits
+        lastEdits = now
+        if restoring != nil { return }
+        step(kind: "edits", before: State(recipe: recipe, edits: before))
+    }
+
+    /// Registers one undo step unless it continues the last one (the same kind of change, a moment ago).
+    private func step(kind: String, before: State) {
+        let now = Date()
+        defer { lastTime = now; lastKind = kind }
+        if kind == lastKind, now.timeIntervalSince(lastTime) < 0.8, undoManager?.isUndoRegistrationEnabled == true { return }
+        register(before)
+    }
+
+    private func register(_ before: State) {
+        guard let um = undoManager else { return }
+        um.registerUndo(withTarget: self) { h in
+            let now = State(recipe: h.currentRecipe ?? before.recipe, edits: h.currentEdits())
+            h.apply(before)
+            h.register(now)
+        }
+        um.setActionName("Edit")
+        lastKind = ""
+    }
+
+    private var currentRecipe: EditRecipe?
+
+    private func apply(_ s: State) {
+        restoring = s.recipe
+        currentRecipe = s.recipe
+        setRecipe?(s.recipe)
+        lastEdits = s.edits
+        CropPlacements.shared.restore(s.edits)
+        lastTime = .distantPast
     }
 }
