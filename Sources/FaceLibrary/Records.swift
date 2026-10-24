@@ -132,6 +132,8 @@ public struct PersonRecord: Codable, FetchableRecord, MutablePersistableRecord, 
     public var name: String?
     public var createdAt: Date
     public var coverFaceId: Int64?
+    /// When the picture was picked by hand (nil: never, or automatic), seconds since 1970; travels to teammates.
+    public var coverAt: Double?
     /// Stable across Macs (team sync): the same person has the same id everywhere.
     public var uuid: String
     /// When the name was last set, seconds since 1970; a teammate's newer name wins over an older one.

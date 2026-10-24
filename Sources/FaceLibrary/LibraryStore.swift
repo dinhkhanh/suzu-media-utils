@@ -394,6 +394,11 @@ public final class LibraryStore: @unchecked Sendable {
                 t.primaryKey(["teamId", "contentKey"])
             }
         }
+        m.registerMigration("v15-cover-sync") { db in
+            /// When the person's picture was picked (or put back to automatic), so the choice travels to teammates
+            /// and the newest wins.
+            try db.execute(sql: "ALTER TABLE person ADD COLUMN coverAt DOUBLE")
+        }
         return m
     }
 }

@@ -162,6 +162,30 @@ final class SharedFacesTests: XCTestCase {
         XCTAssertEqual(bAgain.rejectedPersonId, bAn)
     }
 
+    func testAPickedPictureTravelsAndSoDoesPuttingItBack() throws {
+        let team = try XCTUnwrap(try a.sync.teams().first)
+        try a.sync.setProcessor(team.id!, thisMac: true)
+        let an = try a.person("An")
+        let (_, f1) = try processed("p1.jpg", person: an, vector: vector(1))
+        let (_, f2) = try processed("p2.jpg", person: an, vector: vector(1))
+        a.engine.peopleChanged([an]); a.settle()
+        let w1 = try waiting("p1.jpg"), w2 = try waiting("p2.jpg")
+        exchange()
+        _ = f1
+        // A picks the second photo's face as An's picture.
+        try a.store.db.write { db in try db.execute(sql: "UPDATE person SET coverFaceId = ?, coverAt = ? WHERE id = ?", arguments: [f2, 1_700_000_100, an]) }
+        exchange()
+        let bAn = try XCTUnwrap(try b.personId(named: "An"))
+        let bf2 = try faces(b, media: w2)[0]
+        XCTAssertEqual(try b.store.db.read { db in try Int64?.fetchOne(db, sql: "SELECT coverFaceId FROM person WHERE id = ?", arguments: [bAn]) } ?? nil, bf2.id,
+                       "B shows the same face as An's picture")
+        _ = w1
+        // Back to automatic on A: B follows; an older pick doesn't override.
+        try a.store.db.write { db in try db.execute(sql: "UPDATE person SET coverFaceId = NULL, coverAt = ? WHERE id = ?", arguments: [1_700_000_200, an]) }
+        exchange()
+        XCTAssertNil(try b.store.db.read { db in try Int64?.fetchOne(db, sql: "SELECT coverFaceId FROM person WHERE id = ?", arguments: [bAn]) } ?? nil)
+    }
+
     func testWithoutAChosenMacEveryoneProcessesAndNothingIsPublished() throws {
         let an = try a.person("An")
         try processed("p1.jpg", person: an, vector: vector(1))

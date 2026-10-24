@@ -481,6 +481,22 @@ public final class TeamSync: @unchecked Sendable {
         // Faces the user moved or rejected here, for the Mac that does the processing (and everyone else).
         let (faceOps, edited) = try faceEditOps()
         ops += faceOps
+        // People's pictures picked by hand (by the face's file and position, the same on every Mac).
+        for r in try store.db.read({ db in
+            try Row.fetchAll(db, sql: """
+                SELECT p.uuid, p.coverAt, m.contentKey, (SELECT COUNT(*) FROM face g WHERE g.mediaId = f.mediaId AND g.id < f.id) AS idx
+                FROM person p LEFT JOIN face f ON f.id = p.coverFaceId LEFT JOIN media m ON m.id = f.mediaId
+                WHERE p.coverAt IS NOT NULL
+                """)
+        }) {
+            let uuid: String = r["uuid"], at: Double = r["coverAt"]
+            guard state["pub:cover:\(uuid)"] != "\(at)" else { continue }
+            var op = Op(t: "cover", at: at, uuid: uuid)
+            op.key = r["contentKey"]
+            if op.key != nil { op.index = r["idx"] }
+            ops.append(op)
+            updates["pub:cover:\(uuid)"] = "\(at)"
+        }
         var wrote = false
         if !ops.isEmpty {
             try append(ops, to: Self.devicesURL(team.url).appendingPathComponent("\(deviceId).jsonl"))
@@ -853,6 +869,22 @@ public final class TeamSync: @unchecked Sendable {
 
         case "face":
             return try applyFaceOp(op, team: team, db: db)
+
+        case "cover":
+            // A person's picture picked on another Mac: the same face here, when this Mac has that file.
+            guard let uuid = op.uuid, let pid = try Self.resolve(uuid, db: db) else { return .deferred }
+            let current = try Double?.fetchOne(db, sql: "SELECT coverAt FROM person WHERE id = ?", arguments: [pid]) ?? nil
+            guard op.at > (current ?? 0) else { return .ignored }
+            guard let key = op.key, let index = op.index else {
+                try db.execute(sql: "UPDATE person SET coverFaceId = NULL, coverAt = ? WHERE id = ?", arguments: [op.at, pid])
+                return .applied(people: [], remote: [])
+            }
+            guard let faceId = try Int64.fetchOne(db, sql: """
+                SELECT f.id FROM face f JOIN media m ON m.id = f.mediaId WHERE m.contentKey = ? AND m.duplicateOf IS NULL
+                  AND (SELECT COUNT(*) FROM face g WHERE g.mediaId = f.mediaId AND g.id < f.id) = ? LIMIT 1
+                """, arguments: [key, index]) else { return .deferred }
+            try db.execute(sql: "UPDATE person SET coverFaceId = ?, coverAt = ? WHERE id = ?", arguments: [faceId, op.at, pid])
+            return .applied(people: [], remote: [])
 
         case "summary":
             guard let uuid = op.uuid, let c = op.centroid, let data = Data(base64Encoded: c), let n = op.count else { return .ignored }

@@ -609,8 +609,11 @@ Mac processes its own files"; the choice lives in `team.json` (`processor`), rea
 - Tests: `SharedFacesTests` (faces appear on the other Mac whether the file or the record came first, with the same
   people by stable id and the crops; grouping changes follow; a rejection on the laptop reaches the processing
   Mac and holds; without a chosen Mac nothing is published and the queues stay empty).
-- Not done: `coverFaceId` picks don't travel; a Mac that was the processor keeps its own faces when the role moves
-  (the new processor's records are taken only for files still waiting).
+- A person's picture picked by hand travels too: `person.coverAt` (migration v15), a `cover` op in the log naming
+  the face by its file's content key and position (or none: back to automatic), newest wins, deferred until the
+  Mac has that file.
+- Not done: a Mac that was the processor keeps its own faces when the role moves (the new processor's records are
+  taken only for files still waiting).
 
 **Exemplars travel with team summaries.** `summaries/<id>.json` entries gain `e`: up to 8 exemplar faces as
 Float16 rows (`Vector.encodeHalfRows`), kept in `personRemote.exemplars` and added to the person's exemplars on
