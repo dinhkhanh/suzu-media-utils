@@ -244,23 +244,43 @@ public enum CardCopier {
             }
             guard let key = ContentKey.compute(identity.volume.appendingPathComponent(f.relPath), size: f.size) else { plan.new.append(f); continue }
             plan.keys[f.relPath] = key
-            let (ledger, elsewhere, library): (String?, Bool, String?) = try store.db.read { db in
-                let l = try Row.fetchOne(db, sql: "SELECT copiedTo, device FROM cardFile WHERE contentKey = ? ORDER BY copiedAt DESC LIMIT 1", arguments: [key])
-                let m = try String.fetchOne(db, sql: "SELECT path FROM media WHERE contentKey = ? LIMIT 1", arguments: [key])
-                return (l.map { ($0["copiedTo"] as String?) ?? "" }, (l?["device"] as String?) != nil, m)
-            }
-            if let ledger {
-                plan.copiedBefore.append(f)
-                if elsewhere { plan.copiedElsewhere += 1 }
-                plan.matched[f] = (key, ledger.isEmpty ? nil : ledger)
-            } else if let library {
-                plan.inLibrary.append(f)
-                plan.matched[f] = (key, library)
-            } else {
-                plan.new.append(f)
-            }
+            try place(f, key: key, in: &plan, store: store)
         }
         return plan
+    }
+
+    /// Files from the plan's "new" list that the ledger or the library know by now, moved where they belong: from
+    /// the fingerprints the plan already read, so nothing is read from the card again. For when teammates' copies
+    /// arrived after the plan was made.
+    public static func refine(_ plan: Plan, store: LibraryStore) throws -> Plan {
+        var p = plan
+        let candidates = p.new
+        p.new = []
+        for f in candidates {
+            guard let key = p.keys[f.relPath] else { p.new.append(f); continue }
+            try place(f, key: key, in: &p, store: store)
+        }
+        return p
+    }
+
+    /// Puts a fingerprinted file in the plan: copied before (here or on a teammate's Mac), already in the library,
+    /// or new.
+    static func place(_ f: File, key: String, in plan: inout Plan, store: LibraryStore) throws {
+        let (ledger, elsewhere, library): (String?, Bool, String?) = try store.db.read { db in
+            let l = try Row.fetchOne(db, sql: "SELECT copiedTo, device FROM cardFile WHERE contentKey = ? ORDER BY copiedAt DESC LIMIT 1", arguments: [key])
+            let m = try String.fetchOne(db, sql: "SELECT path FROM media WHERE contentKey = ? LIMIT 1", arguments: [key])
+            return (l.map { ($0["copiedTo"] as String?) ?? "" }, (l?["device"] as String?) != nil, m)
+        }
+        if let ledger {
+            plan.copiedBefore.append(f)
+            if elsewhere { plan.copiedElsewhere += 1 }
+            plan.matched[f] = (key, ledger.isEmpty ? nil : ledger)
+        } else if let library {
+            plan.inLibrary.append(f)
+            plan.matched[f] = (key, library)
+        } else {
+            plan.new.append(f)
+        }
     }
 
     /// The card's row, made on first sight; the volume name and camera are filled in whenever they are known.

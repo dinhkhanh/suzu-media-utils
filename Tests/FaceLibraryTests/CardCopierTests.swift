@@ -75,6 +75,28 @@ final class CardCopierTests: XCTestCase {
         }
     }
 
+    /// A teammate's copy that arrives after the plan was made is found by checking the plan again from the
+    /// fingerprints it already holds, without reading the card.
+    func testAPlanIsRefinedFromTheLedgerWithoutReadingTheCardAgain() throws {
+        try shoot("IMG_0001.JPG", seed: 1)
+        try shoot("IMG_0002.JPG", seed: 2)
+        let p = try plan()
+        XCTAssertEqual(p.new.map(\.name), ["IMG_0001.JPG", "IMG_0002.JPG"])
+        // The team's ledger says another Mac copied IMG_0002 (same contents, under another name there).
+        let key = try XCTUnwrap(p.keys["DCIM/100CANON/IMG_0002.JPG"])
+        try store.db.write { db in
+            try db.execute(sql: """
+                INSERT INTO cardFile (cardId, relPath, size, mtime, contentKey, copiedAt, copiedTo, device) VALUES (?, 'DCIM/100CANON/DSC_9.JPG', 3000, 0, ?, ?, '/Volumes/NAS/Gala/DSC_9.JPG', 'other-mac')
+                """, arguments: [p.card.id, key, Date()])
+        }
+        try FileManager.default.removeItem(at: card)  // the card is gone: the check must not need it
+        let r = try CardCopier.refine(p, store: store)
+        XCTAssertEqual(r.new.map(\.name), ["IMG_0001.JPG"])
+        XCTAssertEqual(r.copiedBefore.map(\.name), ["IMG_0002.JPG"])
+        XCTAssertEqual(r.copiedElsewhere, 1)
+        XCTAssertEqual(r.matched.count, 1)
+    }
+
     func testOnlyNewFilesAreCopiedAtTheNextHandOver() throws {
         let shot = Date(timeIntervalSince1970: 1_800_000_000)
         try shoot("IMG_0001.JPG", seed: 1, mtime: shot)

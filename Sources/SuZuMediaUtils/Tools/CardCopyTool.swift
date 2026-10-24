@@ -514,8 +514,9 @@ final class CardCopyModel: ObservableObject {
         var error: String?
         /// Unmounted while it was being copied, or after an interrupted copy: kept on screen so the result shows.
         var gone = false
-        /// The ledger changed while the plan was being made: make it again when done.
-        var replan = false
+        /// The ledger changed while the plan was being made: check the new files against it again when done
+        /// (from their fingerprints; the card is not read again).
+        var refineAfter = false
         var id: String { identity.uuid }
     }
 
@@ -525,6 +526,9 @@ final class CardCopyModel: ObservableObject {
     /// Cards with a destination of their own, by volume UUID (this Mac's paths: not part of the team's ledger).
     @Published private(set) var ownDestinations: [String: String] = UserDefaults.standard.dictionary(forKey: "cardCopyOwnDestinations") as? [String: String] ?? [:]
     private var again = false
+    /// Cards whose plan is being made right now (`Card.planning` is what the screen shows, and a card listed a
+    /// moment ago shows the spinner before its plan has even started).
+    private var inFlight: Set<String> = []
     private var observers: [NSObjectProtocol] = []
     private var cancels: [String: Cancel] = [:]
     private var pending: LibraryStore?
@@ -598,7 +602,8 @@ final class CardCopyModel: ObservableObject {
     }
 
     /// The team's ledger, without holding the cards up: one sync pass in the background; if it brought copies
-    /// teammates made, the plans are made again so those files aren't copied twice.
+    /// teammates made, each card's new files are checked against the ledger again (from the fingerprints the plan
+    /// already read, in milliseconds) so those files aren't copied twice.
     func catchUp(_ sync: TeamSync, store: LibraryStore) {
         let before = CardCopier.teammateCopies(store: store)
         sync.syncSoon { [weak self] in
@@ -606,26 +611,42 @@ final class CardCopyModel: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 known = (try? CardCopier.knownCards(store: store)) ?? known
-                for c in cards where !c.copying && !c.gone { plan(c.id, store: store) }
+                for c in cards where !c.copying && !c.gone {
+                    if inFlight.contains(c.id), let i = cards.firstIndex(where: { $0.id == c.id }) { cards[i].refineAfter = true } else { refine(c.id, store: store) }
+                }
             }
         }
     }
 
+    /// Reads the card once: every new file's fingerprint, matched against the ledger and the library. A request
+    /// while that is under way only asks for the ledger check to be redone when it is done.
     func plan(_ id: String, store: LibraryStore) {
         guard let i = cards.firstIndex(where: { $0.id == id }) else { return }
-        if cards[i].planning { cards[i].replan = true; return }
+        if inFlight.contains(id) { cards[i].refineAfter = true; return }
+        inFlight.insert(id)
         cards[i].planning = true
         cards[i].error = nil
         let identity = cards[i].identity
         Task {
             let result = await Task.detached(priority: .userInitiated) { Result { try CardCopier.plan(identity, store: store) } }.value
+            inFlight.remove(id)
             guard let i = cards.firstIndex(where: { $0.id == id }) else { return }
             cards[i].planning = false
             switch result {
             case .success(let p): cards[i].plan = p
             case .failure(let e): cards[i].error = e.localizedDescription
             }
-            if cards[i].replan { cards[i].replan = false; plan(id, store: store) }
+            if cards[i].refineAfter { cards[i].refineAfter = false; refine(id, store: store) }
+        }
+    }
+
+    /// The ledger check again for a planned card, without touching the card.
+    func refine(_ id: String, store: LibraryStore) {
+        guard let i = cards.firstIndex(where: { $0.id == id }), let current = cards[i].plan, !cards[i].copying else { return }
+        Task {
+            let refined = await Task.detached(priority: .userInitiated) { try? CardCopier.refine(current, store: store) }.value
+            guard let refined, let i = cards.firstIndex(where: { $0.id == id }), !cards[i].copying, !inFlight.contains(id) else { return }
+            cards[i].plan = refined
         }
     }
 

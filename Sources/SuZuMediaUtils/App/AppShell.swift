@@ -74,14 +74,19 @@ struct AppShell: View {
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $route) {
-                HomeSidebar()
-                FaceGroupingSidebar()
-                ToolsSidebar()
+            // The team and project boxes sit above the list, not as its top inset: as an inset the list scrolled
+            // under the window toolbar, and the toolbar's scroll-edge hairline was drawn across the project box.
+            VStack(spacing: 0) {
+                SidebarHeader()
+                List(selection: $route) {
+                    HomeSidebar()
+                    FaceGroupingSidebar()
+                    ToolsSidebar()
+                }
+                .listStyle(.sidebar)
+                FaceGroupingStatus()
             }
             .navigationSplitViewColumnWidth(min: 220, ideal: 260)
-            .safeAreaInset(edge: .top) { SidebarHeader() }
-            .safeAreaInset(edge: .bottom) { FaceGroupingStatus() }
             .toolbar { FaceGroupingSidebarToolbar() }
         } detail: {
             NavigationStack(path: $path) {

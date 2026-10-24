@@ -739,3 +739,16 @@ long name at ~40 pt/s on hover with an edge fade, driven by the tile's hover so 
 Editor: Strength slider and Reset All Dials keep their place (disabled / faded) so the dials below don't move.
 
 **Known.** `AutoToneTests.testUserChangesSitOnTopAndComeBackOff` fails on a clean checkout (before this release).
+
+## v0.8.5 (2026-10-25): a card stuck at "Looking at the card…"; the sidebar hairline
+
+**Regression in 0.8.4.** `CardCopyModel.Card.planning` defaults to true (the spinner shows the moment a card is
+listed), and the guard added to `plan()` in 0.8.4 read it as "a plan is running" and returned, so a fresh card's
+plan never started. Plans in flight are now tracked apart from the display state (`inFlight`). A request while
+one runs, and the check after a background sync pass brought teammates' copies, no longer redo the plan (a read of
+1 MB per new file off the card): `CardCopier.refine` moves the plan's new files against the ledger and the
+library from the fingerprints it already holds (`Plan.keys`), in milliseconds, card pulled or not (test).
+
+**Sidebar.** The team and project boxes were the list's top `safeAreaInset`, so the list scrolled under the window
+toolbar and the toolbar's scroll-edge hairline was drawn across the project box. The header, the list
+(`.listStyle(.sidebar)`) and the status pill are now a `VStack` in the sidebar column.
