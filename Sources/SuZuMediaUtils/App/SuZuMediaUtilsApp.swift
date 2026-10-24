@@ -31,6 +31,10 @@ struct SuZuMediaUtilsApp: App {
                 Divider()
                 Button("Add Photo & Video Folder…") { faces.addFolder(kind: .media) }
                     .keyboardShortcut("o")
+                Button("Add Team Folder…") { faces.addFolder(kind: .media, share: .team) }
+                    .disabled(faces.currentTeam == nil)
+                Button("Add Edited Folder…") { faces.addFolder(kind: .media, share: .edited) }
+                    .disabled(faces.currentTeam == nil)
                 Button("Add Known-People Folder…") { faces.addFolder(kind: .reference) }
                 Divider()
                 Button("Share Project with Team…") { faces.askShareTeam = true }

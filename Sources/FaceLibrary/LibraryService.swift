@@ -28,7 +28,9 @@ public final class LibraryService: @unchecked Sendable {
         processor.onReferenceEnrolled = { [teamSync] _ in teamSync.pushSoon() }
         // Shared processing: another Mac may do a team's face work (see SharedFaces).
         processor.processesLocally = { [teamSync] sourceId in teamSync.processesLocally(sourceId: sourceId) }
+        processor.graceFor = { [teamSync] sourceId in teamSync.processingGrace(sourceId: sourceId) }
         teamSync.onRolesChanged = { [weak self] in self?.applyRoles() }
+        teamSync.onSourcesChanged = { [weak self] in self?.reconcileMonitorsSoon() }
         applyRoles()
     }
 
@@ -51,7 +53,8 @@ public final class LibraryService: @unchecked Sendable {
         engine.start()
         processor.enqueuePending()
         teamSync.start()
-        for s in (try? store.db.read { db in try SourceRecord.fetchAll(db) }) ?? [] { startMonitor(s) }
+        for s in (try? store.db.read { db in try SourceRecord.filter(Column("removedAt") == nil).fetchAll(db) }) ?? [] { startMonitor(s) }
+        reconcileMonitorsSoon()  // folders a teammate took out of the team while the app was closed
         let t = DispatchSource.makeTimerSource(queue: maintenanceQueue)
         t.schedule(deadline: .now() + 10, repeating: 10)
         t.setEventHandler { [weak self] in self?.maintain() }
@@ -112,36 +115,113 @@ public final class LibraryService: @unchecked Sendable {
 
     public func monitor(_ sourceId: Int64) -> SourceMonitor? { lock.withLock { monitors[sourceId] } }
 
+    /// Watches what the database says: a folder a teammate shared gets a watcher, one they took out of the team is
+    /// forgotten (its files and faces too, in the background), one whose path changed is watched at the new place.
+    func reconcileMonitorsSoon() { maintenanceQueue.async { [weak self] in self?.reconcileMonitors() } }
+
+    func reconcileMonitors() {
+        guard let sources = try? store.db.read({ db in try SourceRecord.fetchAll(db) }) else { return }
+        for s in sources where s.removedAt != nil {
+            try? removeSource(s.id!)
+        }
+        let live = sources.filter { $0.removedAt == nil }
+        let ids = Set(live.map { $0.id! })
+        for (id, m) in lock.withLock({ monitors }) where !ids.contains(id) {
+            lock.withLock { monitors.removeValue(forKey: id) }
+            m.stop()
+        }
+        for s in live {
+            if let m = lock.withLock({ monitors[s.id!] }) {
+                guard m.root.path != s.path else { continue }
+                lock.withLock { monitors.removeValue(forKey: s.id!) }
+                m.stop()
+                m.queue.sync {}
+            }
+            startMonitor(s)
+        }
+    }
+
     public enum ProjectError: LocalizedError {
         case alreadyAdded(folder: String, project: String?)
         case overlaps(folder: String, other: String, project: String?)
         case noProject
+        case notShared
         public var errorDescription: String? {
             switch self {
             case .alreadyAdded(let f, let p): "“\(f)” is already in \(p.map { "the project “\($0)”" } ?? "the library")."
             case .overlaps(let f, let o, let p):
                 "“\(f)” overlaps “\(o)”\(p.map { " in the project “\($0)”" } ?? ""): a file can only belong to one folder. Add a different folder, or move that one."
             case .noProject: "Choose or create a project first."
+            case .notShared: "Share the project with a team first: team folders and edited folders travel to the team's Macs."
             }
         }
     }
 
     /// Adds a folder. Photo & video folders belong to a project; known-people folders are shared by all projects.
+    /// A team folder or edited folder (`share`) appears on every Mac of the project's team.
     @discardableResult
-    public func addSource(_ url: URL, kind: SourceKind = .media, project: Int64? = nil) throws -> SourceRecord {
+    public func addSource(_ url: URL, kind: SourceKind = .media, project: Int64? = nil, share: SourceShare = .mac) throws -> SourceRecord {
         let path = canonicalPath(url)
         if kind == .media && project == nil { throw ProjectError.noProject }
+        if share != .mac { try requireTeam(project) }
         // The same event folder, renamed or moved in Finder: relink it rather than start over.
         if let old = try Self.offlineSource(matching: path, kind: kind, store: store) {
             try relinkSource(old, to: url)
             if kind == .media, let project { try moveSource(old, to: project) }
+            if share != .mac { try setShare(old, share) }
             if let s = try store.db.read({ db in try SourceRecord.fetchOne(db, key: old) }) { return s }
         }
         try Self.checkNewFolder(path, store: store)
-        var s = SourceRecord(path: path, kind: kind, projectId: kind == .media ? project : nil)
+        var s = SourceRecord(path: path, kind: kind, projectId: kind == .media ? project : nil, share: kind == .media ? share : .mac)
         try store.db.write { db in try s.insert(db) }
         startMonitor(s)
+        if s.share != .mac { teamSync.pushSoon() }
         return s
+    }
+
+    /// A file Copy from Cards just landed in one of the library's folders: registered and queued at once, ahead of
+    /// everything else, to be read from the card while it is still in the slot. The folder scan finds the row
+    /// already there (same size and time) and leaves it alone; a RAW whose JPEG came along is left to the scan,
+    /// which pairs the two. When another Mac does this team's face work, the file is still processed here (its
+    /// faces go to the team and that Mac groups them, see SharedFaces) rather than read back from the share there.
+    public func fileLanded(_ f: CardCopier.Landed) {
+        guard !f.rawWithJPEG else { return }
+        let path = canonicalPath(f.landed)
+        guard let source = (try? store.db.read { db in try SourceRecord.filter(Column("kind") == SourceKind.media.rawValue && Column("removedAt") == nil).fetchAll(db) })?
+            .filter({ path.hasPrefix($0.path + "/") }).max(by: { $0.path.count < $1.path.count }) else { return }
+        let mine = processor.processesLocally?(source.id) ?? true
+        // The time as the share stored it (its precision, not the card's), or the scan would take the file for changed.
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path), let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 else { return }
+        let url = URL(fileURLWithPath: path, isDirectory: false)
+        var m = MediaRecord(sourceId: source.id, path: path, kind: MediaAnalyzer.isVideo(url) ? .video : .photo, size: f.size, mtime: mtime, contentKey: f.contentKey)
+        m.localWork = !mine
+        let id = try? store.db.write { db -> Int64? in
+            try m.insert(db, onConflict: .ignore)
+            // The scan may have registered it first: it is this Mac's work all the same.
+            if !mine { try db.execute(sql: "UPDATE media SET localWork = 1 WHERE path = ? AND status = 'pending'", arguments: [path]) }
+            return try Int64.fetchOne(db, sql: "SELECT id FROM media WHERE path = ? AND status = 'pending' AND duplicateOf IS NULL", arguments: [path])
+        }
+        guard let id = id ?? nil else { return }
+        processor.prefer(f.onCard, for: path)
+        processor.enqueue(id, first: true)
+    }
+
+    func requireTeam(_ project: Int64?) throws {
+        let team = try store.db.read { db in try Int64?.fetchOne(db, sql: "SELECT teamId FROM project WHERE id = ?", arguments: [project]) }
+        guard team ?? nil != nil else { throw ProjectError.notShared }
+    }
+
+    /// Makes a folder the team's, the editing Mac's, or this Mac's own again. The team's Macs follow: they get the
+    /// folder, or drop it if it only came to them through the team.
+    public func setShare(_ sourceId: Int64, _ share: SourceShare) throws {
+        guard let s = try store.db.read({ db in try SourceRecord.fetchOne(db, key: sourceId) }), s.kind == .media, s.share != share else { return }
+        if share != .mac { try requireTeam(s.projectId) }
+        try store.db.write { db in
+            // Kept as this Mac's own from now on: a teammate dropping it later doesn't take it away here.
+            try db.execute(sql: "UPDATE source SET share = ?, shareAt = ?, fromDevice = CASE WHEN ? = 'mac' THEN NULL ELSE fromDevice END WHERE id = ?",
+                           arguments: [share.rawValue, Date().timeIntervalSince1970, share.rawValue, sourceId])
+        }
+        teamSync.pushSoon()
     }
 
     /// Throws when the folder is already in the library, or inside / around one that is (its files would be listed
@@ -205,9 +285,18 @@ public final class LibraryService: @unchecked Sendable {
     /// database stays responsive; call it off the main thread for big folders.
     public func removeSource(_ id: Int64) throws {
         lock.withLock { monitors.removeValue(forKey: id) }?.stop()
+        // A shared folder removed here leaves the team: the teammates' Macs drop it too (those that only had it
+        // through the team). One a teammate already took out of the team (removedAt) just goes.
+        let shared = try store.db.write { db -> Bool in
+            guard let s = try SourceRecord.fetchOne(db, key: id), s.share != .mac, s.removedAt == nil else { return false }
+            try db.execute(sql: "INSERT OR REPLACE INTO sourceGone (uuid, projectId, at) VALUES (?, ?, ?)",
+                           arguments: [s.uuid, s.projectId, Date().timeIntervalSince1970])
+            return true
+        }
         let affected = try Self.deleteSourceContents(id, store: store)
         engine.peopleChanged(affected)
         deleteEmptyPeople()
+        if shared { teamSync.pushSoon() }
     }
 
     /// Deletes a source's media 500 at a time, then the source. Returns the people who lost faces.
@@ -309,13 +398,15 @@ public final class LibraryService: @unchecked Sendable {
     }
 
     static func relinkPaths(_ id: Int64, from old: String, to new: String, store: LibraryStore) throws {
+        try store.db.write { db in try relinkPaths(id, from: old, to: new, db: db) }
+    }
+
+    static func relinkPaths(_ id: Int64, from old: String, to new: String, db: Database) throws {
         let oldPrefix = old + "/"
-        try store.db.write { db in
-            try db.execute(sql: "UPDATE source SET path = ? WHERE id = ?", arguments: [new, id])
-            // substr counts code points from 1 (not Swift characters: "ư" may be two): keep what follows the old path.
-            try db.execute(sql: "UPDATE media SET path = ? || substr(path, ?) WHERE sourceId = ? AND substr(path, 1, ?) = ?",
-                           arguments: [new + "/", oldPrefix.unicodeScalars.count + 1, id, oldPrefix.unicodeScalars.count, oldPrefix])
-        }
+        try db.execute(sql: "UPDATE source SET path = ? WHERE id = ?", arguments: [new, id])
+        // substr counts code points from 1 (not Swift characters: "ư" may be two): keep what follows the old path.
+        try db.execute(sql: "UPDATE media SET path = ? || substr(path, ?) WHERE sourceId = ? AND substr(path, 1, ?) = ?",
+                       arguments: [new + "/", oldPrefix.unicodeScalars.count + 1, id, oldPrefix.unicodeScalars.count, oldPrefix])
     }
 
     /// An offline folder (renamed, moved, or its drive not mounted) whose files are all found under `path`.

@@ -10,6 +10,25 @@ public enum SourceKind: String, Codable, Sendable {
     case reference
 }
 
+/// Who a photo & video folder belongs to in a team (see TeamSync): the team's shared folders and the editing
+/// Mac's folders travel to every Mac of the team; a Mac's own folders stay on it.
+public enum SourceShare: String, Codable, Sendable, CaseIterable {
+    /// Only on this Mac (the default, and every folder of a project that is not shared).
+    case mac
+    /// A folder the whole team works on (the sources on the NAS): on every Mac of the team.
+    case team
+    /// The folder the Mac in charge of editing / filtering / selecting fills: on every Mac of the team.
+    case edited
+
+    public var title: String {
+        switch self {
+        case .mac: "Only on this Mac"
+        case .team: "Team folder"
+        case .edited: "Edited folder"
+        }
+    }
+}
+
 public struct SourceRecord: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Hashable, Sendable {
     public static let databaseTableName = "source"
     public var id: Int64?
@@ -18,9 +37,21 @@ public struct SourceRecord: Codable, FetchableRecord, MutablePersistableRecord, 
     public var addedAt: Date
     /// The event this folder belongs to; nil for known-people folders, which every project shares.
     public var projectId: Int64?
+    /// Stable across Macs (team sync): a shared folder is the same folder on every Mac of its team.
+    public var uuid: String
+    public var share: SourceShare
+    /// When `share` was last set, seconds since 1970 (a teammate's newer choice wins); nil = never shared.
+    public var shareAt: Double?
+    /// The teammate's Mac that shared this folder here; nil = added on this Mac.
+    public var fromDevice: String?
+    /// Set when a teammate took the folder out of the team: this Mac forgets it in the background.
+    public var removedAt: Double?
 
-    public init(path: String, kind: SourceKind = .media, projectId: Int64? = nil) {
+    public init(path: String, kind: SourceKind = .media, projectId: Int64? = nil, share: SourceShare = .mac, uuid: String = SyncIds.new()) {
         self.path = path; self.kind = kind; addedAt = Date(); self.projectId = projectId
+        self.uuid = uuid
+        self.share = share
+        shareAt = share == .mac ? nil : Date().timeIntervalSince1970
     }
     public mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
     public var url: URL { URL(fileURLWithPath: path, isDirectory: true) }
@@ -80,10 +111,16 @@ public struct MediaRecord: Codable, FetchableRecord, MutablePersistableRecord, I
     public var importedFrom: String?
     /// When the thumbnail was written (0: tried, couldn't); nil = not yet.
     public var thumbAt: Double?
+    /// Processed on this Mac even when another Mac does the team's face work: a file this Mac copied off a card
+    /// (read from the card while it is in; the result goes to the team, see SharedFaces).
+    public var localWork = false
+    /// When the library first saw the file, seconds since 1970.
+    public var seenAt: Double?
 
     public init(sourceId: Int64?, path: String, kind: MediaKind, size: Int64, mtime: Double, contentKey: String?) {
         self.sourceId = sourceId; self.path = path; self.kind = kind; self.size = size; self.mtime = mtime
         self.contentKey = contentKey; status = .pending
+        seenAt = Date().timeIntervalSince1970
     }
     public mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
     public var url: URL { URL(fileURLWithPath: path, isDirectory: false) }

@@ -270,6 +270,35 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(again.skippedExisting, 2)
     }
 
+    /// Copies run several at a time; two cameras' 1.jpg for the same person still land as two files (or one is
+    /// skipped), never on top of each other.
+    func testParallelExportKeepsCollidingNamesApart() throws {
+        for i in 0..<6 {
+            try makeFile("cam\(i)/1.jpg", seed: UInt8(i + 1))
+            try makeFile("cam\(i)/2.jpg", seed: UInt8(i + 10))
+        }
+        let m = monitor()
+        m.scan()
+        let an = try newPerson("An")
+        for r in try media() { _ = try addFace(mediaId: r.id!, personId: an) }
+        let exporter = Exporter(store: store)
+        let out = tmp.appendingPathComponent("Out", isDirectory: true)
+        let both = exporter.run(try exporter.plan(personId: an, name: "An", base: out), policy: .keepBoth, workers: 4)
+        XCTAssertEqual(both.done, 12)
+        XCTAssertTrue(both.failed.isEmpty, "\(both.failed)")
+        let names = try FileManager.default.contentsOfDirectory(atPath: out.appendingPathComponent("An").path).sorted()
+        XCTAssertEqual(names.count, 12)
+        var expected: Set<String> = ["1.jpg", "2.jpg"]
+        for n in 2...6 { expected.insert("1 (\(n)).jpg"); expected.insert("2 (\(n)).jpg") }
+        XCTAssertEqual(Set(names), expected)
+        // Skip policy: one of each name is written, the others wait for nobody and are skipped.
+        let out2 = tmp.appendingPathComponent("Out2", isDirectory: true)
+        let skip = exporter.run(try exporter.plan(personId: an, name: "An", base: out2), policy: .skip, workers: 4)
+        XCTAssertEqual(skip.done, 2)
+        XCTAssertEqual(skip.skippedExisting, 10)
+        XCTAssertEqual(skip.handled.count, 12)
+    }
+
     func testMoveToPersonFolderKeepsLibraryInSync() throws {
         try makeFile("1.jpg", seed: 1)
         try makeFile("Bình/1.jpg", seed: 9)  // name collision with different content

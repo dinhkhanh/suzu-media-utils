@@ -59,7 +59,9 @@ struct TeamBar: View {
                     Button(mine ? "✓ This Mac processes faces for the team" : "This Mac processes faces for the team") { model.setProcessor(team, thisMac: true) }
                         .disabled(mine)
                     if let name = team.processorName, !mine {
-                        Text("Processed by \(name) — this Mac only uses the results")
+                        Text("Processed by \(name) — this Mac processes only the cards it copies and sends their faces there")
+                    } else if mine {
+                        Text("Macs copying cards process their own cards and send the faces here to be grouped")
                     }
                     Button(team.processorId == nil ? "✓ Every Mac processes its own files" : "Every Mac processes its own files") { model.setProcessor(team, thisMac: false) }
                         .disabled(team.processorId == nil)
@@ -185,7 +187,7 @@ struct ShareTeamSheet: View {
                             Button("Copy") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(team.folder, forType: .string) }
                             Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: team.folder) }
                         }
-                        Text("They then add their own photo folders to the project. Everyone must be able to open this folder (the same NAS share, or the same Dropbox / iCloud Drive folder).")
+                        Text("Folders you add as Team Folders (the sources on the NAS) and Edited Folders appear on their Macs by themselves; folders only on this Mac stay here. Everyone must be able to open this folder (the same NAS share, or the same Dropbox / iCloud Drive folder).")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(6)
@@ -278,7 +280,7 @@ struct JoinTeamSheet: View {
                     .padding(4)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                Text("The team's projects open here within seconds; add your own photo folders to the one you are shooting. Your photos stay on your Mac; only names, session names and rules are shared.")
+                Text("The team's projects open here within seconds, with the team's folders and the edited folders in them; add any folder of your own to the one you are shooting. Your photos stay where they are; names, session names, rules and the shared folders' places are what travels.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             HStack {

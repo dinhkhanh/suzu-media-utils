@@ -682,3 +682,60 @@ ImageIO straight to 400 px 105–123 ms (it decodes most of the image), to 1500 
 medium-quality scale to 400 px ~2 ms (high: 9 ms), the camera's EXIF thumbnail 0 ms at 160–256 px. So kept
 thumbnails come from the 1500 px decode, and a grid that finds none yet shows the EXIF one at once while the idle
 pass makes the real one.
+
+## v0.8.4 (2026-10-25): everything at once at an event; hybrid processing; three kinds of team folders
+
+**Three kinds of folders in a team (`SourceShare`: mac / team / edited; migration v16).** `source` gains `uuid`
+(stable across Macs), `share`, `shareAt` (newest wins), `fromDevice` (the Mac it came from through the team, nil =
+added here) and `removedAt`. Team and edited folders travel as `folder` ops in the device log (`FolderPayload`:
+the sharer's path, the path relative to the team folder when both are on the same volume, the kind; `deleted` for
+a removal, from `sourceGone`, filled by `LibraryService.removeSource`). Applying (`applyFolderOp`): the project by
+stable id (deferred until known); a known uuid follows the newer kind (out of the team: dropped here when it came
+through the team, kept as this Mac's own when it was added here); an unknown uuid is added at
+`TeamSync.resolvePath` (relative to the team folder first, the sharer's path second, whichever is likelier when
+offline), adopts a per-Mac folder already at that path (two Macs sharing the same folder independently keep the
+smaller uuid), and waits (`.deferred`) while it would overlap another folder. `TeamSync.onSourcesChanged` →
+`LibraryService.reconcileMonitors` starts, restarts (new path) or stops watchers and deletes `removedAt` folders in
+the background. UI: three sidebar sections when the project is in a team, the Files column grouped likewise,
+"In the Team" in the folder menus, File → Add Team Folder… / Add Edited Folder…. Tests in `TeamSyncTests`.
+
+**Cards show while processing.** `CardCopyModel.refresh` ran `syncNow()` before listing volumes: a sync pass
+under load (crops and content keys over the NAS) held the list for seconds and `looking` turned every new mount
+into a flag. Now the cards list at once; `TeamSync.syncSoon(then:)` runs one pass in the background and the
+plans are redone only when it brought copies teammates made (`CardCopier.teammateCopies`).
+
+**Everything at once.** `LibraryStore`: `maximumReaderCount` 12, `PRAGMA synchronous = NORMAL` (WAL; a commit no
+longer fsyncs; consistent through a crash). `Processor`: thumbnail and result in one transaction; `setForeground`
+halves the workers while a `ToolWork` job runs; `enqueue(first:)`. `Exporter.run(workers:)`: copies and edited
+exports a few at a time, destinations reserved under a lock (`Tally`) so colliding names stay apart (test).
+`TeamSync.pull` / `pullFaces` apply a teammate's log in chunks of 200 ops / 100 records, cursor per chunk. Card
+progress throttled (`ProgressThrottle`); Files re-lists on a structural change of the folders, not every tick.
+
+**Faces from the card as each file lands.** The card is pulled the moment its copy ends, so waiting for the scan
+meant the card was gone. `CardCopier.Options.onCopied(Landed)` reports each landed file (path on the share, path
+on the card, size, content key, RAW-with-JPEG flag); `LibraryService.fileLanded` registers the row (the share's
+own mtime, so the scan sees it unchanged; `INSERT OR IGNORE` against a scan that got there first), tells the
+`Processor` to `prefer` the card path, and enqueues it first. `process()` analyses the preferred URL and falls back
+to the library path when the card is gone. The card's folder joins the project before the first file lands. A RAW
+whose JPEG came along is left to the scan, which pairs them. The bytes are still in the file cache from the copy.
+
+**Hybrid processing (migration v17: `media.localWork`, `media.seenAt`).** A copying Mac processes the files it
+copies even when another Mac is the team's processor: `fileLanded` sets `localWork`; `Processor.process` accepts
+`localWork || processesLocally`, and does not call `engine.mediaProcessed` for them (the processor groups).
+`publishFaces` on a non-processor publishes `facePublish` rows of `localWork` files once and drops `faceChange`
+(edits travel as ops); on the processor the `changed` query no longer requires `importedFrom IS NULL`, so files
+taken from copiers are republished once grouped. `take()`: the processor keeps its own work and takes any
+record for a waiting file; everyone else treats the processor's record as authoritative, updating people in place
+when the face count matches (`importedFrom` becomes the processor), replacing otherwise; records taken on the
+processor with ungrouped faces go to `engine.mediaProcessed` after the transaction (`takenToGroup`). The waiting
+loop now runs on the processor too, for fresh files only (`seenAt` within 10 min). `processingGrace(sourceId:)`:
+on the processor, while another Mac's records were read in the last 10 min (`foreignFacesAt`), a fresh file waits
+30 s for a copier's record before being read from the share (`Processor.graceFor`; re-enqueued, not counted).
+Status pill: a copier's own queued files show as processing. Test: `SharedFacesTests`
+`testACopyingMacsOwnWorkReachesTheProcessingMacAndComesBackGrouped`.
+
+**UI.** Person page: header and tabs fixed, grid scrolls. People grid: `MarqueeText` (Chrome.swift) scrolls a
+long name at ~40 pt/s on hover with an edge fade, driven by the tile's hover so the name field keeps the click.
+Editor: Strength slider and Reset All Dials keep their place (disabled / faded) so the dials below don't move.
+
+**Known.** `AutoToneTests.testUserChangesSitOnTopAndComeBackOff` fails on a clean checkout (before this release).

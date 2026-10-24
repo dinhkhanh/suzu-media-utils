@@ -186,6 +186,68 @@ final class SharedFacesTests: XCTestCase {
         XCTAssertNil(try b.store.db.read { db in try Int64?.fetchOne(db, sql: "SELECT coverFaceId FROM person WHERE id = ?", arguments: [bAn]) } ?? nil)
     }
 
+    /// Hybrid: the laptop copying cards processes its own card's files and sends the faces; the Studio takes them
+    /// for the file it has waiting (no read from the share), groups them, and sends the file back with the people;
+    /// the laptop takes that grouping for the very faces it found.
+    func testACopyingMacsOwnWorkReachesTheProcessingMacAndComesBackGrouped() throws {
+        let team = try XCTUnwrap(try a.sync.teams().first)
+        try a.sync.setProcessor(team.id!, thisMac: true)
+        exchange()
+        XCTAssertFalse(b.sync.processesLocally(project: b.project))
+        XCTAssertEqual(a.sync.processingGrace(sourceId: a.source), 0, "nobody is sending yet: the Studio reads fresh files at once")
+        // B processed c1.jpg itself off a card (localWork), nobody assigned; queued for publishing as the processor would be.
+        let (bm, bf) = try b.photo("c1.jpg", person: nil, vector: vector(5))
+        try Data("crop".utf8).write(to: b.store.faceCropURL(bf))
+        try Self.bytes("c1.jpg").write(to: b.root.appendingPathComponent("c1.jpg"))
+        let key = ContentKey.compute(b.root.appendingPathComponent("c1.jpg"), size: 2048)
+        try b.store.db.write { db in
+            try db.execute(sql: "UPDATE media SET contentKey = ?, localWork = 1 WHERE id = ?", arguments: [key, bm])
+            try db.execute(sql: "INSERT OR IGNORE INTO facePublish (mediaId) VALUES (?)", arguments: [bm])
+        }
+        // A's scan found the same file on the share, waiting.
+        let url = a.root.appendingPathComponent("c1.jpg")
+        try Self.bytes("c1.jpg").write(to: url)
+        var am = MediaRecord(sourceId: a.source, path: url.path, kind: .photo, size: 2048, mtime: 0, contentKey: nil)
+        try a.store.db.write { db in try am.insert(db) }
+        exchange()
+        func media(_ mac: TeamSyncTests.Mac, _ id: Int64) throws -> (status: String, from: String?) {
+            try mac.store.db.read { db in
+                let r = try Row.fetchOne(db, sql: "SELECT status, importedFrom FROM media WHERE id = ?", arguments: [id])!
+                return (r["status"], r["importedFrom"])
+            }
+        }
+        let af = try faces(a, media: am.id!)
+        XCTAssertEqual(af.count, 1, "A took B's faces instead of reading the file")
+        XCTAssertEqual(try media(a, am.id!).status, "done")
+        XCTAssertEqual(try media(a, am.id!).from, b.sync.deviceId)
+        XCTAssertNil(af[0].personId)
+        XCTAssertEqual(try Data(contentsOf: a.store.faceCropURL(af[0].id!)), Data("crop".utf8))
+        XCTAssertEqual(a.sync.processingGrace(sourceId: a.source), TeamSync.copierGrace, "a copier is sending: fresh files get a moment")
+        XCTAssertEqual(b.sync.processingGrace(sourceId: b.source), 0, "only the processing Mac waits")
+        // A groups the face (here by hand, as its engine would): An.
+        let an = try a.person("An")
+        try a.store.db.write { db in try db.execute(sql: "UPDATE face SET personId = ?, assignment = 'auto' WHERE id = ?", arguments: [an, af[0].id]) }
+        a.sync.lock.withLock { a.sync.facesPublishedAt = [:] }
+        exchange()
+        let bFaces = try faces(b, media: bm)
+        XCTAssertEqual(bFaces.map(\.id), [bf], "the same face B found, not replaced")
+        XCTAssertEqual(bFaces[0].personId, try b.personId(named: "An"), "with A's grouping")
+        XCTAssertEqual(try media(b, bm).from, a.sync.deviceId, "A's record is the truth for it from here on")
+        XCTAssertEqual(try b.store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM facePublish") }, 0, "B published once and keeps no queue")
+        // A's own work is never overwritten by a copier's record.
+        let (am2, _) = try processed("p9.jpg", person: an, vector: vector(9))
+        let (bm2, _) = try b.photo("p9.jpg", person: nil, vector: vector(9))
+        try Self.bytes("p9.jpg").write(to: b.root.appendingPathComponent("p9.jpg"))
+        try b.store.db.write { db in
+            try db.execute(sql: "UPDATE media SET contentKey = ?, localWork = 1 WHERE id = ?", arguments: [ContentKey.compute(b.root.appendingPathComponent("p9.jpg"), size: 2048), bm2])
+            try db.execute(sql: "INSERT OR IGNORE INTO facePublish (mediaId) VALUES (?)", arguments: [bm2])
+        }
+        exchange()
+        XCTAssertEqual(try faces(a, media: am2)[0].personId, an)
+        XCTAssertNil(try media(a, am2).from)
+        XCTAssertEqual(try faces(b, media: bm2)[0].personId, try b.personId(named: "An"), "and B gets A's grouping of its own faces")
+    }
+
     func testWithoutAChosenMacEveryoneProcessesAndNothingIsPublished() throws {
         let an = try a.person("An")
         try processed("p1.jpg", person: an, vector: vector(1))

@@ -15,6 +15,13 @@ import GRDB
 ///
 /// The role lives in `team.json` (`processor`), set from the team menu; with none set every Mac processes its own
 /// files as before.
+///
+/// Hybrid: a Mac copying cards processes the files it copies itself (`media.localWork`), from the card while it is
+/// still in, and publishes the faces as they are, ungrouped. The processing Mac takes those records for the files
+/// it has waiting (sparing itself the read from the share), groups the faces, and publishes the files again with
+/// the people; every other Mac, the copier included, takes the processing Mac's record as the truth. The
+/// processing Mac gives a fresh file a moment (`processingGrace`) for a copier's record to arrive before reading it
+/// itself, while copiers are sending.
 extension TeamSync {
     public struct Processor: Codable, Sendable, Hashable {
         public var id: String
@@ -32,6 +39,8 @@ extension TeamSync {
     static let faceKeyBatch = 300
     /// A file's record is written again at most this often while its faces keep changing.
     static let faceRepublishInterval: Double = 20
+    /// Records of a teammate's applied per transaction (see pullFaces).
+    static let faceApplyChunk = 100
 
     /// One processed file as published.
     struct MediaPayload: Codable {
@@ -129,6 +138,18 @@ extension TeamSync {
 
     func isProcessor(_ team: TeamRecord) -> Bool { team.processorId == deviceId }
 
+    /// A fresh file of this source waits this long for a copying Mac's record before this Mac reads it from the
+    /// share: only on the team's processing Mac, and only while some other Mac sent face records lately.
+    public static let copierGrace: Double = 30
+    public static let copierRecent: Double = 600
+    public func processingGrace(sourceId: Int64?) -> Double {
+        guard let sourceId else { return 0 }
+        guard let team = try? store.db.read({ db in
+            try TeamRecord.fetchOne(db, sql: "SELECT t.* FROM source s JOIN project p ON p.id = s.projectId JOIN team t ON t.id = p.teamId WHERE s.id = ?", arguments: [sourceId])
+        }), isProcessor(team), let last = lock.withLock({ foreignFacesAt[team.id!] }) else { return 0 }
+        return Date().timeIntervalSince(last) < Self.copierRecent ? Self.copierGrace : 0
+    }
+
     func queueAllForPublishing(_ teamId: Int64) throws {
         try store.db.write { db in
             try db.execute(sql: """
@@ -141,13 +162,14 @@ extension TeamSync {
 
     // MARK: - Publishing what this Mac found
 
-    /// Writes the records of files processed here (and of files whose faces changed since) for the team. Only
-    /// when this Mac is the team's processing Mac; otherwise the queues are just emptied.
+    /// Writes face records for the team. The processing Mac writes the files it processed and those whose faces
+    /// changed since (its own and the ones it took from copying Macs, now grouped). Any other Mac writes, once, the
+    /// files it processed itself off a card (`localWork`); its edits travel as `face` changes instead. With no
+    /// processing Mac nothing is written and the queues are emptied.
     func publishFaces(_ team: TeamRecord) throws -> Bool {
         let teamId = team.id!
-        guard isProcessor(team) else {
-            if try store.db.read({ db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM facePublish")! + Int.fetchOne(db, sql: "SELECT COUNT(*) FROM faceChange")! }) > 0,
-               try teams().allSatisfy({ !isProcessor($0) }) {
+        guard team.processorId != nil else {
+            if try teams().allSatisfy({ $0.processorId == nil }) {
                 try store.db.write { db in
                     try db.execute(sql: "DELETE FROM facePublish")
                     try db.execute(sql: "DELETE FROM faceChange")
@@ -155,27 +177,42 @@ extension TeamSync {
             }
             return false
         }
-        // Which files: the processed ones, plus those of changed faces; this team's projects only, own faces only.
         let now = Date().timeIntervalSince1970
-        let (fresh, changed) = try store.db.read { db -> ([Int64], [Int64]) in
-            (try Int64.fetchAll(db, sql: """
-                SELECT m.id FROM facePublish q JOIN media m ON m.id = q.mediaId JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId
-                WHERE p.teamId = ? AND m.status = 'done' AND m.importedFrom IS NULL ORDER BY m.id LIMIT ?
-                """, arguments: [teamId, Self.facePublishBatch]),
-             try Int64.fetchAll(db, sql: """
-                SELECT DISTINCT m.id FROM faceChange c JOIN face f ON f.id = c.faceId JOIN media m ON m.id = f.mediaId
-                JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId
-                WHERE p.teamId = ? AND m.status = 'done' AND m.importedFrom IS NULL ORDER BY m.id LIMIT ?
-                """, arguments: [teamId, Self.facePublishBatch]))
-        }
-        let published = lock.withLock { facesPublishedAt }
-        let due = changed.filter { now - (published[$0] ?? 0) >= Self.faceRepublishInterval }
-        let ids = Array(Set(fresh + due)).sorted()
-        // Changes to files that aren't this team's (or already published moments ago) wait for a later pass; those
-        // of files no longer here are dropped.
-        try store.db.write { db in
-            try db.execute(sql: "DELETE FROM faceChange WHERE faceId NOT IN (SELECT id FROM face)")
-            try db.execute(sql: "DELETE FROM facePublish WHERE mediaId NOT IN (SELECT id FROM media WHERE status = 'done' AND importedFrom IS NULL)")
+        let ids: [Int64]
+        if isProcessor(team) {
+            let (fresh, changed) = try store.db.read { db -> ([Int64], [Int64]) in
+                (try Int64.fetchAll(db, sql: """
+                    SELECT m.id FROM facePublish q JOIN media m ON m.id = q.mediaId JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId
+                    WHERE p.teamId = ? AND m.status = 'done' AND m.importedFrom IS NULL ORDER BY m.id LIMIT ?
+                    """, arguments: [teamId, Self.facePublishBatch]),
+                 try Int64.fetchAll(db, sql: """
+                    SELECT DISTINCT m.id FROM faceChange c JOIN face f ON f.id = c.faceId JOIN media m ON m.id = f.mediaId
+                    JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId
+                    WHERE p.teamId = ? AND m.status = 'done' ORDER BY m.id LIMIT ?
+                    """, arguments: [teamId, Self.facePublishBatch]))
+            }
+            let published = lock.withLock { facesPublishedAt }
+            let due = changed.filter { now - (published[$0] ?? 0) >= Self.faceRepublishInterval }
+            ids = Array(Set(fresh + due)).sorted()
+            // Changes to files that aren't this team's (or already published moments ago) wait for a later pass;
+            // those of files no longer here are dropped.
+            try store.db.write { db in
+                try db.execute(sql: "DELETE FROM faceChange WHERE faceId NOT IN (SELECT id FROM face)")
+                try db.execute(sql: "DELETE FROM facePublish WHERE mediaId NOT IN (SELECT id FROM media WHERE status = 'done' AND importedFrom IS NULL)")
+            }
+        } else {
+            // A copying Mac: the cards' files it processed, as they are; the processing Mac groups them.
+            ids = try store.db.read { db in
+                try Int64.fetchAll(db, sql: """
+                    SELECT m.id FROM facePublish q JOIN media m ON m.id = q.mediaId JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId
+                    WHERE p.teamId = ? AND m.status = 'done' AND m.importedFrom IS NULL AND m.localWork ORDER BY m.id LIMIT ?
+                    """, arguments: [teamId, Self.facePublishBatch])
+            }
+            try store.db.write { db in
+                let mine = "SELECT m.id FROM media m JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId WHERE p.teamId = \(teamId)"
+                try db.execute(sql: "DELETE FROM faceChange WHERE faceId IN (SELECT id FROM face WHERE mediaId IN (\(mine)))")
+                try db.execute(sql: "DELETE FROM facePublish WHERE mediaId IN (\(mine) AND NOT (m.status = 'done' AND m.importedFrom IS NULL AND m.localWork))")
+            }
         }
         guard !ids.isEmpty else { return false }
 
@@ -317,35 +354,51 @@ extension TeamSync {
                 try h.seek(toOffset: UInt64(cursor))
                 let data = try h.readToEnd() ?? Data()
                 guard let lastNewline = data.lastIndex(of: 0x0A) else { continue }
+                lock.withLock { foreignFacesAt[teamId] = Date() }
                 let complete = data[data.startIndex...lastNewline]
                 var offset = cursor
                 let decoder = JSONDecoder()
-                try store.db.write { db in
-                    for line in complete.split(separator: 0x0A, omittingEmptySubsequences: false) {
-                        let length = line.count
-                        defer { offset += length + 1 }
-                        guard !line.isEmpty, let payload = try? decoder.decode(MediaPayload.self, from: line) else { continue }
-                        try db.execute(sql: """
-                            INSERT OR REPLACE INTO faceIndex (teamId, contentKey, deviceId, file, offset, length) VALUES (?, ?, ?, ?, ?, ?)
-                            """, arguments: [teamId, payload.key, device, name, offset, length])
-                        affected.formUnion(try take(payload, from: device, team: team, db: db))
+                // A short transaction per chunk of records, the cursor moved with each: a backlog of thousands
+                // (joining, catching up) never holds the writer for seconds, so a card copy or an export landing
+                // files at the same time keeps recording them.
+                let lines = complete.split(separator: 0x0A, omittingEmptySubsequences: false)
+                for chunk in stride(from: 0, to: lines.count, by: Self.faceApplyChunk).map({ lines[$0..<min($0 + Self.faceApplyChunk, lines.count)] }) {
+                    try store.db.write { db in
+                        for line in chunk {
+                            let length = line.count
+                            defer { offset += length + 1 }
+                            guard !line.isEmpty, let payload = try? decoder.decode(MediaPayload.self, from: line) else { continue }
+                            try db.execute(sql: """
+                                INSERT OR REPLACE INTO faceIndex (teamId, contentKey, deviceId, file, offset, length) VALUES (?, ?, ?, ?, ?, ?)
+                                """, arguments: [teamId, payload.key, device, name, offset, length])
+                            affected.formUnion(try take(payload, from: device, team: team, db: db))
+                        }
+                        try db.execute(sql: "INSERT OR REPLACE INTO syncState (teamId, key, value) VALUES (?, ?, ?)",
+                                       arguments: [teamId, "fcur:\(device):\(name)", String(min(offset, cursor + complete.count))])
                     }
-                    try db.execute(sql: "INSERT OR REPLACE INTO syncState (teamId, key, value) VALUES (?, ?, ?)",
-                                   arguments: [teamId, "fcur:\(device):\(name)", String(cursor + complete.count)])
                 }
                 changed = true
             }
         }
-        // Waiting files of projects another Mac processes: give them content keys, then look them up.
+        // Waiting files: give them content keys, then look them up in the teammates' records. On the Macs that
+        // don't process, every waiting file; on the processing Mac only fresh ones (a copier's record may be on its
+        // way for those), since it reads the rest itself anyway.
+        let processorHere = team.processorId == deviceId
         let waiting = try store.db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT m.id, m.path, m.size, m.contentKey FROM media m JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId
-                WHERE p.teamId = ? AND m.status = 'pending' AND m.duplicateOf IS NULL
+                WHERE p.teamId = ? AND m.status = 'pending' AND m.duplicateOf IS NULL AND NOT m.localWork
                   AND (m.contentKey IS NULL OR m.contentKey IN (SELECT contentKey FROM faceIndex WHERE teamId = ?))
+                  AND (NOT ? OR m.contentKey IS NOT NULL OR m.seenAt > ?)
                 ORDER BY m.id LIMIT ?
-                """, arguments: [teamId, teamId, Self.faceKeyBatch])
+                """, arguments: [teamId, teamId, processorHere, Date().timeIntervalSince1970 - Self.copierRecent, Self.faceKeyBatch])
         }
-        guard !waiting.isEmpty, team.processorId != nil, team.processorId != deviceId else {
+        defer {
+            // Files taken from copying Macs' records here on the processing Mac: grouped now, as if processed here.
+            let toGroup = lock.withLock { let t = takenToGroup; takenToGroup = []; return t }
+            for mid in toGroup { engine.mediaProcessed(mid) }
+        }
+        guard !waiting.isEmpty, team.processorId != nil, !(processorHere && lock.withLock({ foreignFacesAt[teamId] }) == nil) else {
             if !affected.isEmpty { engine.peopleChanged(affected) }
             return changed
         }
@@ -373,10 +426,13 @@ extension TeamSync {
         return changed
     }
 
-    /// Takes a published record for a file waiting here (or already taken from the same Mac: then its faces'
-    /// people are brought up to date). Returns the people whose faces changed.
+    /// Takes a published record for a file waiting here (or already taken from a teammate: then its faces' people
+    /// are brought up to date). The processing Mac's record is the truth for everyone else, even for a file this
+    /// Mac processed itself off a card; the processing Mac keeps what it processed itself and takes copying Macs'
+    /// records for files it has waiting. Returns the people whose faces changed.
     func take(_ payload: MediaPayload, from device: String, team: TeamRecord, db: Database) throws -> Set<Int64> {
-        guard team.processorId != nil, team.processorId != deviceId else { return [] }
+        guard let processorId = team.processorId else { return [] }
+        let authoritative = device == processorId
         let rows = try Row.fetchAll(db, sql: """
             SELECT m.id, m.status, m.importedFrom FROM media m JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId
             WHERE m.contentKey = ? AND m.duplicateOf IS NULL AND p.teamId = ?
@@ -384,7 +440,9 @@ extension TeamSync {
         var affected: Set<Int64> = []
         for r in rows {
             let mid: Int64 = r["id"], status: String = r["status"], from: String? = r["importedFrom"]
-            if status == MediaStatus.done.rawValue && from == nil { continue }  // processed here: kept
+            let ownWork = status == MediaStatus.done.rawValue && from == nil
+            // Processed here: kept, unless this is the processing Mac's grouping of a card's file processed here.
+            if ownWork && (!authoritative || processorId == deviceId) { continue }
             let existing = try FaceRecord.fetchAll(db, sql: "SELECT * FROM face WHERE mediaId = ? ORDER BY id", arguments: [mid])
             var people: [String: Int64] = [:]
             func person(_ uuid: String?) throws -> Int64? {
@@ -397,8 +455,8 @@ extension TeamSync {
                 people[uuid] = p.id!
                 return p.id!
             }
-            if from == device, existing.count == payload.faces.count, !existing.isEmpty {
-                // Same faces, maybe different people now.
+            if from == device || authoritative, existing.count == payload.faces.count, !existing.isEmpty {
+                // Same faces (the same file, the same detector), maybe different people now.
                 for (f, pf) in zip(existing, payload.faces) {
                     let pid = try person(pf.p), rej = try person(pf.r)
                     guard f.personId != pid || f.assignment.rawValue != pf.a || f.rejectedPersonId != rej else { continue }
@@ -406,6 +464,7 @@ extension TeamSync {
                     if let pid { affected.insert(pid) }
                     try db.execute(sql: "UPDATE face SET personId = ?, assignment = ?, rejectedPersonId = ? WHERE id = ?", arguments: [pid, pf.a, rej, f.id])
                 }
+                if from != device { try db.execute(sql: "UPDATE media SET importedFrom = ? WHERE id = ?", arguments: [device, mid]) }
                 continue
             }
             for f in existing { if let old = f.personId { affected.insert(old) } }
@@ -425,6 +484,8 @@ extension TeamSync {
                 UPDATE media SET status = 'done', error = NULL, width = ?, height = ?, duration = ?, takenAt = ?, featurePrint = COALESCE(?, featurePrint),
                     analysisVersion = ?, importedFrom = ? WHERE id = ?
                 """, arguments: [payload.w, payload.h, payload.dur, payload.taken, payload.fp.flatMap { Data(base64Encoded: $0) }, payload.v, device, mid])
+            // On the processing Mac, a copier's ungrouped faces are this Mac's to group (after the transaction).
+            if processorId == deviceId, payload.faces.contains(where: { $0.p == nil }) { lock.withLock { takenToGroup.append(mid) } }
             // The crops, so the faces have pictures here too.
             let cropDir = Self.facesURL(team.url, device: device).appendingPathComponent("crops", isDirectory: true).appendingPathComponent(payload.key, isDirectory: true)
             for (i, fid) in ids.enumerated() {

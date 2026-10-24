@@ -330,8 +330,12 @@ struct PersonCell: View {
     var onRename: ((String) -> Void)?
     var onSkip: (() -> Void)?
     @State private var name = ""
+    /// The mouse is over the tile: a long name scrolls so it can be read in full.
+    @State private var hovering = false
 
     var isEditing: Bool { editing?.wrappedValue == person.id }
+    /// A name shown, not being typed: the field's own (truncated) text gives way to the marquee on top of it.
+    var marquee: Bool { person.name != nil && !isEditing }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -357,12 +361,17 @@ struct PersonCell: View {
                     .textFieldStyle(.plain)
                     .multilineTextAlignment(.center)
                     .font(person.name == nil && !isEditing ? .callout.weight(.medium) : .headline)
-                    .foregroundStyle(person.name == nil && !isEditing ? Color.amber : .primary)
+                    .foregroundStyle(person.name == nil && !isEditing ? Color.amber : marquee ? .clear : .primary)
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(RoundedRectangle(cornerRadius: 6).fill(isEditing ? Color.primary.opacity(0.06) : .clear))
                     .overlay {
                         if person.name == nil && !isEditing {
                             RoundedRectangle(cornerRadius: 6).strokeBorder(Color.amber.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+                        } else if marquee {
+                            // The name in full on hover (a click still lands on the field and starts editing).
+                            MarqueeText(text: person.displayName, scrolling: hovering)
+                                .padding(.horizontal, 8).padding(.vertical, 3)
+                                .allowsHitTesting(false)
                         }
                     }
                     .fixedSize(horizontal: person.name == nil && !isEditing, vertical: false)
@@ -379,10 +388,9 @@ struct PersonCell: View {
                     .onChange(of: person.name) { name = person.name ?? "" }
                     .help(person.name == nil ? "Click and type a name" : "Click to rename")
             } else {
-                Text(person.displayName)
-                    .font(.headline)
+                MarqueeText(text: person.displayName, scrolling: hovering)
                     .foregroundStyle(person.name == nil ? .secondary : .primary)
-                    .lineLimit(1)
+                    .padding(.horizontal, 8)
             }
             Text(counts).font(.caption).foregroundStyle(.secondary).monospacedDigit()
             if !listNames.isEmpty {
@@ -394,6 +402,7 @@ struct PersonCell: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(RoundedRectangle(cornerRadius: 12).fill(selected ? Color.accent.opacity(0.12) : .clear))
         .contentShape(Rectangle())
+        .onHover { hovering = $0 }
     }
 
     var counts: String {
@@ -444,16 +453,18 @@ struct PersonDetail: View {
     var body: some View {
         VStack(spacing: 0) {
             SessionBar(divider: true)
+            // The header and the tabs stay put; only the grid below them scrolls.
+            header
+            tabs
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    header
-                    tabs
                     switch tab {
                     case .photos: mediaGrid(shown(.photo), empty: "No photos of this person")
                     case .videos: mediaGrid(shown(.video), empty: "No videos of this person")
                     case .faces: faceGrid
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.bottom, selectedMedia.isEmpty && selectedFaces.isEmpty ? 0 : 64)
             }
             .background { Color.clear.contentShape(Rectangle()).onTapGesture { selectedMedia = []; selectedFaces = [] } }

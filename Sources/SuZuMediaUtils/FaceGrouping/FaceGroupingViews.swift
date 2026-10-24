@@ -61,6 +61,8 @@ struct FaceGroupingDetail: View {
 struct FaceGroupingSidebar: View {
     @EnvironmentObject var model: FaceGroupingModel
     @AppStorage("sidebar.folders") private var foldersOpen = false
+    @AppStorage("sidebar.teamFolders") private var teamFoldersOpen = true
+    @AppStorage("sidebar.editedFolders") private var editedFoldersOpen = true
     @AppStorage("sidebar.known") private var knownOpen = false
     @AppStorage("sidebar.lists") private var listsOpen = true
 
@@ -117,14 +119,22 @@ struct FaceGroupingSidebar: View {
                 }
             }
         }
-        Section(isExpanded: $foldersOpen) {
-            ForEach(model.projectSources) { SourceRow(source: $0).tag(AppRoute.faces(.source($0.id))) }
-            if model.service != nil {
-                Button { model.addFolder(kind: .media) } label: { Label("Add Folder…", systemImage: "plus") }
-                    .buttonStyle(.borderless).foregroundStyle(.secondary)
-            }
-        } header: {
-            folderHeader
+        if model.foldersGrouped {
+            // In a team the folders come in three kinds: the team's sources (on every Mac), the editing Mac's
+            // folder (on every Mac too), and this Mac's own.
+            Section(isExpanded: $teamFoldersOpen) {
+                folderRows(.team, add: "Add Team Folder…", help: "The folders the whole team works on: every Mac in the team gets them")
+            } header: { folderHeader(.team) }
+            Section(isExpanded: $editedFoldersOpen) {
+                folderRows(.edited, add: "Add Edited Folder…", help: "Where the editing Mac puts edited and selected photos: every Mac in the team sees it")
+            } header: { folderHeader(.edited) }
+            Section(isExpanded: $foldersOpen) {
+                folderRows(.mac, add: "Add Folder…", help: "A folder only this Mac works on")
+            } header: { folderHeader(.mac) }
+        } else {
+            Section(isExpanded: $foldersOpen) {
+                folderRows(nil, add: "Add Folder…", help: nil)
+            } header: { folderHeader(nil) }
         }
         if model.sources.contains(where: { $0.kind == .reference }) {
             Section("Known People", isExpanded: $knownOpen) {
@@ -133,11 +143,27 @@ struct FaceGroupingSidebar: View {
         }
     }
 
+    @ViewBuilder
+    func folderRows(_ share: SourceShare?, add: String, help: String?) -> some View {
+        ForEach(model.projectSources.filter { share == nil || $0.share == share }) { SourceRow(source: $0).tag(AppRoute.faces(.source($0.id))) }
+        if model.service != nil {
+            Button { model.addFolder(kind: .media, share: share ?? .mac) } label: { Label(add, systemImage: "plus") }
+                .buttonStyle(.borderless).foregroundStyle(.secondary)
+                .help(help ?? "")
+        }
+    }
+
     /// "Folders · 3", with a warning when one is offline so it is noticed even folded.
-    var folderHeader: some View {
-        let offline = model.projectSources.count { !$0.online }
+    func folderHeader(_ share: SourceShare?) -> some View {
+        let offline = model.projectSources.count { !$0.online && (share == nil || $0.share == share) }
+        let title: String = switch share {
+        case nil: model.currentProject == nil ? "Folders (all projects)" : "Folders"
+        case .team: "Team Folders"
+        case .edited: "Edited Folders"
+        case .mac: "Folders on This Mac"
+        }
         return HStack(spacing: 6) {
-            Text(model.currentProject == nil ? "Folders (all projects)" : "Folders")
+            Text(title)
             if offline > 0 {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.amber)
                     .help("\(offline) folder\(offline == 1 ? " is" : "s are") offline — renamed or moved? Open to locate it")
@@ -155,6 +181,10 @@ struct FaceGroupingSidebarToolbar: ToolbarContent {
                 Button("New Project…") { model.askNewProject = true }
                 Divider()
                 Button("Add Photo & Video Folder to Project…") { model.addFolder(kind: .media) }
+                if model.currentTeam != nil {
+                    Button("Add Team Folder…") { model.addFolder(kind: .media, share: .team) }
+                    Button("Add Edited Folder…") { model.addFolder(kind: .media, share: .edited) }
+                }
                 Button("Add Known-People Folder…") { model.addFolder(kind: .reference) }
             } label: {
                 Label("Add Folder", systemImage: "folder.badge.plus")
@@ -177,8 +207,9 @@ struct SourceRow: View {
                 }
             }
         } icon: {
-            Image(systemName: !source.online ? "externaldrive.badge.xmark" : source.network ? "server.rack" : "folder")
+            Image(systemName: source.icon)
         }
+        .help(source.share == .mac ? "" : model.shareCaption(source))
         .contextMenu {
             if source.online {
                 Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: source.path) }
@@ -193,8 +224,9 @@ struct SourceRow: View {
                     }
                 }
             }
+            ShareMenu(source: source)
             Divider()
-            Button("Remove from Library", role: .destructive) { model.removeSource(source.id) }
+            Button(source.share == .mac ? "Remove from Library" : "Remove from Library and Team", role: .destructive) { model.removeSource(source.id) }
         }
     }
 
@@ -203,6 +235,49 @@ struct SourceRow: View {
         if source.scanning && source.found > source.files { return "Scanning… \(source.found.formatted()) files found" }
         if source.pending > 0 { return "Processing \(source.pending.formatted()) of \(source.files.formatted())" }
         return "\(source.files.formatted()) files"
+    }
+}
+
+/// Team folder / Edited folder / Only on this Mac, for a folder of a project that is in a team.
+struct ShareMenu: View {
+    @EnvironmentObject var model: FaceGroupingModel
+    let source: SourceSummary
+
+    var body: some View {
+        if source.kind == .media, model.projects.first(where: { $0.id == source.projectId })?.teamId != nil {
+            Menu("In the Team") {
+                ForEach(SourceShare.allCases, id: \.self) { s in
+                    Toggle(s.title, isOn: Binding(get: { source.share == s }, set: { if $0 { model.setShare(source.id, s) } }))
+                }
+                Divider()
+                Text(ShareMenu.explanation)
+            }
+        }
+    }
+
+    static let explanation = "Team folders and edited folders appear on every Mac in the team; a folder only on this Mac stays here."
+}
+
+extension SourceSummary {
+    var icon: String {
+        if !online { return "externaldrive.badge.xmark" }
+        switch share {
+        case .team: return "person.3"
+        case .edited: return "checkmark.rectangle.stack"
+        case .mac: return network ? "server.rack" : "folder"
+        }
+    }
+}
+
+extension FaceGroupingModel {
+    /// Whether the Folders section splits into team / edited / this Mac: when the open project is in a team, or a
+    /// shared folder is in view.
+    var foldersGrouped: Bool { currentTeam != nil || projectSources.contains { $0.share != .mac } }
+
+    /// "Team folder · shared by An's Mac".
+    func shareCaption(_ s: SourceSummary) -> String {
+        guard s.share != .mac else { return "" }
+        return sharer(of: s).map { "\(s.share.title) · shared by \($0)" } ?? "\(s.share.title) · shared from this Mac"
     }
 }
 
@@ -230,7 +305,9 @@ struct FaceGroupingStatusBody: View {
             return ("Scanning \(scanning.name)…", "\(scanning.found.formatted()) found", nil)
         }
         if !model.removing.isEmpty { return ("Removing folder…", "", nil) }
-        if model.stats.pending > 0, let mac = model.processingMac {
+        // Files this Mac processes itself (the cards it copies) show as processing even when another Mac does the
+        // team's face work; the rest waits for that Mac.
+        if model.stats.pending > 0, let mac = model.processingMac, (model.service?.processor.queuedCount ?? 0) == 0 {
             return ("Waiting for \(mac): \(model.stats.pending.formatted()) files", "faces are processed there and read from the team folder",
                     Double(model.stats.files - model.stats.pending) / Double(max(1, model.stats.files)))
         }
@@ -334,6 +411,11 @@ struct SourceView: View {
             Form {
                 LabeledContent("Folder", value: s.path)
                 LabeledContent("Type", value: s.kind == .media ? "Photos & videos" : "Known people (subfolder name = person)")
+                if s.share != .mac {
+                    LabeledContent("In the team", value: model.shareCaption(s))
+                } else if model.projects.first(where: { $0.id == s.projectId })?.teamId != nil {
+                    LabeledContent("In the team", value: "Only on this Mac (right-click the folder → In the Team to share it)")
+                }
                 LabeledContent("Storage", value: s.network ? "Network share, checked every 5 s" : "Local, watched live")
                 LabeledContent("Status", value: s.online ? "Online" : "Offline — will resume when it's back")
                 LabeledContent("Files", value: "\(s.files)")

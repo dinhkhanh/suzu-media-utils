@@ -22,15 +22,24 @@ public final class Processor: @unchecked Sendable {
     /// Whether a file of this source is processed on this Mac (shared processing: another Mac may do a team's
     /// face work; see SharedFaces). nil = everything.
     public var processesLocally: (@Sendable (Int64?) -> Bool)?
+    /// Seconds a fresh file of this source waits for a teammate's record before this Mac reads it itself (the
+    /// processing Mac, while copying Macs are sending the faces of the cards they copy); 0 = none.
+    public var graceFor: (@Sendable (Int64?) -> Double)?
 
     /// Progress for the UI: files processed since launch and timestamps for the rate.
     public private(set) var processedCount = 0
+    /// Where to read a file from instead of its library path, while that is faster: a file just copied off a card
+    /// is read from the card (local, USB) rather than back from the NAS it landed on. By canonical library path.
+    var preferredSources: [String: URL] = [:]
+    /// Workers when nothing else is going on, and while a copy or export the user is waiting for runs.
+    let fullWorkers = max(2, ProcessInfo.processInfo.activeProcessorCount - 2)
+    let sharedWorkers = max(2, ProcessInfo.processInfo.activeProcessorCount / 2)
 
     public init(store: LibraryStore, engine: GroupingEngine, modelURL: URL) throws {
         self.store = store
         self.engine = engine
         batcher = EmbeddingBatcher(embedder: try Embedder(name: "ArcFaceR50", compiledModel: modelURL))
-        workQueue.maxConcurrentOperationCount = max(2, ProcessInfo.processInfo.activeProcessorCount - 2)
+        workQueue.maxConcurrentOperationCount = fullWorkers
         workQueue.qualityOfService = .utility
         backgroundQueue.maxConcurrentOperationCount = 2
         backgroundQueue.qualityOfService = .background
@@ -39,36 +48,84 @@ public final class Processor: @unchecked Sendable {
     public var queuedCount: Int { lock.withLock { queued.count } }
     public var backgroundCount: Int { lock.withLock { backgroundQueued.count } }
 
+    /// A copy or export the user is waiting for is under way (or no longer): face work keeps going on fewer
+    /// workers, so the transfer gets the disk and the network first. Takes effect as running operations finish.
+    public func setForeground(_ active: Bool) {
+        workQueue.maxConcurrentOperationCount = active ? sharedWorkers : fullWorkers
+    }
+
+    /// Reads the file at `path` from `url` when it comes up for processing (as long as that is still there): the
+    /// card a file was just copied from, instead of the share it was copied to.
+    public func prefer(_ url: URL, for path: String) {
+        lock.withLock {
+            preferredSources[path] = url
+            // Entries of cards long pulled: forgotten once there are many.
+            if preferredSources.count > 20_000 {
+                let fm = FileManager.default
+                preferredSources = preferredSources.filter { fm.fileExists(atPath: $0.value.path) }
+            }
+        }
+    }
+
+    func takePreferred(_ path: String) -> URL? {
+        let url = lock.withLock { preferredSources.removeValue(forKey: path) }
+        guard let url, FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
+    }
+
     /// Queues every pending media in the library (call at launch and after scans).
     public func enqueuePending() {
         let rows = (try? store.db.read { db in
-            try Row.fetchAll(db, sql: "SELECT id, sourceId FROM media WHERE status = 'pending' AND duplicateOf IS NULL ORDER BY path")
+            try Row.fetchAll(db, sql: "SELECT id, sourceId, localWork FROM media WHERE status = 'pending' AND duplicateOf IS NULL ORDER BY path")
         }) ?? []
-        for r in rows where processesLocally?(r["sourceId"]) ?? true { enqueue(r["id"]) }
+        for r in rows where (r["localWork"] as Bool) || processesLocally?(r["sourceId"]) ?? true { enqueue(r["id"], first: r["localWork"]) }
     }
 
-    public func enqueue(_ mediaId: Int64) {
+    /// `first`: ahead of everything waiting (a file just copied off a card, while the card is still in).
+    public func enqueue(_ mediaId: Int64, first: Bool = false) {
         let isNew = lock.withLock { queued.insert(mediaId).inserted }
         guard isNew else { return }
         let op = BlockOperation { [self] in
-            autoreleasepool { process(mediaId) }
+            let worked = autoreleasepool { process(mediaId) }
             lock.withLock {
                 queued.remove(mediaId)
-                processedCount += 1
+                if worked { processedCount += 1 }
             }
         }
         // New files always go before background extras (upgrades, burst fingerprints).
-        op.queuePriority = .high
+        op.queuePriority = first ? .veryHigh : .high
         workQueue.addOperation(op)
     }
 
-    func process(_ mediaId: Int64) {
-        guard let media = try? store.db.read({ db in try MediaRecord.fetchOne(db, key: mediaId) }),
-              media.status == .pending, processesLocally?(media.sourceId) ?? true else { return }
+    /// Returns whether the file was worked on (false: not this Mac's to do, or put off for a moment).
+    @discardableResult
+    func process(_ mediaId: Int64) -> Bool {
+        guard let media = try? store.db.read({ db in try MediaRecord.fetchOne(db, key: mediaId) }), media.status == .pending else { return false }
+        let mine = processesLocally?(media.sourceId) ?? true
+        guard media.localWork || mine else { return false }
+        // A fresh file of a team whose copying Macs send the faces of the cards they copy: their record saves
+        // reading the file back from the share, so give it a moment to arrive.
+        if !media.localWork, media.importedFrom == nil, let seen = media.seenAt, let grace = graceFor?(media.sourceId), grace > 0 {
+            let left = seen + grace - Date().timeIntervalSince1970
+            if left > 0 {
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + max(1, left)) { [weak self] in self?.enqueue(mediaId) }
+                return false
+            }
+        }
         do {
+            // The same bytes from a faster place when there is one (the card it was just copied from); the
+            // library's own copy when that fails (card pulled) or there is none.
+            let preferred = takePreferred(media.path)
+            var analyzed: AnalyzedMedia
+            var readFrom = media.url
+            if let preferred, let a = try? MediaAnalyzer.analyze(preferred) {
+                analyzed = a
+                readFrom = preferred
+            } else {
+                analyzed = try MediaAnalyzer.analyze(media.url)
+            }
             // Fingerprint for move/copy detection, deferred from the folder scan to here.
-            let key = media.contentKey ?? ContentKey.compute(media.url, size: media.size)
-            let analyzed = try MediaAnalyzer.analyze(media.url)
+            let key = media.contentKey ?? ContentKey.compute(readFrom, size: media.size)
             let crops = analyzed.faces.compactMap(\.aligned)
             let vectors = crops.isEmpty ? [] : batcher.embed(crops)
             var faces: [FaceRecord] = []
@@ -81,38 +138,43 @@ public final class Processor: @unchecked Sendable {
             if media.kind == .video { assignTracks(&faces, width: analyzed.width) }
 
             let previews = analyzed.faces.map(\.preview)
+            // The thumbnail, from the decode already made (videos get theirs in the idle-time pass); written before
+            // the commit so the file's whole result is one transaction.
+            var thumbAt: Double?
+            if let t = analyzed.thumbnail {
+                ImageLoader.writeJPEG(t, to: store.thumbnailURL(mediaId), quality: 0.8)
+                thumbAt = Date().timeIntervalSince1970
+            }
             try store.db.write { db in
                 try db.execute(sql: "DELETE FROM face WHERE mediaId = ?", arguments: [mediaId])
                 for i in faces.indices { try faces[i].insert(db) }
                 try db.execute(sql: """
                     UPDATE media SET status = 'done', error = NULL, width = ?, height = ?, duration = ?, contentKey = ?,
-                        takenAt = ?, analysisVersion = ?, importedFrom = NULL WHERE id = ?
+                        takenAt = ?, analysisVersion = ?, importedFrom = NULL, thumbAt = COALESCE(?, thumbAt) WHERE id = ?
                     """, arguments: [analyzed.width, analyzed.height, analyzed.duration, key,
                                      (analyzed.takenAt ?? Date(timeIntervalSince1970: media.mtime)).timeIntervalSince1970,
-                                     BestShot.analysisVersion, mediaId])
+                                     BestShot.analysisVersion, thumbAt, mediaId])
                 // For the team, when this Mac does its face work (see SharedFaces).
                 try db.execute(sql: "INSERT OR IGNORE INTO facePublish (mediaId) VALUES (?)", arguments: [mediaId])
             }
             for (f, p) in zip(faces, previews) {
                 if let p { ImageLoader.writeJPEG(p, to: store.faceCropURL(f.id!), quality: 0.8) }
             }
-            // The thumbnail, from the decode already made (videos get theirs in the idle-time pass).
-            if let t = analyzed.thumbnail {
-                ImageLoader.writeJPEG(t, to: store.thumbnailURL(mediaId), quality: 0.8)
-                try? store.db.write { db in try db.execute(sql: "UPDATE media SET thumbAt = ? WHERE id = ?", arguments: [Date().timeIntervalSince1970, mediaId]) }
-            }
             if let pid = try enrollReference(media, faces: faces) {
                 engine.referenceChanged(pid)
                 onReferenceEnrolled?(pid)
-            } else {
+            } else if mine {
                 engine.mediaProcessed(mediaId)
             }
+            // Else (a card's file processed here for a team another Mac groups for): the faces go to that Mac as
+            // they are; its grouping comes back and is taken as the truth here, so the two never disagree.
         } catch {
             try? store.db.write { db in
                 try db.execute(sql: "UPDATE media SET status = 'failed', error = ? WHERE id = ?",
                                arguments: ["\(error)", mediaId])
             }
         }
+        return true
     }
 
     static func faceRecord(_ af: AnalyzedFace, mediaId: Int64, width: Int, height: Int, vector: [Float]?) -> FaceRecord {

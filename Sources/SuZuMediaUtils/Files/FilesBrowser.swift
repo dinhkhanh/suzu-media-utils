@@ -204,7 +204,9 @@ struct FilesBrowser: View {
         }
         .onChange(of: files) { relist() }
         .onChange(of: listing) { relist() }
-        .onChange(of: model.sources) { relist() }
+        // Folders added, removed, moved or gone offline: not every tick of a scan's count, which would rebuild the
+        // list on the main thread once a second while a card's files land.
+        .onChange(of: model.projectSources.map { "\($0.id)|\($0.path)|\($0.online)|\($0.share.rawValue)" }) { relist() }
     }
 
     @ViewBuilder var content: some View {
@@ -693,33 +695,61 @@ struct FolderColumn: View {
             VStack(alignment: .leading, spacing: 1) {
                 SectionLabel("Folders").padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 4)
                 row(title: model.projectName, icon: "calendar", count: files.count, path: nil, depth: 0)
-                ForEach(model.projectSources) { s in
-                    row(title: s.name, icon: !s.online ? "externaldrive.badge.xmark" : s.network ? "server.rack" : "folder",
-                        count: count(under: s.path), path: s.path, depth: 1, offline: !s.online)
-                        .contextMenu { sourceMenu(s) }
-                    if let folder, folder == s.path || folder.hasPrefix(s.path + "/") {
-                        ForEach(subfolders(of: s.path), id: \.self) { sub in
-                            row(title: (sub as NSString).lastPathComponent, icon: "folder", count: count(under: sub), path: sub, depth: 2)
-                            if folder != sub, folder.hasPrefix(sub + "/") {
-                                ForEach(subfolders(of: folder), id: \.self) { deep in
-                                    row(title: (deep as NSString).lastPathComponent, icon: "folder", count: count(under: deep), path: deep, depth: 3)
-                                }
-                            }
+                if model.foldersGrouped {
+                    // In a team: the team's folders, the editing Mac's, then this Mac's own.
+                    ForEach(SourceShare.allCases.reversed(), id: \.self) { share in
+                        let group = model.projectSources.filter { $0.share == share }
+                        if !group.isEmpty {
+                            SectionLabel(share == .mac ? "This Mac" : share == .team ? "Team" : "Edited")
+                                .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 2)
+                            ForEach(group) { sourceRows($0) }
                         }
                     }
+                } else {
+                    ForEach(model.projectSources) { sourceRows($0) }
                 }
                 if model.projectSources.count { !$0.online } > 0 {
                     Text("Offline: renamed or moved? Right-click → Locate Folder…").font(.caption).foregroundStyle(Color.amber)
                         .padding(.horizontal, 10).padding(.top, 4).fixedSize(horizontal: false, vertical: true)
                 }
-                Button { model.addFolder(kind: .media) } label: { Label("Add Folder…", systemImage: "plus") }
-                    .buttonStyle(.plain).foregroundStyle(.secondary).font(.callout)
+                if model.currentTeam != nil {
+                    Menu {
+                        Button("Team Folder…") { model.addFolder(kind: .media, share: .team) }
+                        Button("Edited Folder…") { model.addFolder(kind: .media, share: .edited) }
+                        Button("Folder Only on This Mac…") { model.addFolder(kind: .media) }
+                    } label: {
+                        Label("Add Folder…", systemImage: "plus")
+                    }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    .foregroundStyle(.secondary).font(.callout)
                     .padding(.horizontal, 10).padding(.top, 8)
+                } else {
+                    Button { model.addFolder(kind: .media) } label: { Label("Add Folder…", systemImage: "plus") }
+                        .buttonStyle(.plain).foregroundStyle(.secondary).font(.callout)
+                        .padding(.horizontal, 10).padding(.top, 8)
+                }
             }
             .padding(.horizontal, 6).padding(.bottom, 10)
         }
         .frame(width: 212)
         .background(Color.primary.opacity(0.025))
+    }
+
+    /// A folder of the project, with the open folder's subfolders under it.
+    @ViewBuilder func sourceRows(_ s: SourceSummary) -> some View {
+        row(title: s.name, icon: s.icon, count: count(under: s.path), path: s.path, depth: 1, offline: !s.online)
+            .contextMenu { sourceMenu(s) }
+            .help(model.shareCaption(s))
+        if let folder, folder == s.path || folder.hasPrefix(s.path + "/") {
+            ForEach(subfolders(of: s.path), id: \.self) { sub in
+                row(title: (sub as NSString).lastPathComponent, icon: "folder", count: count(under: sub), path: sub, depth: 2)
+                if folder != sub, folder.hasPrefix(sub + "/") {
+                    ForEach(subfolders(of: folder), id: \.self) { deep in
+                        row(title: (deep as NSString).lastPathComponent, icon: "folder", count: count(under: deep), path: deep, depth: 3)
+                    }
+                }
+            }
+        }
     }
 
     func count(under path: String) -> Int { files.count { $0.path.hasPrefix(path + "/") } }
@@ -758,8 +788,9 @@ struct FolderColumn: View {
                 ForEach(model.projects.filter { $0.id != s.projectId }) { p in Button(p.name) { model.moveSource(s.id, to: p.id) } }
             }
         }
+        ShareMenu(source: s)
         Divider()
-        Button("Remove from Library", role: .destructive) { model.removeSource(s.id) }
+        Button(s.share == .mac ? "Remove from Library" : "Remove from Library and Team", role: .destructive) { model.removeSource(s.id) }
     }
 }
 

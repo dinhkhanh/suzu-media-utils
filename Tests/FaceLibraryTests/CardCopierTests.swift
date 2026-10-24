@@ -52,6 +52,29 @@ final class CardCopierTests: XCTestCase {
         XCTAssertFalse(CardCopier.looksLikeCard(dest))
     }
 
+    /// Each file is reported the moment it lands (the library takes it up from the card right away), with what the
+    /// copy knows of it; a RAW that came with its JPEG is flagged, sidecars are not reported.
+    func testEachLandedFileIsReportedAtOnce() throws {
+        try shoot("IMG_0001.JPG", seed: 1)
+        try shoot("IMG_0001.CR2", bytes: 9000, seed: 2)
+        try shoot("IMG_0002.CR2", bytes: 9000, seed: 3)
+        try shoot("IMG_0001.xmp", bytes: 200, seed: 4)
+        final class Seen: @unchecked Sendable { var landed: [CardCopier.Landed] = [] }
+        let seen = Seen()
+        var o = options()
+        o.onCopied = { seen.landed.append($0) }
+        let out = CardCopier.copy(try plan(), options: o, store: store)
+        XCTAssertEqual(out.copied.count, 4)
+        XCTAssertEqual(seen.landed.map { $0.landed.lastPathComponent }, ["IMG_0001.CR2", "IMG_0001.JPG", "IMG_0002.CR2"])
+        XCTAssertEqual(seen.landed.map(\.rawWithJPEG), [true, false, false])
+        for l in seen.landed {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: l.landed.path), "reported after it is in place")
+            XCTAssertEqual(l.onCard.lastPathComponent, l.landed.lastPathComponent)
+            XCTAssertTrue(l.onCard.path.hasPrefix(card.path))
+            XCTAssertEqual(ContentKey.compute(l.landed, size: l.size), l.contentKey)
+        }
+    }
+
     func testOnlyNewFilesAreCopiedAtTheNextHandOver() throws {
         let shot = Date(timeIntervalSince1970: 1_800_000_000)
         try shoot("IMG_0001.JPG", seed: 1, mtime: shot)

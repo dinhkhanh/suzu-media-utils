@@ -165,6 +165,20 @@ struct CardCopyTool: View {
             if let v = videoDestination, let lv = last.videoFolder, lv.path.hasPrefix(v.path + "/") { o.videoFolder = lv }
         }
         let project = addToProject ? faces.currentProject : nil
+        if let project, let plan = card.plan {
+            // The card's folder joins the project before the first file lands; each file is then taken up the
+            // moment it lands and its faces read from the card (local) while it is still in the slot, not back
+            // from the share minutes later when the scan gets to it and the card is long gone.
+            let folders = [destination.appendingPathComponent(CardCopier.cardFolderName(plan.card), isDirectory: true)]
+                + (videoDestination.map { [$0.appendingPathComponent(CardCopier.cardFolderName(plan.card), isDirectory: true)] } ?? [])
+            for f in folders {
+                try? FileManager.default.createDirectory(at: f, withIntermediateDirectories: true)
+                faces.addCopiedFolder(f, project: project)
+            }
+            if let service = faces.service {
+                o.onCopied = { landed in service.fileLanded(landed) }
+            }
+        }
         model.copy(card.id, options: o, store: store) { outcome in
             if let project, !outcome.copied.isEmpty || !outcome.skipped.isEmpty {
                 faces.addCopiedFolder(outcome.cardFolder, project: project)
@@ -500,6 +514,8 @@ final class CardCopyModel: ObservableObject {
         var error: String?
         /// Unmounted while it was being copied, or after an interrupted copy: kept on screen so the result shows.
         var gone = false
+        /// The ledger changed while the plan was being made: make it again when done.
+        var replan = false
         var id: String { identity.uuid }
     }
 
@@ -537,8 +553,9 @@ final class CardCopyModel: ObservableObject {
         return CardCopier.mountedCards()
     }
 
-    /// Looks for cards and what is new on them. With a team, the teammates' logs are read first, so a card copied
-    /// on another Mac minutes ago is known here.
+    /// Looks for cards and what is new on them. The cards show at once; with a team, the teammates' logs are read
+    /// in the background and a card's plan is made again if they brought a copy made on another Mac (reading them
+    /// first used to hold the cards up for as long as a sync pass took, which under heavy processing is a while).
     func refresh(store: LibraryStore?, sync: TeamSync? = nil) {
         pending = store
         pendingSync = sync
@@ -548,9 +565,8 @@ final class CardCopyModel: ObservableObject {
         looking = true
         let busy = Set(cards.filter(\.copying).map(\.id))
         Task {
-            let found = await Task.detached(priority: .userInitiated) { () -> [CardCopier.Identity] in
-                sync?.syncNow()
-                return Self.volumes.compactMap { CardCopier.identify($0) }
+            let (found, seen) = await Task.detached(priority: .userInitiated) { () -> ([CardCopier.Identity], [CardCopier.KnownCard]) in
+                (Self.volumes.compactMap { CardCopier.identify($0) }, (try? CardCopier.knownCards(store: store)) ?? [])
             }.value
             // Cards being copied keep their state; the others start over, keeping an interrupted copy's result so
             // the next copy goes on in its folder. A card pulled in the middle of its copy stays on screen.
@@ -573,15 +589,31 @@ final class CardCopyModel: ObservableObject {
                 next.append(g)
             }
             cards = next
-            known = (try? CardCopier.knownCards(store: store)) ?? []
+            known = seen
             looking = false
             for id in found where !busy.contains(id.uuid) { plan(id.uuid, store: store) }
             if again { again = false; refresh(store: store, sync: sync) }
+            if let sync, !found.isEmpty { catchUp(sync, store: store) }
+        }
+    }
+
+    /// The team's ledger, without holding the cards up: one sync pass in the background; if it brought copies
+    /// teammates made, the plans are made again so those files aren't copied twice.
+    func catchUp(_ sync: TeamSync, store: LibraryStore) {
+        let before = CardCopier.teammateCopies(store: store)
+        sync.syncSoon { [weak self] in
+            guard CardCopier.teammateCopies(store: store) > before else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                known = (try? CardCopier.knownCards(store: store)) ?? known
+                for c in cards where !c.copying && !c.gone { plan(c.id, store: store) }
+            }
         }
     }
 
     func plan(_ id: String, store: LibraryStore) {
         guard let i = cards.firstIndex(where: { $0.id == id }) else { return }
+        if cards[i].planning { cards[i].replan = true; return }
         cards[i].planning = true
         cards[i].error = nil
         let identity = cards[i].identity
@@ -593,6 +625,7 @@ final class CardCopyModel: ObservableObject {
             case .success(let p): cards[i].plan = p
             case .failure(let e): cards[i].error = e.localizedDescription
             }
+            if cards[i].replan { cards[i].replan = false; plan(id, store: store) }
         }
     }
 
@@ -607,7 +640,11 @@ final class CardCopyModel: ObservableObject {
         ToolWork.begin()
         Task {
             let outcome = await Task.detached(priority: .userInitiated) {
-                CardCopier.copy(todo, options: options, store: store, progress: { p in
+                // Progress arrives per 8 MB piece; the screen gets it a few times a second and at every file's end,
+                // so several cards copying at once don't keep the main thread redrawing.
+                let throttle = ProgressThrottle()
+                return CardCopier.copy(todo, options: options, store: store, progress: { p in
+                    guard throttle.due(p) else { return }
                     Task { @MainActor in
                         if let i = self.cards.firstIndex(where: { $0.id == id }) { self.cards[i].progress = p }
                     }
@@ -630,6 +667,20 @@ final class CardCopyModel: ObservableObject {
     }
 
     func cancel(_ id: String) { cancels[id]?.flag = true }
+
+    /// Lets a progress report through when a file finished or 0.25 s passed since the last one. Used from one
+    /// copying thread at a time.
+    final class ProgressThrottle: @unchecked Sendable {
+        private var last = Date.distantPast
+        private var files = -1
+        func due(_ p: CardCopier.Progress) -> Bool {
+            let now = Date()
+            guard p.done != files || now.timeIntervalSince(last) >= 0.25 else { return false }
+            last = now
+            files = p.done
+            return true
+        }
+    }
 
     func ownDestination(_ uuid: String) -> URL? { ownDestinations[uuid].map { URL(fileURLWithPath: $0, isDirectory: true) } }
 

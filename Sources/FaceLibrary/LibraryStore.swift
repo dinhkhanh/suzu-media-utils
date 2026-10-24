@@ -33,7 +33,17 @@ public final class LibraryStore: @unchecked Sendable {
         thumbsDirectory = directory.appendingPathComponent("thumbs", isDirectory: true)
         try FileManager.default.createDirectory(at: thumbsDirectory, withIntermediateDirectories: true)
         var config = Configuration()
-        config.prepareDatabase { db in try db.execute(sql: "PRAGMA foreign_keys = ON") }
+        // At an event, cards copy, faces are processed, folders are exported and the team syncs at the same time:
+        // every one of them reads, so readers must not queue behind each other (the default allows 5).
+        config.maximumReaderCount = 12
+        config.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA foreign_keys = ON")
+            // WAL with synchronous=NORMAL: a commit no longer waits for the disk. The database stays consistent
+            // through an app crash; only a power cut can lose the last moments' commits, which are re-derived from
+            // the files anyway. With a commit per processed file and per copied file, this is what keeps three
+            // jobs from stalling each other on fsync.
+            try db.execute(sql: "PRAGMA synchronous = NORMAL")
+        }
         db = try DatabasePool(path: directory.appendingPathComponent("library.sqlite").path, configuration: config)
         try Self.migrator.migrate(db)
     }
@@ -398,6 +408,32 @@ public final class LibraryStore: @unchecked Sendable {
             /// When the person's picture was picked (or put back to automatic), so the choice travels to teammates
             /// and the newest wins.
             try db.execute(sql: "ALTER TABLE person ADD COLUMN coverAt DOUBLE")
+        }
+        m.registerMigration("v16-shared-folders") { db in
+            /// A folder can be the team's (every Mac of the team gets it) or the editing Mac's (same), see
+            /// `SourceShare`; a stable id makes it the same folder on every Mac.
+            try db.execute(sql: "ALTER TABLE source ADD COLUMN uuid TEXT")
+            try db.execute(sql: "ALTER TABLE source ADD COLUMN share TEXT NOT NULL DEFAULT 'mac'")
+            try db.execute(sql: "ALTER TABLE source ADD COLUMN shareAt DOUBLE")
+            try db.execute(sql: "ALTER TABLE source ADD COLUMN fromDevice TEXT")
+            try db.execute(sql: "ALTER TABLE source ADD COLUMN removedAt DOUBLE")
+            for id in try Int64.fetchAll(db, sql: "SELECT id FROM source") {
+                try db.execute(sql: "UPDATE source SET uuid = ? WHERE id = ?", arguments: [SyncIds.new(), id])
+            }
+            try db.create(index: "source_uuid", on: "source", columns: ["uuid"], unique: true)
+            /// Shared folders removed here, to tell the team (the row is gone by then).
+            try db.create(table: "sourceGone") { t in
+                t.column("uuid", .text).primaryKey()
+                t.column("projectId", .integer)
+                t.column("at", .double).notNull()
+            }
+        }
+        m.registerMigration("v17-hybrid-processing") { db in
+            /// A file this Mac processes itself although another Mac does the team's face work (copied off a card
+            /// here), and when the library first saw a file (the processing Mac gives a copier's record a moment
+            /// to arrive before reading a fresh file from the share).
+            try db.execute(sql: "ALTER TABLE media ADD COLUMN localWork BOOLEAN NOT NULL DEFAULT 0")
+            try db.execute(sql: "ALTER TABLE media ADD COLUMN seenAt DOUBLE")
         }
         return m
     }

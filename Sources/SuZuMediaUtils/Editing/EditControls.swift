@@ -64,12 +64,18 @@ struct EditControls: View {
                         Spacer()
                         looksMenu
                     }
-                    if recipe.autoTone { PercentSlider(label: "Strength", value: $recipe.autoToneStrength, range: 0.2...1) }
-                    if look.wrappedValue.changesPixels || recipe.autoTone {
-                        Button("Reset All Dials") { recipe.autoTone = false; look.wrappedValue = look.wrappedValue.orientationOnly }
-                            .controlSize(.small)
-                            .help("Every slider back to 0, the tone curve straight, HSL and black & white off, auto tone off. Double-click any slider or its name to reset just that one")
-                    }
+                    // Always in the layout, so ticking the toggle doesn't shove every dial below up or down.
+                    PercentSlider(label: "Strength", value: $recipe.autoToneStrength, range: 0.2...1)
+                        .disabled(!recipe.autoTone)
+                        .opacity(recipe.autoTone ? 1 : 0.4)
+                        .help(recipe.autoTone ? "" : "How much of auto tone's correction to apply (turn Auto tone & enhance on)")
+                    let dirty = look.wrappedValue.changesPixels || recipe.autoTone
+                    Button("Reset All Dials") { recipe.autoTone = false; look.wrappedValue = look.wrappedValue.orientationOnly }
+                        .controlSize(.small)
+                        .disabled(!dirty)
+                        .opacity(dirty ? 1 : 0)
+                        .accessibilityHidden(!dirty)
+                        .help("Every slider back to 0, the tone curve straight, HSL and black & white off, auto tone off. Double-click any slider or its name to reset just that one")
                     Toggle("Straighten tilted photos", isOn: Binding(get: { recipe.straighten == true }, set: { recipe.straighten = $0 ? true : nil }))
                         .help("Levels photos turned up to 10° off, by their vertical lines (pillars, door frames, screen edges), and trims the corners. Photos without clear lines are left as they are; turn any photo by hand with Level in the preview.")
                 }

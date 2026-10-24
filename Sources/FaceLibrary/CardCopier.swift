@@ -295,8 +295,23 @@ public enum CardCopier {
         /// Go on in this hand-over's folders (one whose copy was interrupted) instead of starting a new one.
         public var folder: URL?
         public var videoFolder: URL?
+        /// Called (on the copying thread) as each file lands, so the library can take it up at once: its faces are
+        /// read from the card while it is still in the slot (the card is pulled the moment the copy ends), not from
+        /// the share minutes later when the folder scan gets to it.
+        public var onCopied: (@Sendable (Landed) -> Void)?
         public init(destination: URL) { self.destination = destination }
         func root(for kind: Kind) -> URL { kind == .video ? (videoDestination ?? destination) : destination }
+    }
+
+    /// One file just copied: where it landed, where it is on the card, and what the copy already knows about it.
+    public struct Landed: Sendable {
+        public var landed: URL
+        public var onCard: URL
+        public var size: Int64
+        public var contentKey: String
+        /// A RAW file whose JPEG came off the same card: the folder scan pairs it with the JPEG, so it is not
+        /// taken up on its own.
+        public var rawWithJPEG: Bool
     }
 
     /// Why a copy stopped before the end. What landed is recorded; the rest stays new for the next time.
@@ -373,6 +388,8 @@ public enum CardCopier {
         for (f, m) in plan.matched {
             try? record(f, key: m.key, sha: nil, to: m.to, cardId: cardId, store: store)
         }
+        // JPEGs on the card by name without extension: a RAW with one is that JPEG's companion.
+        let jpegs = Set(plan.files.filter { !$0.isSidecar && $0.kind == .photo && !ImageLoader.isRaw(URL(fileURLWithPath: $0.relPath)) }.map { ImageLoader.pairKey($0.relPath) })
         for f in plan.new {
             if isCancelled() { out.interruption = .cancelled; break }
             if !plan.identity.isReachable { out.interruption = .cardRemoved; break }
@@ -402,6 +419,10 @@ public enum CardCopier {
                     try? fm.setAttributes([.modificationDate: f.mtime], ofItemAtPath: tmp.path)
                     try fm.moveItem(at: tmp, to: dst)
                     try record(f, key: srcKey, sha: sha, to: dst.path, cardId: cardId, store: store)
+                    if !f.isSidecar {
+                        options.onCopied?(Landed(landed: dst, onCard: src, size: size, contentKey: srcKey,
+                                                 rawWithJPEG: ImageLoader.isRaw(src) && jpegs.contains(ImageLoader.pairKey(f.relPath))))
+                    }
                     out.copied.append(f.relPath)
                     out.bytes += size
                 }
@@ -509,6 +530,12 @@ public enum CardCopier {
         public var files: Int
         public var bytes: Int64
         public var id: Int64 { card.id! }
+    }
+
+    /// How many ledger entries came from teammates' Macs: grows when the team sync brings a copy made elsewhere,
+    /// which is when a mounted card's plan is worth redoing.
+    public static func teammateCopies(store: LibraryStore) -> Int {
+        (try? store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM cardFile WHERE device IS NOT NULL") }) ?? 0
     }
 
     public static func knownCards(store: LibraryStore) throws -> [KnownCard] {

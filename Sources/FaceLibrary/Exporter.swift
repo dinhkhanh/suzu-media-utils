@@ -277,58 +277,94 @@ public struct Exporter: Sendable {
         return plan
     }
 
-    public func run(_ plan: Plan, policy: CollisionPolicy = .skip, progress: (Int) -> Void = { _ in }) -> Result {
+    /// What one run gathers from the files finishing in any order.
+    final class Tally: @unchecked Sendable {
+        let lock = NSLock()
         var result = Result()
-        let fm = FileManager.default
-        for (i, item) in plan.items.enumerated() {
-            defer { progress(i + 1) }
-            do {
-                try fm.createDirectory(at: item.to.deletingLastPathComponent(), withIntermediateDirectories: true)
-                guard let dest = try Self.destination(for: item, policy: policy) else {
-                    result.skippedExisting += 1
-                    result.handled.append(i)
-                    continue
-                }
-                let edit = plan.options.recipe.flatMap { MediaKindHint.isVideo(item.from) ? nil : $0 }
-                if let edit {
-                    try EditPipeline.render(item.from, recipe: edit, focus: item.focus, people: item.people, to: dest)
-                    try recordCopy(of: item.mediaId, at: dest)
-                    result.done += 1
-                    result.handled.append(i)
-                    continue
-                }
-                switch item.operation {
-                case .move:
-                    try fm.moveItem(at: item.from, to: dest)
-                    try store.db.write { db in
-                        try db.execute(sql: "UPDATE media SET path = ?, sourceId = ? WHERE id = ?",
-                                       arguments: [dest.path, try Self.sourceId(for: dest, db: db), item.mediaId])
-                    }
-                case .copy:
-                    try fm.copyItem(at: item.from, to: dest)
-                    if plan.options.writeNames { _ = try? Metadata.writePeople(item.people, to: dest) }
-                    try recordCopy(of: item.mediaId, at: dest)
-                }
-                result.done += 1
-                result.handled.append(i)
-            } catch {
-                result.failed.append((item.from.lastPathComponent, error.localizedDescription))
-            }
-        }
-        return result
+        var finished = 0
+        /// Destinations handed to files still on their way, so two files for the same name don't collide.
+        var reserved: Set<String> = []
     }
 
-    /// Target path, or nil to skip: with `.skip` whenever the name is taken, with `.keepBoth` only when the same
-    /// file (size and content key) is already there.
-    static func destination(for item: Item, policy: CollisionPolicy) throws -> URL? {
+    /// Copies and edited exports go `workers` at a time: over a share several streams fill the link where one
+    /// doesn't, and a crop or watermark renders while the next file is read. Moves are a name change each and run
+    /// in order. `progress` is called with the number of files finished, from any thread.
+    public func run(_ plan: Plan, policy: CollisionPolicy = .skip, workers: Int = 4, progress: @escaping (Int) -> Void = { _ in }) -> Result {
+        let tally = Tally()
+        let group = DispatchGroup()
+        let slots = DispatchSemaphore(value: max(1, workers))
+        for (i, item) in plan.items.enumerated() {
+            let edit = plan.options.recipe.flatMap { MediaKindHint.isVideo(item.from) ? nil : $0 }
+            let work = { [self] in
+                let outcome = Swift.Result { try self.perform(item, edit: edit, policy: policy, writeNames: plan.options.writeNames, tally: tally) }
+                tally.lock.withLock {
+                    switch outcome {
+                    case .success(true): tally.result.done += 1; tally.result.handled.append(i)
+                    case .success(false): tally.result.skippedExisting += 1; tally.result.handled.append(i)
+                    case .failure(let e): tally.result.failed.append((item.from.lastPathComponent, e.localizedDescription))
+                    }
+                    tally.finished += 1
+                    progress(tally.finished)
+                }
+            }
+            if workers > 1, edit != nil || item.operation == .copy {
+                slots.wait()
+                group.enter()
+                DispatchQueue.global(qos: .userInitiated).async { work(); slots.signal(); group.leave() }
+            } else {
+                work()
+            }
+        }
+        group.wait()
+        return tally.lock.withLock { tally.result }
+    }
+
+    /// One file: true when written, false when the same name (or the same file) was already there.
+    func perform(_ item: Item, edit: EditRecipe?, policy: CollisionPolicy, writeNames: Bool, tally: Tally) throws -> Bool {
+        let fm = FileManager.default
+        try fm.createDirectory(at: item.to.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // The source's size and fingerprint are read outside the lock (a share read); the name is given out inside it.
+        var size: Int64 = -1, key: String?
+        if policy == .keepBoth {
+            size = (try fm.attributesOfItem(atPath: item.from.path)[.size] as? Int64) ?? -1
+            key = ContentKey.compute(item.from, size: size)
+        }
+        let dest: URL? = try tally.lock.withLock {
+            let d = try Self.destination(for: item, policy: policy, size: size, key: key, reserved: tally.reserved)
+            if let d { tally.reserved.insert(d.path) }
+            return d
+        }
+        guard let dest else { return false }
+        defer { tally.lock.withLock { _ = tally.reserved.remove(dest.path) } }
+        if let edit {
+            try EditPipeline.render(item.from, recipe: edit, focus: item.focus, people: item.people, to: dest)
+            try recordCopy(of: item.mediaId, at: dest)
+            return true
+        }
+        switch item.operation {
+        case .move:
+            try fm.moveItem(at: item.from, to: dest)
+            try store.db.write { db in
+                try db.execute(sql: "UPDATE media SET path = ?, sourceId = ? WHERE id = ?",
+                               arguments: [dest.path, try Self.sourceId(for: dest, db: db), item.mediaId])
+            }
+        case .copy:
+            try fm.copyItem(at: item.from, to: dest)
+            if writeNames { _ = try? Metadata.writePeople(item.people, to: dest) }
+            try recordCopy(of: item.mediaId, at: dest)
+        }
+        return true
+    }
+
+    /// Target path, or nil to skip: with `.skip` whenever the name is taken (on disk, or by a file on its way),
+    /// with `.keepBoth` only when the same file (size and content key) is already there.
+    static func destination(for item: Item, policy: CollisionPolicy, size: Int64 = -1, key: String? = nil, reserved: Set<String> = []) throws -> URL? {
         let fm = FileManager.default
         var dest = item.to
-        if policy == .skip { return fm.fileExists(atPath: dest.path) ? nil : dest }
-        let size = (try fm.attributesOfItem(atPath: item.from.path)[.size] as? Int64) ?? -1
-        let key = ContentKey.compute(item.from, size: size)
+        if policy == .skip { return fm.fileExists(atPath: dest.path) || reserved.contains(dest.path) ? nil : dest }
         var n = 2
-        while fm.fileExists(atPath: dest.path) {
-            if (try? fm.attributesOfItem(atPath: dest.path)[.size] as? Int64) == size,
+        while fm.fileExists(atPath: dest.path) || reserved.contains(dest.path) {
+            if fm.fileExists(atPath: dest.path), (try? fm.attributesOfItem(atPath: dest.path)[.size] as? Int64) == size,
                key != nil, ContentKey.compute(dest, size: size) == key { return nil }
             let stem = item.to.deletingPathExtension().lastPathComponent
             dest = item.to.deletingLastPathComponent()

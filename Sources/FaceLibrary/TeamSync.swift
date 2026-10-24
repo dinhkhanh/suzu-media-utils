@@ -6,8 +6,9 @@ import GRDB
 /// that folder. A team holds any number of projects (one per event); joining brings them all.
 ///
 /// What travels: projects (stable id and name), people (stable id, name, and a summary of their faces so every Mac
-/// recognises them), merges, session names and rules. Photos, face boxes and crops stay on the Mac that processed
-/// them.
+/// recognises them), merges, session names, rules, and the folders the team shares (the sources every Mac works
+/// on, and the editing Mac's folder; see `SourceShare`). Photos, face boxes and crops stay on the Mac that
+/// processed them.
 ///
 /// How: every Mac appends its changes to its own log file (`devices/<id>.jsonl`) and reads everyone else's; nobody
 /// writes anyone else's file, so a shared folder needs no locking. Changes carry the time they were made and the
@@ -32,14 +33,24 @@ public final class TeamSync: @unchecked Sendable {
     /// Called off the main thread when a team's processing Mac changed (this Mac may now have to process, or stop).
     public var onRolesChanged: (@Sendable () -> Void)?
     var rolesVersion = 0
+    /// Called off the main thread after a teammate's change added, moved or took away a folder here (the app
+    /// starts or stops watching it, see LibraryService.reconcileMonitors).
+    public var onSourcesChanged: (@Sendable () -> Void)?
+    var sourcesChanged = false
     /// When each file's record was last written for the team (shared processing).
     var facesPublishedAt: [Int64: Double] = [:]
+    /// Per team: when another Mac's face records were last read (copying Macs sending the cards' faces).
+    var foreignFacesAt: [Int64: Date] = [:]
+    /// Files taken from a copying Mac's record on the processing Mac, for the engine to group (see pullFaces).
+    var takenToGroup: [Int64] = []
     public let deviceId: String
     public var deviceName: String
     public static let passInterval: Double = 5
     public static let summaryInterval: Double = 60
     public static let summaryCheckInterval: Double = 15
     public static let model = "ArcFaceR50"
+    /// Changes from a teammate's log applied per transaction (see pull).
+    static let opChunk = 200
 
     public struct Device: Hashable, Sendable {
         public var id: String
@@ -243,6 +254,16 @@ public final class TeamSync: @unchecked Sendable {
         queue.async { [weak self] in self?.pass() }
     }
 
+    /// A pass as soon as the queue is free, then `completion` (off the main thread). Nothing waits on the pass:
+    /// under load one can take many seconds (crops and content keys over the NAS).
+    public func syncSoon(then completion: @escaping @Sendable () -> Void) {
+        pushSoon()
+        queue.async { [weak self] in
+            self?.pass()
+            completion()
+        }
+    }
+
     /// One pass over every team now (tests). Returns whether anything was read or written.
     @discardableResult
     public func syncNow() -> Bool { queue.sync { pass() } }
@@ -339,6 +360,19 @@ public final class TeamSync: @unchecked Sendable {
         var rejected: String?
         /// summary: the person's exemplar faces (Float16 rows, base64).
         var exemplars: String?
+        /// folder: a photo & video folder shared with the team (uuid = the folder's stable id, project = its
+        /// project, deleted = taken out of the team).
+        var folder: FolderPayload?
+    }
+
+    struct FolderPayload: Codable {
+        /// The folder's path on the Mac that shared it.
+        var path: String
+        /// The same folder relative to the team folder, when both sit on the same volume: the NAS share may be
+        /// mounted under another name on each Mac, but it holds both folders at the same distance.
+        var rel: String?
+        /// team / edited; mac = no longer shared.
+        var share: String
     }
 
     struct CardPayload: Codable {
@@ -454,6 +488,26 @@ public final class TeamSync: @unchecked Sendable {
                 updates["pub:rule:\(rule.uuid)"] = value
             }
         }
+        // The folders the team shares: the sources every Mac works on and the editing Mac's folder. A folder once
+        // shared and now this Mac's own says so (teammates drop it); one removed here is in sourceGone.
+        let projectUuid = Dictionary(projects.map { ($0.id!, $0.uuid) }, uniquingKeysWith: { a, _ in a })
+        for s in try store.db.read({ db in try SourceRecord.filter(Column("shareAt") != nil && Column("removedAt") == nil).fetchAll(db) }) {
+            guard let pid = s.projectId, let puuid = projectUuid[pid], let at = s.shareAt else { continue }
+            let value = "\(at)|\(s.share.rawValue)|\(s.path)"
+            guard state["pub:folder:\(s.uuid)"] != value else { continue }
+            var op = Op(t: "folder", at: at, uuid: s.uuid, project: puuid)
+            op.folder = FolderPayload(path: s.path, rel: Self.relativePath(of: s.path, to: team.url), share: s.share.rawValue)
+            ops.append(op)
+            updates["pub:folder:\(s.uuid)"] = value
+        }
+        let gone = try store.db.read { db in
+            try Row.fetchAll(db, sql: "SELECT g.uuid, g.at, p.uuid AS project FROM sourceGone g JOIN project p ON p.id = g.projectId WHERE p.teamId = ?", arguments: [teamId])
+        }
+        for g in gone {
+            var op = Op(t: "folder", at: g["at"], uuid: g["uuid"], deleted: true, project: g["project"])
+            op.folder = FolderPayload(path: "", rel: nil, share: SourceShare.mac.rawValue)
+            ops.append(op)
+        }
         // Memory cards and what was copied from them, so a card handed to a teammate's Mac next time is known there.
         for c in try store.db.read({ db in try CardRecord.fetchAll(db) }) {
             let at = c.labelAt ?? c.firstSeenAt.timeIntervalSince1970
@@ -503,6 +557,14 @@ public final class TeamSync: @unchecked Sendable {
             try setState(teamId, updates)
             for (k, v) in updates { state[k] = v }
             wrote = true
+        }
+        if !gone.isEmpty {
+            let uuids = gone.map { $0["uuid"] as String }
+            try store.db.write { db in
+                try db.execute(sql: "DELETE FROM sourceGone WHERE uuid IN (\(uuids.map { _ in "?" }.joined(separator: ",")))", arguments: StatementArguments(uuids))
+                // Removals of folders in projects no team has can't go anywhere.
+                try db.execute(sql: "DELETE FROM sourceGone WHERE projectId IS NULL OR projectId NOT IN (SELECT id FROM project WHERE teamId IS NOT NULL)")
+            }
         }
         if !edited.isEmpty {
             try store.db.write { db in try db.execute(sql: "DELETE FROM faceEditPublish WHERE faceId IN (\(edited.map(String.init).joined(separator: ",")))") }
@@ -618,20 +680,30 @@ public final class TeamSync: @unchecked Sendable {
             for line in complete.split(separator: 0x0A) where !line.isEmpty {
                 if let op = try? decoder.decode(Op.self, from: line) { ops.append(op) }
             }
-            var updates = ["cursor:\(id)": String(cursor + complete.count)]
-            try store.db.write { db in
-                for op in ops {
-                    if op.t == "device", let name = op.name { updates["dev:\(id)"] = name; continue }
-                    switch try apply(op, team: team, device: id, db: db) {
-                    case .applied(let people, let remote):
-                        affected.formUnion(people)
-                        remoteChanged.formUnion(remote)
-                    case .deferred:
-                        try db.execute(sql: "INSERT INTO syncDeferred (teamId, op) VALUES (?, ?)",
-                                       arguments: [teamId, String(decoding: try JSONEncoder().encode(op), as: UTF8.self)])
-                    case .ignored: break
+            var updates: [String: String] = [:]
+            // Short transactions (a teammate's whole log on joining can be thousands of changes), the cursor
+            // written last: a card copy landing files meanwhile never waits long for the writer.
+            for chunk in stride(from: 0, to: ops.count, by: Self.opChunk).map({ ops[$0..<min($0 + Self.opChunk, ops.count)] }) {
+                try store.db.write { db in
+                    for op in chunk {
+                        if op.t == "device", let name = op.name { updates["dev:\(id)"] = name; continue }
+                        switch try apply(op, team: team, device: id, db: db) {
+                        case .applied(let people, let remote):
+                            affected.formUnion(people)
+                            remoteChanged.formUnion(remote)
+                        case .deferred:
+                            // Whose change it was stays with it (a shared folder remembers the Mac that shared it).
+                            var kept = op
+                            kept.device = kept.device ?? id
+                            try db.execute(sql: "INSERT INTO syncDeferred (teamId, op) VALUES (?, ?)",
+                                           arguments: [teamId, String(decoding: try JSONEncoder().encode(kept), as: UTF8.self)])
+                        case .ignored: break
+                        }
                     }
                 }
+            }
+            updates["cursor:\(id)"] = String(cursor + complete.count)
+            try store.db.write { db in
                 for (k, v) in updates {
                     try db.execute(sql: "INSERT OR REPLACE INTO syncState (teamId, key, value) VALUES (?, ?, ?)", arguments: [teamId, k, v])
                 }
@@ -689,8 +761,99 @@ public final class TeamSync: @unchecked Sendable {
         }
         if !affected.isEmpty { engine.peopleChanged(affected) }
         if !remoteChanged.isEmpty { engine.remoteChanged(remoteChanged) }
+        if lock.withLock({ let c = sourcesChanged; sourcesChanged = false; return c }) { onSourcesChanged?() }
         if try pullFaces(team) { changed = true }
         return changed
+    }
+
+    // MARK: - Shared folders
+
+    /// `path` relative to the team folder ("../Events/Gala/Cards"), when both sit on the same volume; nil
+    /// otherwise. Each Mac may mount the share under another name, but the two folders keep their distance.
+    static func relativePath(of path: String, to teamFolder: URL) -> String? {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path), fm.fileExists(atPath: teamFolder.path) else { return nil }
+        guard let a = try? URL(fileURLWithPath: path).resourceValues(forKeys: [.volumeIdentifierKey]).volumeIdentifier,
+              let b = try? teamFolder.resourceValues(forKeys: [.volumeIdentifierKey]).volumeIdentifier, a.isEqual(b) else { return nil }
+        let from = canonicalPath(teamFolder).split(separator: "/").map(String.init)
+        let to = path.split(separator: "/").map(String.init)
+        var common = 0
+        while common < from.count, common < to.count, from[common] == to[common] { common += 1 }
+        guard common > 0 else { return nil }  // nothing in common but the root: not the same share
+        let rel = Array(repeating: "..", count: from.count - common) + to[common...]
+        return rel.isEmpty ? "." : rel.joined(separator: "/")
+    }
+
+    /// Where a teammate's shared folder is on this Mac: at the same distance from the team folder when that exists,
+    /// else at the path the teammate has, else (offline for now) whichever of the two is likelier.
+    static func resolvePath(_ f: FolderPayload, team: TeamRecord) -> String {
+        let fm = FileManager.default
+        let fromRel = f.rel.map { canonicalPath(team.url.appendingPathComponent($0).standardizedFileURL) }
+        if let fromRel, fm.fileExists(atPath: fromRel) { return fromRel }
+        if fm.fileExists(atPath: f.path) { return canonicalPath(URL(fileURLWithPath: f.path, isDirectory: true)) }
+        return fromRel ?? f.path
+    }
+
+    /// A teammate shared a folder, changed what it is, or took it out of the team.
+    func applyFolderOp(_ op: Op, team: TeamRecord, device: String, db: Database) throws -> Outcome {
+        guard let uuid = op.uuid, let f = op.folder else { return .ignored }
+        let projectId: Int64
+        switch try Self.resolveProject(op.project, team: team, db: db) {
+        case .found(let id): projectId = id
+        case .unknown: return .deferred
+        case .gone: return .ignored
+        }
+        let share = op.deleted == true ? SourceShare.mac : SourceShare(rawValue: f.share) ?? .mac
+        let now = op.at
+        if let s = try SourceRecord.filter(Column("uuid") == uuid).fetchOne(db) {
+            guard now > (s.shareAt ?? 0), s.removedAt == nil else { return .ignored }
+            if share == .mac {
+                // Out of the team. A folder this Mac added itself stays, as its own; one that came from the team goes.
+                if s.fromDevice != nil {
+                    try db.execute(sql: "UPDATE source SET share = 'mac', shareAt = ?, removedAt = ? WHERE id = ?", arguments: [now, now, s.id])
+                } else {
+                    try db.execute(sql: "UPDATE source SET share = 'mac', shareAt = ? WHERE id = ?", arguments: [now, s.id])
+                }
+                lock.withLock { sourcesChanged = true }
+                return .applied(people: [], remote: [])
+            }
+            try db.execute(sql: "UPDATE source SET share = ?, shareAt = ?, projectId = ? WHERE id = ?", arguments: [share.rawValue, now, projectId, s.id])
+            // The teammate's folder moved: follow when this Mac's copy of the path no longer works.
+            if !FileManager.default.fileExists(atPath: s.path) {
+                let path = Self.resolvePath(f, team: team)
+                if path != s.path, FileManager.default.fileExists(atPath: path), !(try Self.overlaps(path, excluding: s.id!, db: db)) {
+                    try LibraryService.relinkPaths(s.id!, from: s.path, to: path, db: db)
+                }
+            }
+            lock.withLock { sourcesChanged = true }
+            return .applied(people: [], remote: [])
+        }
+        guard share != .mac else { return .ignored }
+        let path = Self.resolvePath(f, team: team)
+        if let same = try SourceRecord.filter(Column("path") == path).fetchOne(db) {
+            // This Mac already has that folder: it becomes the team's. Two Macs that shared it independently keep
+            // the smaller id, so every Mac ends up with the same one.
+            guard same.kind == .media, same.share == .mac || uuid < same.uuid else { return .ignored }
+            try db.execute(sql: "UPDATE source SET uuid = ?, share = ?, shareAt = ?, projectId = ? WHERE id = ?",
+                           arguments: [uuid, share.rawValue, now, projectId, same.id])
+            lock.withLock { sourcesChanged = true }
+            return .applied(people: [], remote: [])
+        }
+        // Inside or around a folder this Mac has: wait for the user to sort that out (Remove or Locate).
+        if try Self.overlaps(path, excluding: nil, db: db) { return .deferred }
+        var s = SourceRecord(path: path, kind: .media, projectId: projectId, share: share, uuid: uuid)
+        s.shareAt = now
+        s.fromDevice = device
+        try s.insert(db)
+        lock.withLock { sourcesChanged = true }
+        return .applied(people: [], remote: [])
+    }
+
+    static func overlaps(_ path: String, excluding id: Int64?, db: Database) throws -> Bool {
+        for other in try String.fetchAll(db, sql: "SELECT path FROM source WHERE id IS NOT ?", arguments: [id]) {
+            if other == path || path.hasPrefix(other + "/") || other.hasPrefix(path + "/") { return true }
+        }
+        return false
     }
 
     // MARK: - Applying a teammate's change
@@ -869,6 +1032,9 @@ public final class TeamSync: @unchecked Sendable {
 
         case "face":
             return try applyFaceOp(op, team: team, db: db)
+
+        case "folder":
+            return try applyFolderOp(op, team: team, device: device, db: db)
 
         case "cover":
             // A person's picture picked on another Mac: the same face here, when this Mac has that file.

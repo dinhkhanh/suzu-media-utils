@@ -76,10 +76,22 @@ and one for landscapes — logo, text or banner watermark, resize — auto tone
   sidebar shows the team above the project, with its Macs and the last sync; the project menu groups projects by
   team. Rename Team, Locate Team Folder… (when the NAS address changes), Stop Sharing a project, Leave Team (keeps
   projects and names).
+- **Three kinds of folders in a team:** *Team Folders* are the sources every Mac works on (the card folders on the
+  NAS): added on one Mac, they appear on every Mac of the team. *Edited Folders* are where the Mac in charge of
+  editing / selecting puts its results, and travel the same way. *Folders on This Mac* stay on that Mac, as before.
+  The sidebar and Files show the three groups; right-click a folder → In the Team to change its kind. A shared
+  folder is found on each Mac at the same distance from the team folder, so the share may be mounted under another
+  name; one taken out of the team leaves the Macs that only had it through the team and stays on those that added
+  it themselves.
 - **One Mac processes for the team:** in the team menu, "This Mac processes faces for the team" makes the strong
   Mac do the recognition while the Macs copying cards or editing only read its results from the team folder, for the
   files they have: faces, people, groups and crops, with no CPU or GPU spent. Edits made anywhere travel back and
-  everyone converges; the status pill says "Waiting for <Mac>" meanwhile.
+  everyone converges; the status pill says "Waiting for <Mac>" meanwhile. **Hybrid:** a Mac copying cards still
+  processes the files it copies, from the card as each one lands, and sends the faces ungrouped; the processing Mac
+  takes them for the files it has waiting instead of reading them back from the share, groups them, and sends the
+  file again with the people, which every Mac (the copier included) takes as the truth for the very faces it found.
+  While copiers are sending, the processing Mac gives a fresh file 30 s for their record to arrive before reading it
+  itself; otherwise it reads at once as before.
 - **Video moments:** per person, a clip of each appearance (cut without re-encoding), a highlight reel of the best
   moments, or the best still frames.
 - **Web gallery:** export a self-contained gallery folder, or share a live gallery on the local network (secret link,
@@ -166,6 +178,23 @@ hand, are matched by contents and not copied twice. Each card gets its own folde
 "Nam R5 card 1"; the camera and body serial come from EXIF), with a folder per hand-over if you like; copies are
 streamed through SHA-256 and read back, keep the original's times, and the card's folder can be added to the open
 project so faces are found as the files land. A card seen before can be forgotten (right-click) to copy it all again.
+
+Everything runs at once at an event, and the app is arranged for it: the card's folder joins the project before the
+first file lands, and each file is taken up **the moment it lands**, ahead of everything else waiting, with its
+faces read **from the card** (local, USB) while it is still in the slot, rather than back from the share minutes
+later when the folder scan gets to it and the card has long been swapped for the next one. The network carries each
+photo once, the faces are known about when the copy finishes, and a card pulled early just means the rest is read
+from the share. The folder scan finds those files already registered and leaves them alone; a RAW that came with
+its JPEG is left to the scan, which pairs the two as usual. While a copy, export or batch tool the user is waiting for runs, face work goes on with half
+the workers so the transfer gets the disk and network first, and resumes at full speed after. Copy and Move to
+person folders run several files at a time (several streams fill a share's link where one doesn't; an edited export
+renders one photo while the next is read), with colliding names kept apart. The library commits without waiting for
+the disk (WAL, synchronous=NORMAL, consistent through an app crash) and allows more concurrent readers, so a card
+copy, the processor, an export and the team sync never queue behind each other's commits. The team sync applies a
+teammate's changes and face records in short transactions (a backlog of thousands, as on joining, used to hold the
+writer for seconds), so card A's files can still be scanned and processed while card B is copying, and neither
+waits on the other. Progress reaches the screen a few times a second, not per 8 MB piece, and Files re-lists only
+when a folder comes or goes, not on every tick of a scan.
 In a team the ledger travels with the shared folder: a card copied on one Mac is known on every teammate's Mac, so
 the next hand-over can go to whichever Mac is free, through any reader or adapter (the card's own UUID is what
 counts). A card pulled in the middle of a copy stops it at once: what landed is kept and recorded, nothing half

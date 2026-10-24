@@ -41,6 +41,10 @@ struct SourceSummary: Identifiable, Hashable {
     var path: String
     var kind: SourceKind
     var projectId: Int64?
+    /// This Mac's own, the team's, or the editing Mac's (see SourceShare).
+    var share: SourceShare = .mac
+    /// The teammate's Mac that shared it here, if it came through the team.
+    var fromDevice: String?
     var files: Int
     var pending: Int
     var failed: Int
@@ -444,14 +448,16 @@ final class FaceGroupingModel: ObservableObject {
 
     nonisolated static func fetchSources(_ db: Database) throws -> [SourceSummary] {
         try Row.fetchAll(db, sql: """
-            SELECT s.id, s.path, s.kind, s.projectId,
+            SELECT s.id, s.path, s.kind, s.projectId, s.share, s.fromDevice,
                 COUNT(m.id) FILTER (WHERE m.duplicateOf IS NULL) AS files,
                 COUNT(m.id) FILTER (WHERE m.status = 'pending') AS pending,
                 COUNT(m.id) FILTER (WHERE m.status = 'failed') AS failed
             FROM source s LEFT JOIN media m ON m.sourceId = s.id
+            WHERE s.removedAt IS NULL
             GROUP BY s.id ORDER BY s.kind, s.path
             """).map {
             SourceSummary(id: $0["id"], path: $0["path"], kind: SourceKind(rawValue: $0["kind"]) ?? .media, projectId: $0["projectId"],
+                          share: SourceShare(rawValue: $0["share"]) ?? .mac, fromDevice: $0["fromDevice"],
                           files: $0["files"], pending: $0["pending"], failed: $0["failed"])
         }
     }
@@ -676,19 +682,42 @@ final class FaceGroupingModel: ObservableObject {
 
     func moveSource(_ id: Int64, to project: Int64) { perform { try $0.moveSource(id, to: project) } }
 
-    func addFolder(kind: SourceKind) {
+    /// Asks for folders and adds them: this Mac's own, the team's (every Mac of the team gets them), or the editing
+    /// Mac's folder (the same).
+    func addFolder(kind: SourceKind, share: SourceShare = .mac) {
         if kind == .media && currentProject == nil { askNewProject = true; return }
+        if share != .mac && currentTeam == nil { actionError = LibraryService.ProjectError.notShared.localizedDescription; return }
         let project = currentProject
-        let message = kind == .media
-            ? "Choose folders with photos and videos (local, external drive or NAS)."
-            : "Choose a folder with one subfolder per person, named after them, each holding a few clear photos of that person."
-        Panels.choose(folders: true, files: false, multiple: true, prompt: "Add", message: message,
-                      start: FileManager.default.homeDirectoryForCurrentUser) { [weak self] urls in
+        let message: String
+        switch (kind, share) {
+        case (.reference, _): message = "Choose a folder with one subfolder per person, named after them, each holding a few clear photos of that person."
+        case (_, .team): message = "Choose the folders the whole team works on (on the NAS share every Mac mounts). Every Mac in the team gets them."
+        case (_, .edited): message = "Choose the folder the editing Mac fills with edited and selected photos. Every Mac in the team sees it."
+        case (_, .mac): message = "Choose folders with photos and videos (local, external drive or NAS)."
+        }
+        // Team folders live where the team folder is: start the picker there.
+        let start = share == .mac ? FileManager.default.homeDirectoryForCurrentUser
+                                  : currentTeam.map { URL(fileURLWithPath: $0.folder).deletingLastPathComponent() } ?? FileManager.default.homeDirectoryForCurrentUser
+        Panels.choose(folders: true, files: false, multiple: true, prompt: "Add", message: message, start: start) { [weak self] urls in
             for url in urls {
-                self?.perform { try $0.addSource(url, kind: kind, project: project) }
-                self?.log("Added folder \(url.lastPathComponent)", icon: "folder.badge.plus")
+                self?.perform { try $0.addSource(url, kind: kind, project: project, share: share) }
+                self?.log(share == .mac ? "Added folder \(url.lastPathComponent)" : "Added \(share.title.lowercased()) \(url.lastPathComponent) · on every Mac of the team",
+                          icon: share == .mac ? "folder.badge.plus" : "person.3")
             }
         }
+    }
+
+    /// Makes a folder the team's, the editing Mac's, or this Mac's own again; the team's Macs follow.
+    func setShare(_ id: Int64, _ share: SourceShare) {
+        let name = sources.first { $0.id == id }?.name ?? "Folder"
+        perform { try $0.setShare(id, share) }
+        log(share == .mac ? "\(name) is now only on this Mac" : "\(name) is now a \(share.title.lowercased()) · on every Mac of the team", icon: "person.3")
+    }
+
+    /// The Mac a shared folder came from, by name when the team has seen it.
+    func sharer(of s: SourceSummary) -> String? {
+        guard let dev = s.fromDevice else { return nil }
+        return teamStatus.values.lazy.compactMap { st in st.devices.first { $0.id == dev }?.name }.first ?? "a teammate's Mac"
     }
 
     /// Adds the folder Copy from Cards fills, unless a folder of the library already holds it.

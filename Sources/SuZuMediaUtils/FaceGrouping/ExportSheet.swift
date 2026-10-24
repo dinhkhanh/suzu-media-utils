@@ -279,9 +279,12 @@ struct ExportSheet: View {
         running = true
         let exporter = service.exporter
         let policy = policy
+        let workers = min(6, ToolWork.parallelism)
         ToolWork.begin()
         Task.detached(priority: .utility) {
-            let r = exporter.run(plan, policy: policy) { n in if n % 5 == 0 || n == plan.items.count { Task { @MainActor in progress = n } } }
+            let r = exporter.run(plan, policy: policy, workers: workers) { n in
+                if n % 5 == 0 || n == plan.items.count { Task { @MainActor in progress = n } }
+            }
             await MainActor.run {
                 result = r
                 running = false

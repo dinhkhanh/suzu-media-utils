@@ -451,6 +451,111 @@ final class TeamSyncTests: XCTestCase {
         XCTAssertEqual(try b.sync.teams().count, 0)
     }
 
+    // MARK: Shared folders
+
+    func sources(_ mac: Mac) throws -> [SourceRecord] {
+        try mac.store.db.read { db in try SourceRecord.order(Column("id")).fetchAll(db) }
+    }
+
+    /// A folder made the team's (or the editing Mac's) on one Mac shows up on every Mac of the team, follows its
+    /// kind, and leaves when the Mac that shared it takes it out of the team; a Mac that had the folder as its own
+    /// before keeps it.
+    func testTeamAndEditedFoldersTravelAndLeaveWithTheirSharer() throws {
+        try a.sync.create(name: "Gala", folder: shared, project: a.project)
+        try joinAsTeammate()
+        let cards = tmp.appendingPathComponent("NAS/Events/Gala/Cards", isDirectory: true)
+        let edited = tmp.appendingPathComponent("NAS/Events/Gala/Edited", isDirectory: true)
+        try FileManager.default.createDirectory(at: cards, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: edited, withIntermediateDirectories: true)
+        var teamFolder = SourceRecord(path: canonicalPath(cards), projectId: a.project, share: .team)
+        var editedFolder = SourceRecord(path: canonicalPath(edited), projectId: a.project, share: .edited)
+        try a.store.db.write { db in try teamFolder.insert(db); try editedFolder.insert(db) }
+        exchange()
+        let onB = try sources(b).filter { $0.share != .mac }
+        XCTAssertEqual(onB.map(\.path).sorted(), [canonicalPath(cards), canonicalPath(edited)])
+        XCTAssertEqual(Set(onB.map(\.uuid)), [teamFolder.uuid, editedFolder.uuid])
+        XCTAssertEqual(onB.map(\.share).sorted { $0.rawValue < $1.rawValue }, [.edited, .team])
+        XCTAssertEqual(Set(onB.map(\.fromDevice)), [a.sync.deviceId], "B remembers the folders came from A")
+        XCTAssertEqual(Set(onB.map(\.projectId)), [b.project])
+        // A changes its mind: the edited folder is really a team folder. B follows (newest wins).
+        try a.store.db.write { db in
+            try db.execute(sql: "UPDATE source SET share = 'team', shareAt = ? WHERE id = ?", arguments: [Date().timeIntervalSince1970 + 5, editedFolder.id])
+        }
+        exchange()
+        XCTAssertEqual(try sources(b).first { $0.uuid == editedFolder.uuid }?.share, .team)
+        // A takes the Cards folder out of the team: B only had it through the team, so B drops it.
+        try a.store.db.write { db in
+            try db.execute(sql: "UPDATE source SET share = 'mac', shareAt = ? WHERE id = ?", arguments: [Date().timeIntervalSince1970 + 10, teamFolder.id])
+        }
+        exchange()
+        let dropped = try XCTUnwrap(try sources(b).first { $0.uuid == teamFolder.uuid })
+        XCTAssertNotNil(dropped.removedAt, "marked for removal; the app forgets its files in the background")
+        XCTAssertEqual(dropped.share, .mac)
+        XCTAssertEqual(try sources(a).first { $0.uuid == teamFolder.uuid }?.share, .mac, "A keeps it as its own")
+        XCTAssertNil(try sources(a).first { $0.uuid == teamFolder.uuid }?.removedAt)
+    }
+
+    func testAFolderAMacAlreadyHadBecomesTheTeamsAndStaysWhenUnshared() throws {
+        try a.sync.create(name: "Gala", folder: shared, project: a.project)
+        try joinAsTeammate()
+        let cards = tmp.appendingPathComponent("NAS/Events/Gala/Cards", isDirectory: true)
+        try FileManager.default.createDirectory(at: cards, withIntermediateDirectories: true)
+        // B added the NAS folder itself, as its own; then A shares the same folder with the team.
+        var bOwn = SourceRecord(path: canonicalPath(cards), projectId: b.project)
+        try b.store.db.write { db in try bOwn.insert(db) }
+        var aShared = SourceRecord(path: canonicalPath(cards), projectId: a.project, share: .team)
+        try a.store.db.write { db in try aShared.insert(db) }
+        exchange()
+        let onB = try sources(b).filter { $0.path == canonicalPath(cards) }
+        XCTAssertEqual(onB.count, 1, "the same folder once, not twice")
+        XCTAssertEqual(onB.first?.id, bOwn.id, "B's own entry became the team's")
+        XCTAssertEqual(onB.first?.uuid, aShared.uuid)
+        XCTAssertEqual(onB.first?.share, .team)
+        XCTAssertNil(onB.first?.fromDevice)
+        // A removes the folder from its library: B had it before the team, so B keeps it as its own.
+        try a.store.db.write { db in
+            try db.execute(sql: "INSERT INTO sourceGone (uuid, projectId, at) VALUES (?, ?, ?)", arguments: [aShared.uuid, a.project, Date().timeIntervalSince1970 + 5])
+            try db.execute(sql: "DELETE FROM source WHERE id = ?", arguments: [aShared.id])
+        }
+        exchange()
+        let kept = try XCTUnwrap(try sources(b).first { $0.id == bOwn.id })
+        XCTAssertEqual(kept.share, .mac)
+        XCTAssertNil(kept.removedAt)
+        XCTAssertEqual(try a.store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sourceGone") }, 0, "told the team, then forgotten")
+        // Two Macs sharing the same folder independently end up with one id for it: the smaller.
+        var again = SourceRecord(path: canonicalPath(cards), projectId: a.project, share: .team, uuid: "0000-first")
+        try a.store.db.write { db in try again.insert(db) }
+        try b.store.db.write { db in
+            try db.execute(sql: "UPDATE source SET share = 'team', shareAt = ?, uuid = 'zzzz-second' WHERE id = ?", arguments: [Date().timeIntervalSince1970 + 6, bOwn.id])
+        }
+        exchange()
+        XCTAssertEqual(try sources(a).filter { $0.path == canonicalPath(cards) }.map(\.uuid), ["0000-first"])
+        XCTAssertEqual(try sources(b).filter { $0.path == canonicalPath(cards) }.map(\.uuid), ["0000-first"])
+    }
+
+    /// Each Mac may mount the share under another name: a shared folder is found at the same distance from the
+    /// team folder, and the sharer's own path is only the fallback.
+    func testSharedFolderIsFoundNextToTheTeamFolderWhenTheShareIsMountedElsewhere() throws {
+        let cards = tmp.appendingPathComponent("NAS/Events/Gala/Cards", isDirectory: true)
+        try FileManager.default.createDirectory(at: cards, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
+        XCTAssertEqual(TeamSync.relativePath(of: canonicalPath(cards), to: shared), "../Events/Gala/Cards")
+        XCTAssertNil(TeamSync.relativePath(of: tmp.appendingPathComponent("Nowhere").path, to: shared), "a folder that isn't there has no distance")
+        // On the other Mac the same share is mounted as NAS2: the team folder is there, and so is the Cards folder.
+        let mounted = tmp.appendingPathComponent("NAS2", isDirectory: true)
+        try FileManager.default.createDirectory(at: mounted.appendingPathComponent("Gala Team"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: mounted.appendingPathComponent("Events/Gala/Cards"), withIntermediateDirectories: true)
+        let team = TeamRecord(uuid: "t", name: "Gala", folder: canonicalPath(mounted.appendingPathComponent("Gala Team")))
+        let payload = TeamSync.FolderPayload(path: "/Volumes/gone/Events/Gala/Cards", rel: "../Events/Gala/Cards", share: "team")
+        XCTAssertEqual(TeamSync.resolvePath(payload, team: team), canonicalPath(mounted.appendingPathComponent("Events/Gala/Cards")))
+        // No relative path (another volume): the sharer's path when it exists here, else kept as is (offline).
+        XCTAssertEqual(TeamSync.resolvePath(TeamSync.FolderPayload(path: canonicalPath(cards), rel: nil, share: "team"), team: team), canonicalPath(cards))
+        XCTAssertEqual(TeamSync.resolvePath(TeamSync.FolderPayload(path: "/Volumes/gone/X", rel: nil, share: "team"), team: team), "/Volumes/gone/X")
+        // Neither exists: the one next to the team folder, which is right once the share is back.
+        XCTAssertEqual(TeamSync.resolvePath(TeamSync.FolderPayload(path: "/Volumes/gone/X", rel: "../X", share: "team"), team: team),
+                       canonicalPath(mounted.appendingPathComponent("X")))
+    }
+
     /// A card copied on one Mac is known on the teammates' Macs: handed over to another Mac next time, only what
     /// was shot since is copied; names given to cards travel too.
     func testACardCopiedOnOneMacIsKnownOnTheOthers() throws {
