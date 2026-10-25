@@ -866,3 +866,15 @@ the preview, regular size, on a dark disc, and takes no clicks.
 - **Copy a folder's path.** "Save to" rows (the editor's Output, video tools, Copy Verifier) have a copy button
   beside Choose…, with the same "Copied" check as the editor strip's Copy Path (one shared `CopyPathButton`).
 - **One line under the header.** With the sessions bar, the toolbar no longer draws its own line above it.
+
+## v0.8.12 (2026-10-25): smooth People scrolling; Regroup after a wrong merge
+
+- **People grid scrolls smoothly.** Every tile had a real name field (an AppKit control each, slow to make), so
+  scrolling made a dozen per row. Now only the tile under the mouse, the one being named and the one naming moved
+  to (`fieldFor`) have one; the others draw the same look as text. Naming moves the cursor with `focusName`, which
+  gives the tile its field first and asks for focus again on the next pass. On 786 people, a 5.8 s scroll took
+  9.4 s with ~40 late frames; now 6.8 s with 4–5.
+- **Regroup.** On a person's Faces tab, selected faces can be let go (`LibraryService.regroup` / `letGo`): each is
+  placed again with whoever it looks most like, this person included, else clustered or left unassigned. Faces
+  placed by hand stay, so after a wrong merge a few faces moved to each right name steer the rest. The bar also has
+  Select All.

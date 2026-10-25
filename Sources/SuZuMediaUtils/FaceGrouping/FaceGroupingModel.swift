@@ -954,6 +954,7 @@ final class FaceGroupingModel: ObservableObject {
 
     func reject(_ faceIds: Set<Int64>, from personId: Int64) { perform { try $0.reject(faceIds: Array(faceIds), from: personId) } }
     func assign(_ faceIds: Set<Int64>, to personId: Int64) { perform { try $0.assign(faceIds: Array(faceIds), to: personId) } }
+    func regroup(_ faceIds: Set<Int64>) { perform { try $0.regroup(faceIds: Array(faceIds)) } }
     func newPerson(named name: String, faces: Set<Int64>) { perform { try $0.newPerson(name: name, faceIds: Array(faces)) } }
 
     @Published var actionError: String?

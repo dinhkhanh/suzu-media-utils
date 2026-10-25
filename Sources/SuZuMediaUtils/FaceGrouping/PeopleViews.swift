@@ -23,6 +23,9 @@ struct PeopleGrid: View {
     let scope: PeopleScope
     @State private var selected: Set<Int64> = []
     @FocusState private var editing: Int64?
+    /// The tile naming moved to (or last typed in): it keeps a real name field even without the mouse over it, so
+    /// the cursor has a field to land in (see `PersonCell.liveField`).
+    @State private var fieldFor: Int64?
     @State private var suggesting = false
     @State private var exportAll: ExportMode?
     @State private var galleryExport = false
@@ -83,7 +86,12 @@ struct PeopleGrid: View {
         }
         .overlay(alignment: .bottom) { if !selected.isEmpty { selectionBar } }
         // Clicking into a name field selects that person (the click lands in the field, not on the tile).
-        .onChange(of: editing) { _, now in if let now, selected != [now] { selected = [now] } }
+        .onChange(of: editing) { _, now in
+            if let now {
+                fieldFor = now
+                if selected != [now] { selected = [now] }
+            }
+        }
         .navigationTitle(model.currentSession.map { "\(title) · \(model.sessionTitle($0))" } ?? title)
         .navigationSubtitle("\(named + unnamed) · \(named) named" + (unnamed > 0 ? " · \(unnamed) to name" : ""))
         .searchable(text: $search, prompt: "Search names")
@@ -132,7 +140,7 @@ struct PeopleGrid: View {
         // The known-people array is passed whole (shared storage compares in O(1)); the tile leaves itself out
         // only when its menu opens. Filtering it per tile made every click cost people² work.
         return PersonGridCell(person: p, selected: selected.contains(p.id), mergeCount: mergeCount,
-                              known: model.knownPeople, groups: model.groups, editing: editing == p.id, focus: $editing,
+                              known: model.knownPeople, groups: model.groups, editing: editing == p.id, field: fieldFor == p.id, focus: $editing,
                               open: { path.append(PersonRoute(id: p.id)) },
                               click: {
                                   selected.click(p.id, in: order)
@@ -226,17 +234,26 @@ extension PeopleGrid {
     func commitName(_ raw: String, for person: PersonSummary) {
         let name = raw.trimmingCharacters(in: .whitespaces)
         if !name.isEmpty && name != person.name { model.rename(person.id, to: name) }
-        editing = person.name == nil && !name.isEmpty ? nextUnnamed(after: person)?.id : nil
+        focusName(person.name == nil && !name.isEmpty ? nextUnnamed(after: person)?.id : nil)
     }
 
     /// ⇥: leave this one for later and go to the next unnamed person.
     func skip(from person: PersonSummary) {
-        editing = nextUnnamed(after: person)?.id
+        focusName(nextUnnamed(after: person)?.id)
     }
 
     func startNaming() {
         if filter == .named { filter = .all }
-        editing = shown.first { $0.name == nil }?.id
+        focusName(shown.first { $0.name == nil }?.id)
+    }
+
+    /// Puts the cursor in this person's name field. The tile gets its field first (only the tile under the mouse has
+    /// one otherwise), and focus is asked for again once the field is there.
+    func focusName(_ id: Int64?) {
+        if let id { fieldFor = id }
+        editing = id
+        guard let id else { return }
+        DispatchQueue.main.async { if fieldFor == id, editing != id { editing = id } }
     }
 
     func nextUnnamed(after person: PersonSummary) -> PersonSummary? {
@@ -283,6 +300,8 @@ struct PersonGridCell: View, Equatable {
     let groups: [PersonGroupSummary]
     /// This person's name is being edited.
     let editing: Bool
+    /// Keeps a real name field (see `PersonCell.liveField`).
+    let field: Bool
     var focus: FocusState<Int64?>.Binding
     let open: () -> Void
     let click: () -> Void
@@ -296,11 +315,11 @@ struct PersonGridCell: View, Equatable {
 
     static func == (a: PersonGridCell, b: PersonGridCell) -> Bool {
         a.person == b.person && a.selected == b.selected && a.mergeCount == b.mergeCount && a.known == b.known
-            && a.groups == b.groups && a.editing == b.editing
+            && a.groups == b.groups && a.editing == b.editing && a.field == b.field
     }
 
     var body: some View {
-        PersonCell(person: person, selected: selected, groups: groups, editing: focus, onRename: rename, onSkip: skip)
+        PersonCell(person: person, selected: selected, groups: groups, editing: focus, keepField: field, onRename: rename, onSkip: skip)
             .onTapGesture(count: 2, perform: open)
             .onTapGesture(perform: click)
             .contextMenu {
@@ -327,6 +346,8 @@ struct PersonCell: View {
     let selected: Bool
     var groups: [PersonGroupSummary] = []
     var editing: FocusState<Int64?>.Binding?
+    /// Has a real name field even without the mouse over it (naming moved here).
+    var keepField = false
     var onRename: ((String) -> Void)?
     var onSkip: (() -> Void)?
     @State private var name = ""
@@ -334,6 +355,10 @@ struct PersonCell: View {
     @State private var hovering = false
 
     var isEditing: Bool { editing?.wrappedValue == person.id }
+    /// A real text field (an AppKit control each, slow to make) only where it can be used: on the tile under the
+    /// mouse, which a click lands in, and the one being named. Every other tile draws the same look as plain text,
+    /// so scrolling past hundreds of tiles doesn't make hundreds of fields.
+    var liveField: Bool { isEditing || hovering || keepField }
     /// A name shown, not being typed: the field's own (truncated) text gives way to the marquee on top of it.
     var marquee: Bool { person.name != nil && !isEditing }
 
@@ -354,7 +379,7 @@ struct PersonCell: View {
                             .help("Pinned: comes first in every grid")
                     }
                 }
-            if let editing, let onRename {
+            if let editing, let onRename, liveField {
                 // Inline name field, always there: click, type, Return. Escape restores the old name. Unnamed, it
                 // shows as a dashed "Add name" until it has focus.
                 TextField("Add name", text: $name)
@@ -387,6 +412,16 @@ struct PersonCell: View {
                     .onAppear { name = person.name ?? "" }
                     .onChange(of: person.name) { name = person.name ?? "" }
                     .help(person.name == nil ? "Click and type a name" : "Click to rename")
+            } else if editing != nil, person.name == nil {
+                // The field's look while unnamed: a dashed "Add name".
+                Text("Add name")
+                    .font(.callout.weight(.medium)).foregroundStyle(Color.amber)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.amber.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [3, 2])))
+                    .fixedSize()
+            } else if editing != nil {
+                MarqueeText(text: person.displayName, scrolling: hovering)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
             } else {
                 MarqueeText(text: person.displayName, scrolling: hovering)
                     .foregroundStyle(person.name == nil ? .secondary : .primary)
@@ -751,7 +786,15 @@ struct PersonDetail: View {
                 selectedFaces = []
             }
             .help("Remove the selected faces; they won't be put back here automatically")
+            Button("Regroup") {
+                model.regroup(selectedFaces)
+                selectedFaces = []
+            }
+            .help("Let the app place the selected faces again: each goes to whoever it looks most like (this person too, if right), or into a new group. Faces you placed by hand stay. After a wrong merge, move a few faces to the right names first, then regroup the rest.")
             MoveFacesMenu(faces: selectedFaces, excluding: personId) { selectedFaces = [] }.fixedSize()
+            if selectedFaces.count < faces.count {
+                Button("Select All \(faces.count.formatted())") { selectedFaces = Set(faces.map(\.id)) }
+            }
         }
     }
 

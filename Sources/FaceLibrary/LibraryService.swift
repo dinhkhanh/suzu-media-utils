@@ -564,6 +564,36 @@ public final class LibraryService: @unchecked Sendable {
         teamSync.pushSoon()
     }
 
+    /// "Regroup": the app places these faces again, each with whoever it looks most like (their person now too, when
+    /// that is still the best match), else in a new group or among the unassigned. Faces placed by hand stay: they
+    /// are what the people look like, so after a wrong merge the faces moved to the right names steer the rest.
+    /// Returns how many faces were let go.
+    @discardableResult
+    public func regroup(faceIds: [Int64]) throws -> Int {
+        guard !faceIds.isEmpty else { return 0 }
+        let (people, media, count) = try store.db.write { db in try Self.letGo(faceIds, db: db) }
+        guard count > 0 else { return 0 }
+        // Their people first lose them (the engine's picture of each person is rebuilt), then they are placed.
+        engine.peopleChanged(people)
+        engine.regroup(mediaIds: Array(media))
+        teamSync.pushSoon()
+        return count
+    }
+
+    /// The database side of `regroup`: the faces not placed by hand leave their people and wait to be placed.
+    /// Returns their people, their files and how many.
+    static func letGo(_ faceIds: [Int64], db: Database) throws -> (people: Set<Int64>, media: Set<Int64>, count: Int) {
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT id, personId, mediaId FROM face
+            WHERE id IN (\(faceIds.map(String.init).joined(separator: ","))) AND assignment != 'user' AND embedding IS NOT NULL
+            """)
+        guard !rows.isEmpty else { return ([], [], 0) }
+        let ids = rows.map { String($0["id"] as Int64) }.joined(separator: ",")
+        try db.execute(sql: "UPDATE face SET personId = NULL, assignment = 'none' WHERE id IN (\(ids))")
+        try db.execute(sql: "INSERT OR IGNORE INTO faceEditPublish (faceId) SELECT id FROM face WHERE id IN (\(ids))")
+        return (Set(rows.compactMap { $0["personId"] as Int64? }), Set(rows.map { $0["mediaId"] as Int64 }), rows.count)
+    }
+
     /// Puts faces (and, for videos, nothing else) under a person and locks them there. A face moved out of another
     /// person is also marked as not theirs, so the two are never merged back together automatically.
     public func assign(faceIds: [Int64], to personId: Int64) throws {

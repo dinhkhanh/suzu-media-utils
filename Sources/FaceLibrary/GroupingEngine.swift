@@ -142,6 +142,15 @@ public final class GroupingEngine: @unchecked Sendable {
         }
     }
 
+    /// Faces in these files were let go to be placed again ("Regroup"): each goes to whoever it looks most like,
+    /// and the rest wait for the next clustering pass.
+    public func regroup(mediaIds: [Int64]) {
+        queue.async { [self] in
+            try? assignPending(mediaIds: mediaIds)
+            scheduleRecluster()
+        }
+    }
+
     /// Call after faces were removed from or added to people outside the engine (user edits, deleted files).
     public func peopleChanged(_ ids: Set<Int64>) {
         queue.async { [self] in try? rebuild(personIds: ids) }

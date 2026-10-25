@@ -187,6 +187,40 @@ final class GroupingTests: XCTestCase {
         XCTAssertEqual(try store.db.read { db in try String.fetchOne(db, sql: "SELECT name FROM person") }, "Anh")
     }
 
+    /// Two people merged by mistake: after moving a few faces to each right name, "Regroup" on everything left
+    /// sends each face to the person it looks like. Faces placed by hand stay put.
+    func testRegroupAfterAWrongMergeSendsEachFaceToTheRightPerson() throws {
+        let a = direction(), b = direction()
+        let (anh, binh) = try store.db.write { db -> (Int64, Int64) in
+            var p = PersonRecord(name: "Anh"), q = PersonRecord(name: "Bình")
+            try p.insert(db); try q.insert(db)
+            return (p.id!, q.id!)
+        }
+        // The wrong merge: both people's faces under Anh.
+        var aFaces: [Int64] = [], bFaces: [Int64] = []
+        for _ in 0..<6 { aFaces.append(try photo(face(a), personId: anh)) }
+        for _ in 0..<6 { bFaces.append(try photo(face(b), personId: anh)) }
+        // A couple of faces moved to each right name by hand (as Move to… does).
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE face SET assignment = 'user' WHERE id IN (\(aFaces[0]), \(aFaces[1]))")
+            try db.execute(sql: "UPDATE face SET personId = ?, assignment = 'user', rejectedPersonId = ? WHERE id IN (\(bFaces[0]), \(bFaces[1]))",
+                           arguments: [binh, anh])
+        }
+        try engine.rebuild(personIds: [anh, binh])
+
+        // Regroup everything still under Anh.
+        let all = try store.db.read { db in try Int64.fetchAll(db, sql: "SELECT id FROM face WHERE personId = ?", arguments: [anh]) }
+        let released = try store.db.write { db in try LibraryService.letGo(all, db: db) }
+        XCTAssertEqual(released.count, 8, "the two faces placed by hand stay")
+        try engine.rebuild(personIds: released.people)
+        try engine.assignPending(mediaIds: Array(released.media))
+
+        XCTAssertEqual(try aFaces.map { try person(of: $0) }, Array(repeating: anh, count: 6))
+        XCTAssertEqual(try bFaces.map { try person(of: $0) }, Array(repeating: binh, count: 6))
+        let handPlaced = try store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM face WHERE assignment = 'user'") }
+        XCTAssertEqual(handPlaced, 4)
+    }
+
     /// Exemplars cover a person's looks: near-duplicates of a look are not kept, a new look is.
     func testExemplarsCoverLooks() throws {
         let a = direction(), glasses = direction()
