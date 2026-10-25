@@ -310,7 +310,7 @@ struct FaceGroupingStatusBody: View {
         // Files this Mac processes itself (the cards it copies) show as processing even when another Mac does the
         // team's face work; the rest waits for that Mac.
         if model.stats.pending > 0, let mac = model.processingMac, (model.service?.processor.queuedCount ?? 0) == 0 {
-            return ("Waiting for \(mac): \(model.stats.pending.formatted()) files", "faces are processed there and read from the team folder",
+            return ("Waiting for \(mac): \(model.stats.pending.formatted()) files", "faces are processed there and read from the team sync folder",
                     Double(model.stats.files - model.stats.pending) / Double(max(1, model.stats.files)))
         }
         if model.stats.pending > 0 {

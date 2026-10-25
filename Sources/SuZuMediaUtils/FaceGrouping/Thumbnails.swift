@@ -30,9 +30,22 @@ final class Thumbnails: @unchecked Sendable {
     /// A file's thumbnail, the way the Finder shows one: from memory, else from the library's thumbnail file
     /// (made when the file was processed, or by the idle-time pass), else made now and kept. For videos with a
     /// `time`, the frame there (where the person is); the file's own thumbnail is the frame a moment in.
+    ///
+    /// A file given without its library id (the editor's strip and grid) is looked up by path, so a library file
+    /// shows its thumbnail file (local, milliseconds) instead of being read off the NAS and decoded again. A still
+    /// thumbnail is kept once for every size it is shown at (the library's is 400 px).
     func media(_ url: URL, id: Int64? = nil, time: Double?, side: CGFloat) async -> NSImage? {
+        let still = "\(url.path)#still" as NSString
+        if time == nil, let img = cache.object(forKey: still) { return img }
         let key = "\(url.path)#\(time ?? -1)#\(Int(side))" as NSString
         if let img = cache.object(forKey: key) { return img }
+        var id = id
+        if id == nil, time == nil, let store {
+            let path = url.path
+            id = await Task.detached(priority: .userInitiated) {
+                try? store.db.read { db in try Int64.fetchOne(db, sql: "SELECT COALESCE(duplicateOf, id) FROM media WHERE path = ?", arguments: [path]) }
+            }.value ?? nil
+        }
         var image: NSImage?
         let wantsFrame = time != nil && !(time == 0 && id != nil)
         if let id, let store, !wantsFrame {
@@ -64,10 +77,14 @@ final class Thumbnails: @unchecked Sendable {
             await diskSlots.acquire()
             defer { Task { await self.diskSlots.release() } }
             guard !Task.isCancelled else { return nil }
-            let made = await Task.detached(priority: .userInitiated) { MediaAnalyzer.thumbnail(url, maxPixel: max(400, Int(side * 2))) }.value
+            let made = await Task.detached(priority: .userInitiated) { MediaAnalyzer.displayThumbnail(url, maxPixel: max(400, Int(side * 2))) }.value
             image = made.map { NSImage(cgImage: $0, size: .zero) }
         }
-        if let image { cache.setObject(image, forKey: key) }
+        if let image {
+            cache.setObject(image, forKey: key)
+            // The library's thumbnail serves every size; so does a decode at the usual 400 px.
+            if time == nil, id != nil || side <= 200 { cache.setObject(image, forKey: still) }
+        }
         return image
     }
 }

@@ -463,6 +463,34 @@ final class TeamSyncTests: XCTestCase {
         try mac.store.db.read { db in try SourceRecord.order(Column("id")).fetchAll(db) }
     }
 
+    /// A Mac that read the team's log with a version that didn't know shared folders skipped them and moved on.
+    /// Its first pass with a version that knows them reads what it had read again, for folders only, and the
+    /// folders appear; nothing else is applied twice.
+    func testFoldersSkippedByAnOlderVersionArriveAfterTheUpdate() throws {
+        try a.sync.create(name: "Gala", folder: shared, project: a.project)
+        try joinAsTeammate()
+        exchange()
+        let cards = tmp.appendingPathComponent("NAS/Events/Gala/Cards", isDirectory: true)
+        try FileManager.default.createDirectory(at: cards, withIntermediateDirectories: true)
+        var teamFolder = SourceRecord(path: canonicalPath(cards), projectId: a.project, share: .team)
+        try a.store.db.write { db in try teamFolder.insert(db) }
+        a.sync.pushSoon(); a.sync.syncNow()
+        // B as 0.8.3 was: past the end of A's log, the folder never applied.
+        let log = TeamSync.devicesURL(shared).appendingPathComponent("\(a.sync.deviceId).jsonl")
+        let size = try XCTUnwrap(try log.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+        let team = try XCTUnwrap(try b.sync.teams().first)
+        try b.store.db.write { db in
+            try db.execute(sql: "INSERT OR REPLACE INTO syncState (teamId, key, value) VALUES (?, ?, ?)", arguments: [team.id, "cursor:\(a.sync.deviceId)", String(size)])
+            try db.execute(sql: "INSERT OR REPLACE INTO syncState (teamId, key, value) VALUES (?, ?, '1')", arguments: [team.id, "reader"])
+        }
+        let peopleBefore = try b.people().count
+        XCTAssertTrue(try sources(b).filter { $0.share != .mac }.isEmpty)
+        b.sync.syncNow()
+        XCTAssertEqual(try sources(b).filter { $0.share != .mac }.map(\.uuid), [teamFolder.uuid])
+        XCTAssertEqual(try b.people().count, peopleBefore)
+        XCTAssertEqual(try b.store.db.read { db in try String.fetchOne(db, sql: "SELECT value FROM syncState WHERE key = 'reader'") }, String(TeamSync.readerVersion))
+    }
+
     /// A folder made the team's (or the editing Mac's) on one Mac shows up on every Mac of the team, follows its
     /// kind, and leaves when the Mac that shared it takes it out of the team; a Mac that had the folder as its own
     /// before keeps it.

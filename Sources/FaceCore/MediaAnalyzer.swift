@@ -85,6 +85,16 @@ public enum MediaAnalyzer {
         return scaled(image, maxPixel: maxPixel)
     }
 
+    /// A thumbnail to show (a strip, a grid), long side at most `maxPixel`: the camera's embedded one when it is
+    /// big enough (only the start of the file is read), else a decode at that size (a RAW's embedded preview).
+    /// Not for analysis: `thumbnail` decodes at the detection size, which on a NAS file is several times slower.
+    public static func displayThumbnail(_ url: URL, maxPixel: Int) -> CGImage? {
+        if isVideo(url) { return thumbnail(url, maxPixel: maxPixel) }
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, ImageLoader.sourceOptions(for: url) as CFDictionary) else { return nil }
+        if let e = ImageLoader.embeddedThumbnail(src, maxPixel: maxPixel), max(e.width, e.height) * 4 >= maxPixel * 3 { return e }
+        return ImageLoader.decode(src, maxPixel: maxPixel)
+    }
+
     /// Feature print from the small preview embedded in the file (only the start of the file is read), falling
     /// back to a quick 1/8-scale decode. For burst detection, which only compares near-identical frames.
     public static func quickFeaturePrint(_ url: URL) -> [Float]? {

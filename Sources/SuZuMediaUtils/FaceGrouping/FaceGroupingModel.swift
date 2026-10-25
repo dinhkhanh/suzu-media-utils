@@ -705,7 +705,7 @@ final class FaceGroupingModel: ObservableObject {
         case (_, .edited): message = "Choose the folder the editing Mac fills with edited and selected photos. Every Mac in the team sees it."
         case (_, .mac): message = "Choose folders with photos and videos (local, external drive or NAS)."
         }
-        // Team folders live where the team folder is: start the picker there.
+        // Team folders live where the team sync folder is: start the picker there.
         let start = share == .mac ? FileManager.default.homeDirectoryForCurrentUser
                                   : currentTeam.map { URL(fileURLWithPath: $0.folder).deletingLastPathComponent() } ?? FileManager.default.homeDirectoryForCurrentUser
         Panels.choose(folders: true, files: false, multiple: true, prompt: "Add", message: message, start: start) { [weak self] urls in
@@ -897,7 +897,7 @@ final class FaceGroupingModel: ObservableObject {
         if let team = service.teamSync.member(of: folder), team.folder == canonicalPath(folder) {
             if projects.first(where: { $0.id == currentProject })?.teamId != team.id,
                let first = projects.last(where: { $0.teamId == team.id }) { currentProject = first.id }
-            log("Already in \(team.name) · same team folder, nothing to sync again", icon: "person.3")
+            log("Already in \(team.name) · same team sync folder, nothing to sync again", icon: "person.3")
             return true
         }
         var joined: TeamRecord?
@@ -941,11 +941,11 @@ final class FaceGroupingModel: ObservableObject {
 
     func renameTeam(_ id: Int64, to name: String) { perform { try $0.teamSync.rename(id, to: name) } }
 
-    /// The team folder moved (new NAS address or mount name): same team, new path.
+    /// The team sync folder moved (new NAS address or mount name): same team, new path.
     func relocateTeam(_ id: Int64, to folder: URL) {
         var moved = true
         perform { moved = try $0.teamSync.relocate(id, to: folder) }
-        if !moved, actionError == nil { log("Same team folder as before · nothing to sync again", icon: "person.3") }
+        if !moved, actionError == nil { log("Same team sync folder as before · nothing to sync again", icon: "person.3") }
     }
 
     func syncTeamNow() { service?.teamSync.syncSoon() }

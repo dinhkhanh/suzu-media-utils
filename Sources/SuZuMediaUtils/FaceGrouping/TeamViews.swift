@@ -35,14 +35,14 @@ struct TeamBar: View {
                 Divider()
                 Button("Sync Now") { model.syncTeamNow() }
                 Button("Rename Team…") { newName = team.name; renaming = true }
-                Button("Show Team Folder in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: team.folder) }
+                Button("Show Team Sync Folder in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: team.folder) }
                 // The NAS got a new address or the share a new mount name: same team, new path.
-                Button("Locate Team Folder…") {
+                Button("Locate Team Sync Folder…") {
                     Panels.chooseFolder(prompt: "Use This Folder", start: URL(fileURLWithPath: team.folder).deletingLastPathComponent()) {
                         model.relocateTeam(team.id!, to: $0)
                     }
                 }
-                Button("Copy Team Folder Path") {
+                Button("Copy Team Sync Folder Path") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(team.folder, forType: .string)
                 }
@@ -53,7 +53,7 @@ struct TeamBar: View {
                         }
                     }
                 }
-                // One strong Mac can do the face work; the others take its results from the team folder.
+                // One strong Mac can do the face work; the others take its results from the team sync folder.
                 Section("Face processing") {
                     let mine = model.isProcessor(team)
                     Button(mine ? "✓ This Mac processes faces for the team" : "This Mac processes faces for the team") { model.setProcessor(team, thisMac: true) }
@@ -109,7 +109,7 @@ struct TeamBar: View {
         .confirmationDialog("Leave the team “\(team?.name ?? "")”?", isPresented: $confirmLeave) {
             Button("Leave Team", role: .destructive) { if let team { model.leaveTeam(team.id!) } }
         } message: {
-            Text("This Mac stops sharing with the team. Its projects stay here, now only on this Mac; people keep their names; what teammates' Macs saw of their faces is forgotten. The team folder and the other Macs are not touched.")
+            Text("This Mac stops sharing with the team. Its projects stay here, now only on this Mac; people keep their names; what teammates' Macs saw of their faces is forgotten. The team sync folder and the other Macs are not touched.")
         }
     }
 
@@ -146,7 +146,7 @@ struct TeamBar: View {
 
     static func subtitle(_ status: TeamSync.TeamStatus?) -> String {
         guard let status else { return "Connecting…" }
-        if !status.reachable { return "Folder not reachable — resumes when it is back (moved? Locate Team Folder…)" }
+        if !status.reachable { return "Folder not reachable — resumes when it is back (moved? Locate Team Sync Folder…)" }
         if let e = status.error { return e }
         let macs = status.devices.count
         let synced = status.lastSync.map { "synced \(ago($0))" } ?? "syncing…"
@@ -208,7 +208,7 @@ struct ShareTeamSheet: View {
                     TextField("Team name", text: $name, prompt: Text(model.teams.isEmpty ? "e.g. SuZu Media" : "Team name")).textFieldStyle(.roundedBorder)
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
-                            Text("Team folder").font(.headline)
+                            Text("Team sync folder").font(.headline)
                             Spacer()
                             Button("Choose…") {
                                 Panels.choose(folders: true, files: false, prompt: "Use This Folder",
@@ -218,7 +218,7 @@ struct ShareTeamSheet: View {
                         }
                         Text(folder?.path ?? "An empty folder on the NAS, or in Dropbox / iCloud Drive").foregroundStyle(folder == nil ? .secondary : .primary)
                             .lineLimit(2).truncationMode(.middle)
-                        Text("One team folder serves every event: keep it somewhere permanent, e.g. “SuZu Media – Team”.").font(.caption).foregroundStyle(.secondary)
+                        Text("One team sync folder serves every event: keep it somewhere permanent, e.g. “SuZu Media – Team”.").font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 HStack {
@@ -254,13 +254,13 @@ struct JoinTeamSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Join a Team").font(.title2.bold())
-            Text("Pick the team folder a teammate shared (on the NAS, or in Dropbox / iCloud Drive). Its projects appear here, the people they name are recognised here, and yours there.")
+            Text("Pick the team sync folder a teammate shared (on the NAS, or in Dropbox / iCloud Drive). Its projects appear here, the people they name are recognised here, and yours there.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Text(folder?.path ?? "No folder chosen").foregroundStyle(folder == nil ? .secondary : .primary).lineLimit(2).truncationMode(.middle)
                 Spacer()
                 Button("Choose…") {
-                    Panels.choose(folders: true, files: false, prompt: "Join", message: "Choose the team folder your teammate shared.",
+                    Panels.choose(folders: true, files: false, prompt: "Join", message: "Choose the team sync folder your teammate shared.",
                                   start: model.projectSources.first.map { URL(fileURLWithPath: $0.path).deletingLastPathComponent() }) { urls in
                         guard let u = urls.first else { return }
                         folder = u

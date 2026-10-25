@@ -83,7 +83,7 @@ public final class TeamSync: @unchecked Sendable {
         case differentTeam(String, String)
         public var errorDescription: String? {
             switch self {
-            case .notATeamFolder: "That folder has no team in it. Pick the folder a teammate shared, or create a team."
+            case .notATeamFolder: "That folder has no team in it. Pick the team sync folder a teammate shared, or create a team."
             case .alreadyATeamFolder(let n): "That folder already holds the team “\(n)”. Join it instead."
             case .projectAlreadyShared(let n): "This project is already shared with the team “\(n)”."
             case .folderUnreachable: "The folder can't be reached. Mount the share (or open Dropbox / iCloud Drive) and try again."
@@ -677,6 +677,57 @@ public final class TeamSync: @unchecked Sendable {
         return out.sorted { ($0.isThisMac ? 0 : 1, $0.name) < ($1.isThisMac ? 0 : 1, $1.name) }
     }
 
+    /// Entry kinds added after the first team release, with the reader version that knows them. An older version
+    /// skips an entry it doesn't know and still moves its place in the log past it, so the entry was lost on that
+    /// Mac for good (0.8.3 did this to the first team and edited folders). When a newer version first reads a
+    /// team, it goes over what it had already read once more, for just the kinds it learnt since. A new kind of
+    /// entry is added here with the next version number.
+    static let lateKinds: [(version: Int, kinds: Set<String>)] = [(2, ["folder"])]
+    static var readerVersion: Int { lateKinds.map(\.version).max() ?? 1 }
+
+    /// Reads what this Mac already read of each teammate's log again, applying only the kinds learnt since
+    /// reader version `since`. Returns whether anything was applied or deferred.
+    func replayLateKinds(_ team: TeamRecord, since: Int, state: [String: String],
+                         affected: inout Set<Int64>, remoteChanged: inout Set<Int64>) throws -> Bool {
+        let kinds = Self.lateKinds.filter { $0.version > since }.reduce(into: Set<String>()) { $0.formUnion($1.kinds) }
+        guard !kinds.isEmpty else { return false }
+        let teamId = team.id!
+        var any = false
+        let logs = (try? FileManager.default.contentsOfDirectory(at: Self.devicesURL(team.url), includingPropertiesForKeys: nil)) ?? []
+        for f in logs where f.pathExtension == "jsonl" {
+            let id = f.deletingPathExtension().lastPathComponent
+            let cursor = Int(state["cursor:\(id)"] ?? "0") ?? 0
+            guard id != deviceId, cursor > 0 else { continue }
+            let h = try FileHandle(forReadingFrom: f)
+            defer { try? h.close() }
+            let data = try h.read(upToCount: cursor) ?? Data()
+            let decoder = JSONDecoder()
+            // A cheap look for the kind's name first: most lines are other kinds.
+            let ops = data.split(separator: 0x0A).compactMap { line -> Op? in
+                guard kinds.contains(where: { line.range(of: Data("\"\($0)\"".utf8)) != nil }) else { return nil }
+                guard let op = try? decoder.decode(Op.self, from: line), kinds.contains(op.t) else { return nil }
+                return op
+            }
+            guard !ops.isEmpty else { continue }
+            try store.db.write { db in
+                for op in ops {
+                    switch try apply(op, team: team, device: id, db: db) {
+                    case .applied(let people, let remote):
+                        affected.formUnion(people); remoteChanged.formUnion(remote); any = true
+                    case .deferred:
+                        var kept = op
+                        kept.device = kept.device ?? id
+                        try db.execute(sql: "INSERT INTO syncDeferred (teamId, op) VALUES (?, ?)",
+                                       arguments: [teamId, String(decoding: try JSONEncoder().encode(kept), as: UTF8.self)])
+                        any = true
+                    case .ignored: break
+                    }
+                }
+            }
+        }
+        return any
+    }
+
     func pull(_ team: TeamRecord) throws -> Bool {
         let teamId = team.id!
         var changed = false
@@ -684,6 +735,15 @@ public final class TeamSync: @unchecked Sendable {
         var remoteChanged: Set<Int64> = []
         let fm = FileManager.default
         let state = try state(teamId)
+        // A newer version than the one that read this team so far: entries it skipped then are read now.
+        let reader = Int(state["reader"] ?? "1") ?? 1
+        if reader < Self.readerVersion {
+            if try replayLateKinds(team, since: reader, state: state, affected: &affected, remoteChanged: &remoteChanged) { changed = true }
+            try store.db.write { db in
+                try db.execute(sql: "INSERT OR REPLACE INTO syncState (teamId, key, value) VALUES (?, ?, ?)",
+                               arguments: [teamId, "reader", String(Self.readerVersion)])
+            }
+        }
         let logs = (try? fm.contentsOfDirectory(at: Self.devicesURL(team.url), includingPropertiesForKeys: [.fileSizeKey])) ?? []
         for f in logs where f.pathExtension == "jsonl" {
             let id = f.deletingPathExtension().lastPathComponent

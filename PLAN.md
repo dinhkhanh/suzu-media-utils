@@ -820,3 +820,24 @@ are written as plain bytes, `cropCopyLanes` (8) at a time (`SharedFaces.copyCrop
 at most `facePublishTimeBox` (20 s), deleting only what it handled from the queues, the rest left for the next.
 
 **Copy Path** shows "Copied" with a checkmark for 1.5 s; both labels share one frame so the strip doesn't move.
+
+## v0.8.9 (2026-10-25): folders a 0.8.3 Mac skipped; the Team Sync Folder; editor thumbnails from the library
+
+**Team and edited folders missing on a teammate's Mac.** The Mac Studio's log held the three `folder` entries
+(written 2026-10-24 23:16 UTC, 20 minutes after 0.8.4 was published); the MacBook Pro was syncing minutes later,
+most likely still on 0.8.3, whose `apply` returns `.ignored` for kinds it doesn't know while the cursor moves
+past them, so after updating it never read them again. `TeamSync.lateKinds` lists kinds added after the first
+team release with a reader version (`folder` is 2); `syncState "reader"` holds the version that read the team so
+far, and when it is older, `replayLateKinds` reads each log up to its cursor again, applying only those kinds
+(newest-wins makes a repeat harmless). A future kind goes in the list with the next version (test).
+
+**"Team Sync Folder".** The folder that holds `team.json`, the logs and the faces is called the Team Sync Folder
+everywhere it is shown (Locate…, Show in Finder, Copy Path, the sheets, errors, docs), so it is not confused
+with Team Folders (shared sources).
+
+**Editor thumbnails.** The strip and grid called `Thumbnails.media` without a library id, so every photo was
+read off the NAS and decoded at 1,500 px (`MediaAnalyzer.thumbnail` decodes at the detection size), about 0.7 s
+each for a 2 MB JPEG, six at a time, again for each size and each time the editor opened. A path without an id
+is now looked up (`COALESCE(duplicateOf, id)`) and the library's local thumbnail file used; files outside the
+library get `MediaAnalyzer.displayThumbnail` (the embedded thumbnail when big enough, else a decode at the
+shown size); a still thumbnail is cached once for every size.

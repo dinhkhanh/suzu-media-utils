@@ -74,7 +74,7 @@ and one for landscapes — logo, text or banner watermark, resize — auto tone
   that was offline catches up, the newest change wins, and the same name given on two Macs becomes one person.
   Everyone named on a Mac travels (a Known-People folder prepared before the event, people from earlier events). The
   sidebar shows the team above the project, with its Macs and the last sync; the project menu groups projects by
-  team. Rename Team, Locate Team Folder… (when the NAS address changes), Stop Sharing a project, Leave Team (keeps
+  team. Rename Team, Locate Team Sync Folder… (when the NAS address changes), Stop Sharing a project, Leave Team (keeps
   projects and names).
 - **Three kinds of folders in a team:** *Team Folders* are the sources every Mac works on (the card folders on the
   NAS): added on one Mac, they appear on every Mac of the team. *Edited Folders* are where the Mac in charge of
