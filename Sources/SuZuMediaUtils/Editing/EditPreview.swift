@@ -442,7 +442,15 @@ struct EditPreview: View {
                     }
                     .foregroundStyle(.white.opacity(0.45))
                 }
-                if rendering { ProgressView().controlSize(.small).tint(.white).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).padding(12) }
+                // In the middle of the preview, on a dark disc so it shows over a bright photo as well as the
+                // background; it doesn't take clicks, so the photo can still be panned or placed meanwhile.
+                if rendering {
+                    ProgressView().controlSize(.regular).tint(.white)
+                        .padding(14)
+                        .background(Circle().fill(.black.opacity(0.5)))
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
             }
             .onChange(of: g.size, initial: true) { viewSize = g.size; pan = clampedPan(pan) }
         }

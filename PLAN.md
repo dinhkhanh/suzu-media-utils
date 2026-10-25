@@ -841,3 +841,8 @@ each for a 2 MB JPEG, six at a time, again for each size and each time the edito
 is now looked up (`COALESCE(duplicateOf, id)`) and the library's local thumbnail file used; files outside the
 library get `MediaAnalyzer.displayThumbnail` (the embedded thumbnail when big enough, else a decode at the
 shown size); a still thumbnail is cached once for every size.
+
+## v0.8.10 (2026-10-25): the editor's spinner in the middle
+
+The render spinner sat in the preview's top-left corner, small, and was hard to see. It is now in the middle of
+the preview, regular size, on a dark disc, and takes no clicks.
