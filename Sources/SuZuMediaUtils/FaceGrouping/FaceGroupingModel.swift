@@ -402,22 +402,32 @@ final class FaceGroupingModel: ObservableObject {
     }
 
     /// People with faces in the project (nil = anywhere), with counts for that project.
+    ///
+    /// Order: pinned, then named (by how often they appear), then the unnamed. Among the unnamed, those whose
+    /// picture looks straight at the camera and is sharp come first: if even a person's best face is turned away or
+    /// blurred, they were in the background, and are rarely someone to name. Within a band of picture quality (five
+    /// bands) the people seen more often come first.
     nonisolated static func fetchPeople(_ db: Database, project: Int64?, taken: ClosedRange<Double>? = nil) throws -> [PersonSummary] {
         let scope = "\(ProjectScope.sql(project)) AND \(EventSessions.sql(taken))"
         return try Row.fetchAll(db, sql: """
-            SELECT p.id, p.name, p.pinnedAt IS NOT NULL AS pinned, COUNT(*) AS faces,
-                COUNT(DISTINCT CASE WHEN m.kind = 'photo' THEN m.id END) AS photos,
-                COUNT(DISTINCT CASE WHEN m.kind = 'video' THEN m.id END) AS videos,
-                COALESCE((SELECT c.id FROM face c WHERE c.id = p.coverFaceId AND c.personId = p.id),
-                         \(BestShot.coverSubquery(project: project))) AS cover,
-                (SELECT group_concat(groupId) FROM personGroupMember gm WHERE gm.personId = p.id) AS groups
-            FROM person p
-            JOIN face f ON f.personId = p.id
-            JOIN media m ON m.id = f.mediaId
-            LEFT JOIN source s ON s.id = m.sourceId
-            WHERE \(scope)
-            GROUP BY p.id
-            ORDER BY (p.pinnedAt IS NULL), (p.name IS NULL), faces DESC
+            SELECT y.* FROM (
+                SELECT x.*, (SELECT \(BestShot.coverOrderSQL) FROM face f WHERE f.id = x.cover) AS look FROM (
+                    SELECT p.id, p.name, p.pinnedAt IS NOT NULL AS pinned, COUNT(*) AS faces,
+                        COUNT(DISTINCT CASE WHEN m.kind = 'photo' THEN m.id END) AS photos,
+                        COUNT(DISTINCT CASE WHEN m.kind = 'video' THEN m.id END) AS videos,
+                        COALESCE((SELECT c.id FROM face c WHERE c.id = p.coverFaceId AND c.personId = p.id),
+                                 \(BestShot.coverSubquery(project: project))) AS cover,
+                        (SELECT group_concat(groupId) FROM personGroupMember gm WHERE gm.personId = p.id) AS groups
+                    FROM person p
+                    JOIN face f ON f.personId = p.id
+                    JOIN media m ON m.id = f.mediaId
+                    LEFT JOIN source s ON s.id = m.sourceId
+                    WHERE \(scope)
+                    GROUP BY p.id
+                ) x
+            ) y
+            ORDER BY (y.pinned = 0), (y.name IS NULL),
+                CASE WHEN y.name IS NULL THEN CAST(COALESCE(y.look, 0) * 5 AS INTEGER) ELSE 0 END DESC, y.faces DESC
             """).map {
             PersonSummary(id: $0["id"], name: $0["name"], faces: $0["faces"], photos: $0["photos"], videos: $0["videos"],
                           coverFaceId: $0["cover"], pinned: $0["pinned"],
@@ -883,6 +893,13 @@ final class FaceGroupingModel: ObservableObject {
     /// Joins the team in `folder`: its projects appear as the teammates' logs are read (the first ones right away).
     func joinTeam(folder: URL) -> Bool {
         guard let service else { return false }
+        // Already in this team through this very folder: nothing to read again, just open one of its projects.
+        if let team = service.teamSync.member(of: folder), team.folder == canonicalPath(folder) {
+            if projects.first(where: { $0.id == currentProject })?.teamId != team.id,
+               let first = projects.last(where: { $0.teamId == team.id }) { currentProject = first.id }
+            log("Already in \(team.name) · same team folder, nothing to sync again", icon: "person.3")
+            return true
+        }
         var joined: TeamRecord?
         perform { joined = try $0.teamSync.join(folder: folder) }
         guard let joined else { return false }
@@ -925,7 +942,11 @@ final class FaceGroupingModel: ObservableObject {
     func renameTeam(_ id: Int64, to name: String) { perform { try $0.teamSync.rename(id, to: name) } }
 
     /// The team folder moved (new NAS address or mount name): same team, new path.
-    func relocateTeam(_ id: Int64, to folder: URL) { perform { try $0.teamSync.relocate(id, to: folder) } }
+    func relocateTeam(_ id: Int64, to folder: URL) {
+        var moved = true
+        perform { moved = try $0.teamSync.relocate(id, to: folder) }
+        if !moved, actionError == nil { log("Same team folder as before · nothing to sync again", icon: "person.3") }
+    }
 
     func syncTeamNow() { service?.teamSync.syncSoon() }
 

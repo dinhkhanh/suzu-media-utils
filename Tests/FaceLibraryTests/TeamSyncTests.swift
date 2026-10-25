@@ -389,6 +389,12 @@ final class TeamSyncTests: XCTestCase {
         XCTAssertEqual(try b.sync.teams().first?.folder, canonicalPath(moved))
         // Joining the same folder again just relinks it.
         XCTAssertEqual(try b.sync.join(folder: moved).id, team.id)
+        // Choosing the folder the team already uses changes nothing: the Macs and "synced" stay, no pass starts.
+        let before = try XCTUnwrap(b.sync.status(team.id!))
+        XCTAssertNotNil(before.lastSync)
+        XCTAssertFalse(try b.sync.relocate(team.id!, to: moved))
+        XCTAssertEqual(b.sync.status(team.id!), before)
+        XCTAssertEqual(b.sync.member(of: moved)?.id, team.id)
     }
 
     func testEveryNamedPersonTravelsSoTheNextEventKnowsThem() throws {

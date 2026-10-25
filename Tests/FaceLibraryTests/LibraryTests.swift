@@ -41,6 +41,31 @@ final class LibraryTests: XCTestCase {
         return SourceMonitor(source: s, store: store) { _, _ in }
     }
 
+    /// A folder is looked at every 30 s when quiet, every 5 s while files arrive (or a card copies in), and goes
+    /// back to 30 s after six quiet looks in a row.
+    func testAFolderIsLookedAtFasterWhileFilesArriveAndSlowerWhenQuiet() throws {
+        try makeFile("a.jpg")
+        let m = monitor()
+        m.start()
+        defer { m.stop() }
+        m.queue.sync {}  // the first look has run: it found a.jpg, so files are arriving
+        XCTAssertEqual(m.pollInterval, SourceMonitor.fastPoll)
+        m.queue.sync { for _ in 0..<SourceMonitor.quietPassesBeforeSlow { m.scan() } }
+        XCTAssertEqual(m.pollInterval, SourceMonitor.slowPoll, "six quiet looks in a row")
+        m.expectFiles()
+        m.queue.sync {}
+        XCTAssertEqual(m.pollInterval, SourceMonitor.fastPoll, "a card copying in")
+        m.queue.sync { for _ in 1..<SourceMonitor.quietPassesBeforeSlow { m.pace(busy: false) } }
+        XCTAssertEqual(m.pollInterval, SourceMonitor.fastPoll, "not quiet for long enough yet")
+        try makeFile("b.jpg", seed: 2)
+        m.queue.sync { m.scan() }
+        XCTAssertEqual(m.pollInterval, SourceMonitor.fastPoll, "a look that found a new file keeps the fast pace")
+        m.queue.sync { for _ in 1..<SourceMonitor.quietPassesBeforeSlow { m.pace(busy: false) } }
+        XCTAssertEqual(m.pollInterval, SourceMonitor.fastPoll, "the count started over with the new file")
+        m.queue.sync { m.pace(busy: false) }
+        XCTAssertEqual(m.pollInterval, SourceMonitor.slowPoll)
+    }
+
     func media() throws -> [MediaRecord] {
         try store.db.read { db in try MediaRecord.fetchAll(db, sql: "SELECT * FROM media ORDER BY path") }
     }

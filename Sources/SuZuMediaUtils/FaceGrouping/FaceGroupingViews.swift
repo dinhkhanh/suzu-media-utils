@@ -207,7 +207,8 @@ struct SourceRow: View {
                 }
             }
         } icon: {
-            Image(systemName: source.icon)
+            // A fixed column for the symbol, with room before the name: the badged folders are wider than a plain one.
+            Image(systemName: source.icon).frame(width: 20).padding(.trailing, 4)
         }
         .help(source.share == .mac ? "" : model.shareCaption(source))
         .contextMenu {

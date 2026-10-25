@@ -204,6 +204,8 @@ public final class LibraryService: @unchecked Sendable {
         guard let id = id ?? nil else { return }
         processor.prefer(f.onCard, for: path)
         processor.enqueue(id, first: true)
+        // Files are landing here: the folder's watcher looks every few seconds until they stop.
+        if let sid = source.id { monitor(sid)?.expectFiles() }
     }
 
     func requireTeam(_ project: Int64?) throws {

@@ -58,6 +58,8 @@ struct EditControls: View {
             if sections.contains(.tone) {
                 InspectorSection(title: "Look") {
                     scopePicker
+                    Toggle("Straighten tilted photos", isOn: Binding(get: { recipe.straighten == true }, set: { recipe.straighten = $0 ? true : nil }))
+                        .help("Levels photos turned up to 10° off, by their vertical lines (pillars, door frames, screen edges), and trims the corners. Photos without clear lines are left as they are; turn any photo by hand with Level in the preview.")
                     HStack {
                         Toggle("Auto tone & enhance", isOn: $recipe.autoTone)
                             .help("Measures each photo and sets its tone curve, shadows, highlights, vibrance and exposure; the dials below show what it set, and go on from there. On automatically with crops and watermarks")
@@ -76,8 +78,6 @@ struct EditControls: View {
                         .opacity(dirty ? 1 : 0)
                         .accessibilityHidden(!dirty)
                         .help("Every slider back to 0, the tone curve straight, HSL and black & white off, auto tone off. Double-click any slider or its name to reset just that one")
-                    Toggle("Straighten tilted photos", isOn: Binding(get: { recipe.straighten == true }, set: { recipe.straighten = $0 ? true : nil }))
-                        .help("Levels photos turned up to 10° off, by their vertical lines (pillars, door frames, screen edges), and trims the corners. Photos without clear lines are left as they are; turn any photo by hand with Level in the preview.")
                 }
                 InspectorSection(title: "Light") {
                     AdjustSlider("Exposure", value: shown.exposure, range: -2...2, unit: " EV")

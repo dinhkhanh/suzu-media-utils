@@ -5,8 +5,9 @@ import GRDB
 
 /// Keeps one source folder in sync with the library: finds new, changed, moved, copied and deleted files.
 ///
-/// Local volumes are watched with FSEvents. Network volumes (SMB/AFP/NFS) get no FSEvents, so they are polled every
-/// 5 s; each poll only re-lists folders whose modification time changed.
+/// Local volumes are watched with FSEvents. Network volumes (SMB/AFP/NFS) get no FSEvents, so they are polled: every
+/// 30 s when nothing is happening, every 5 s while files are arriving (a card copying in, a look that found new
+/// files) and for a short while after; each poll only re-lists folders whose modification time changed.
 public final class SourceMonitor: @unchecked Sendable {
     public let sourceId: Int64
     public let root: URL
@@ -37,6 +38,16 @@ public final class SourceMonitor: @unchecked Sendable {
     /// Files untouched for this long are treated as complete without waiting for a second look.
     var settledAge: Double { isNetwork ? 30 : 10 }
 
+    /// Between looks at the folder: `slowPoll` when nothing is happening, `fastPoll` while files are arriving and
+    /// until `quietPassesBeforeSlow` looks in a row found nothing (30 s of quiet), so new files are taken up within
+    /// seconds without listing a quiet share all night. Local folders have FSEvents and poll as a safety net at
+    /// the same pace.
+    public static let slowPoll: Double = 30
+    public static let fastPoll: Double = 5
+    public static let quietPassesBeforeSlow = 6
+    public private(set) var pollInterval: Double = 5
+    var quietPasses = 0
+
     public init(source: SourceRecord, store: LibraryStore,
                 onChange: @escaping (_ newPending: Bool, _ affectedPeople: Set<Int64>) -> Void) {
         sourceId = source.id!
@@ -56,16 +67,38 @@ public final class SourceMonitor: @unchecked Sendable {
         queue.async { [weak self] in self?.scan() }
     }
 
-    /// Network volumes get no FSEvents: the 5 s poll is the watcher. Local ones use FSEvents, with a slow poll as a
-    /// safety net (missed events, remounted drives). Runs on `queue` once the folder is reachable.
+    /// Network volumes get no FSEvents: the poll is the watcher. Local ones use FSEvents, with the poll as a safety
+    /// net (missed events, remounted drives). Runs on `queue` once the folder is reachable.
     func configureWatching() {
         guard !watchConfigured, timer != nil else { return }  // a scan on its own (tests, headless) watches nothing
         watchConfigured = true
         isNetwork = (try? root.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal == false
-        if !isNetwork {
-            startFSEvents()
-            timer?.schedule(deadline: .now() + 60, repeating: 60)
-        }
+        if !isNetwork { startFSEvents() }
+        setPoll(Self.slowPoll)
+    }
+
+    func setPoll(_ interval: Double) {
+        guard watchConfigured, interval != pollInterval else { return }
+        pollInterval = interval
+        timer?.schedule(deadline: .now() + interval, repeating: interval)
+    }
+
+    /// Files are on their way into this folder (a card copying in): look every few seconds until they stop coming.
+    public func expectFiles() {
+        queue.async { [weak self] in self?.speedUp() }
+    }
+
+    func speedUp() {
+        quietPasses = 0
+        setPoll(Self.fastPoll)
+    }
+
+    /// After a look: files arriving keep the fast pace; quiet looks in a row bring the slow one back.
+    func pace(busy: Bool) {
+        if busy { speedUp(); return }
+        guard pollInterval == Self.fastPoll else { return }
+        quietPasses += 1
+        if quietPasses >= Self.quietPassesBeforeSlow { setPoll(Self.slowPoll) }
     }
 
     public func stop() {
@@ -212,6 +245,7 @@ public final class SourceMonitor: @unchecked Sendable {
         candidates = candidates.filter { files[$0.key] != nil }
         var missing = known.filter { files[$0.key] == nil && !FileManager.default.fileExists(atPath: $0.key) }
         settledNew.sort { $0.0 < $1.0 }
+        pace(busy: !settledNew.isEmpty || !settledChanged.isEmpty || !missing.isEmpty || needFollowUp)
 
         var affected: Set<Int64> = []
         do {

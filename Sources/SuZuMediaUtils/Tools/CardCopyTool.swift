@@ -248,27 +248,38 @@ struct CardRow: View {
 
     var hasNew: Bool { card.plan.map { !$0.new.isEmpty } ?? false }
 
+    /// "SONY ILCE-7M4 · 5203… · 128 GB · 64 GB free".
+    var details: String {
+        var parts: [String] = []
+        if let camera = card.plan?.card.camera ?? card.identity.cameraMake { parts.append(camera) }
+        if let s = card.identity.cameraSerial { parts.append(s) }
+        if let cap = card.identity.capacity { parts.append(cap.formatted(.byteCount(style: .file))) }
+        if let free = card.identity.available { parts.append("\(free.formatted(.byteCount(style: .file))) free") }
+        return parts.joined(separator: " · ")
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
             Image(systemName: "sdcard.fill").font(.system(size: 34)).foregroundStyle(card.gone ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.tint))
                 .frame(width: 44)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 10) {
-                    Text(card.identity.volumeName).font(.title3.weight(.semibold))
-                    TextField("", text: $label, prompt: Text("Name this card, e.g. Nam R5 card 1"))
-                        .labelsHidden().textFieldStyle(.roundedBorder).frame(maxWidth: 220)
-                        .onSubmit { rename(card.plan?.card.label) }
-                        .help("A name for this card. The card itself is not renamed; it is known by its volume UUID.")
-                    if let camera = card.plan?.card.camera ?? card.identity.cameraMake {
-                        Text(camera + (card.identity.cameraSerial.map { " · \($0)" } ?? "")).foregroundStyle(.secondary).lineLimit(1)
+                // Line 1: the card and its name, the state on the right. Line 2: the camera and the card's room.
+                // Nothing here wraps: a long name truncates instead of breaking the row into a word per line.
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(alignment: .center, spacing: 10) {
+                        Text(card.identity.volumeName).font(.title3.weight(.semibold))
+                            .lineLimit(1).truncationMode(.middle).layoutPriority(1)
+                        TextField("", text: $label, prompt: Text("Name this card, e.g. Nam R5 card 1"))
+                            .labelsHidden().textFieldStyle(.roundedBorder).frame(minWidth: 120, maxWidth: 220)
+                            .onSubmit { rename(card.plan?.card.label) }
+                            .help("A name for this card. The card itself is not renamed; it is known by its volume UUID.")
+                        Spacer(minLength: 8)
+                        statusPill.fixedSize()
                     }
-                    if let cap = card.identity.capacity, let free = card.identity.available {
-                        Text("· \(cap.formatted(.byteCount(style: .file))) · \(free.formatted(.byteCount(style: .file))) free")
-                            .foregroundStyle(.tertiary).lineLimit(1)
+                    if !details.isEmpty {
+                        Text(details).font(.callout).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                     }
-                    Spacer(minLength: 4)
-                    statusPill
                 }
                 status
                 if let o = card.outcome { outcome(o) }
@@ -276,17 +287,17 @@ struct CardRow: View {
             }
             if !card.gone && !card.planning {
                 VStack(spacing: 6) {
+                    // Labels fill the column, so the buttons are one width.
                     if card.copying {
-                        Button("Stop") { model.cancel(card.id) }.frame(maxWidth: .infinity)
+                        Button { model.cancel(card.id) } label: { Text("Stop").frame(maxWidth: .infinity) }
                     } else if let p = card.plan {
                         // Other cards may be copying meanwhile: to other disks at full speed, to the same one side by side.
-                        Button("Copy New Files") { copy() }
+                        Button { copy() } label: { Text("Copy New Files").frame(maxWidth: .infinity) }
                             .buttonStyle(.borderedProminent)
                             .keyboardShortcut(.defaultAction)
                             .disabled(!canCopy || p.new.isEmpty || tooBig(p))
                             .help(canCopy ? "" : "Choose a destination folder first")
-                            .frame(maxWidth: .infinity)
-                        Button("Eject") { model.eject(card.id) }.frame(maxWidth: .infinity)
+                        Button { model.eject(card.id) } label: { Text("Eject").frame(maxWidth: .infinity) }
                     }
                 }
                 .frame(width: 140)
@@ -324,6 +335,7 @@ struct CardRow: View {
             Text(text)
         }
         .font(.caption.weight(.semibold))
+        .lineLimit(1)
         .padding(.horizontal, 9).padding(.vertical, 3)
         .background(Capsule().fill(color.opacity(0.16)))
         .foregroundStyle(color)
@@ -478,20 +490,24 @@ struct KnownCardRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "sdcard").foregroundStyle(.secondary)
+        // Columns that line up from row to row: card, name, camera, then the counts on the right.
+        HStack(spacing: 10) {
+            Image(systemName: "sdcard").foregroundStyle(.secondary).frame(width: 18)
             Text(known.card.volumeName ?? "Card").fontWeight(.semibold)
+                .lineLimit(1).truncationMode(.middle)
+                .frame(width: 130, alignment: .leading)
             TextField("", text: $label, prompt: Text("Name this card"))
-                .labelsHidden().textFieldStyle(.roundedBorder).frame(maxWidth: 240)
+                .labelsHidden().textFieldStyle(.roundedBorder).frame(width: 200)
                 .onSubmit {
                     let typed = label.trimmingCharacters(in: .whitespaces)
                     if !typed.isEmpty, typed != (known.card.label ?? "") { model.setLabel(known.card.uuid, typed, store: faces.store) }
                 }
-            if let c = known.card.camera { Text(c).foregroundStyle(.secondary).lineLimit(1) }
-            Spacer()
+            Text(known.card.camera ?? "").foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 8)
             Text("\(known.files) files · \(known.bytes.formatted(.byteCount(style: .file)))" +
                  (known.card.lastCopiedAt.map { " · last \($0.formatted(date: .abbreviated, time: .shortened))" } ?? ""))
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                .lineLimit(1).fixedSize()
         }
         .onChange(of: known.card.label) { label = known.card.label ?? "" }
         .contextMenu {

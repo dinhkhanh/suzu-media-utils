@@ -939,6 +939,14 @@ struct EditPreview: View {
                     .foregroundStyle(.green)
                     .help("Latest export: \(e.path)")
             }
+            Spacer(minLength: 8)
+            if let current {
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(current.url.path, forType: .string)
+                } label: { Label("Copy Path", systemImage: "doc.on.doc") }
+                    .help("Copy the photo's full path: \(current.url.path)")
+            }
         }
         .buttonStyle(.borderless)
         .font(.caption)

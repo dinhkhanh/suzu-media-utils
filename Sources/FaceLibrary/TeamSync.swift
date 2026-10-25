@@ -208,17 +208,35 @@ public final class TeamSync: @unchecked Sendable {
 
     /// The team folder moved (the NAS has a new address, the share is mounted under another name): point the team
     /// at the same folder in its new place. Everything already read or published stays valid.
-    public func relocate(_ teamId: Int64, to folder: URL) throws {
-        guard let team = try store.db.read({ db in try TeamRecord.fetchOne(db, key: teamId) }) else { return }
+    ///
+    /// The folder the team already uses changes nothing: the team's state is kept and no pass is started (it used
+    /// to drop the Macs and "synced" state and run a whole pass, which under heavy processing took a while).
+    /// Returns whether the team now points somewhere else.
+    @discardableResult
+    public func relocate(_ teamId: Int64, to folder: URL) throws -> Bool {
+        guard let team = try store.db.read({ db in try TeamRecord.fetchOne(db, key: teamId) }) else { return false }
         guard let info = Self.readInfo(folder) else {
             throw FileManager.default.fileExists(atPath: folder.path) ? TeamError.notATeamFolder : TeamError.folderUnreachable
         }
         guard info.uuid == team.uuid else { throw TeamError.differentTeam(info.name, team.name) }
+        let path = canonicalPath(folder)
+        if path == team.folder {
+            // Unreachable a moment ago (share remounted at the same place): look again soon, keeping what is known.
+            if lock.withLock({ statuses[teamId]?.reachable }) != true { syncSoon() }
+            return false
+        }
         try store.db.write { db in
-            try db.execute(sql: "UPDATE team SET folder = ? WHERE id = ?", arguments: [canonicalPath(folder), teamId])
+            try db.execute(sql: "UPDATE team SET folder = ? WHERE id = ?", arguments: [path, teamId])
         }
         lock.withLock { statuses[teamId] = TeamStatus(teamId: teamId, reachable: true) }
         syncSoon()
+        return true
+    }
+
+    /// The team already registered for the team in `folder`, if this Mac is in it.
+    public func member(of folder: URL) -> TeamRecord? {
+        guard let info = Self.readInfo(folder) else { return nil }
+        return try? store.db.read { db in try TeamRecord.filter(Column("uuid") == info.uuid).fetchOne(db) }
     }
 
     /// Leaves the team: forgets its folder and what teammates' Macs saw. Its projects stay here, now only on this

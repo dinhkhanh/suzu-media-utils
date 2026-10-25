@@ -776,3 +776,34 @@ any watermark placed there. It is a row of its own under the preview now, the ph
 
 **Team folder icons.** Folder-shaped symbols (`folder.badge.person.crop`, `photo.badge.checkmark`) instead of
 `person.3`, which was wide enough to run into the folder's name.
+
+## v0.8.7 (2026-10-25): folder looks at two paces; unnamed people by their picture; editor odds and ends
+
+**Folder watching at two paces.** Network folders were polled every 5 s all night; local ones had FSEvents and a
+60 s safety net. `SourceMonitor` now polls every 30 s (`slowPoll`) when nothing is happening and every 5 s
+(`fastPoll`) while files are arriving: a look that found new, changed or missing files, or unsettled ones, keeps
+the fast pace (`pace(busy:)`), and `LibraryService.fileLanded` tells the destination's watcher `expectFiles()`
+as a card copies in. Six quiet fast looks in a row (30 s of nothing) bring the slow pace back. Local folders
+poll at the same paces as their safety net.
+
+**Unnamed people in order of their picture.** Every people list (`fetchPeople`) orders the unnamed by the
+cover-order score of their picture (`BestShot.coverOrderSQL` evaluated on the cover face: facing the camera,
+sharp, eyes open), in five bands, then by how often they appear. A person whose best face is turned away or
+blurred was in the background and is rarely worth naming, so they sink; the people worth a name are at the top.
+Named people are still by how often they appear; pinned first.
+
+**Editor.** "Straighten tilted photos" sits above "Auto tone & enhance". A Copy Path button at the right end of
+the info strip puts the photo's full path on the clipboard. Sidebar folder symbols get a fixed 20 pt column and
+4 pt before the name.
+
+**Copy from Cards layout.** The card panel's header was one row (volume name, name field, camera, capacity,
+pill) that broke apart in a normal window: "Untitled" wrapped a syllable per line, the pill a word per line, the
+camera truncated. Now two lines: the volume name (one line, truncating) with the name field and the pill
+(`fixedSize`) on the right; under it camera · serial · capacity · free. The buttons share one width. "Cards
+seen before" rows are columns (name 130 pt, field 200 pt, camera, counts right-aligned) so they line up.
+
+**Choosing the team folder again.** Locate Team Folder… or Join with the folder the team already uses reset the
+team's status (Macs, "synced") and forced a full sync pass; Join also waited for that pass before opening the
+project. `TeamSync.relocate` now returns early when the canonical path is unchanged (a pass only if the folder
+was unreachable), and `FaceGroupingModel.joinTeam` recognises a team already joined through that folder
+(`TeamSync.member(of:)`) and just opens its project (test).
