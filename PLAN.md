@@ -752,3 +752,27 @@ library from the fingerprints it already holds (`Plan.keys`), in milliseconds, c
 **Sidebar.** The team and project boxes were the list's top `safeAreaInset`, so the list scrolled under the window
 toolbar and the toolbar's scroll-edge hairline was drawn across the project box. The header, the list
 (`.listStyle(.sidebar)`) and the status pill are now a `VStack` in the sidebar column.
+
+## v0.8.6 (2026-10-25): the card plan, done right; the editor's info strip; team folder icons
+
+**Copy from Cards, after review of 0.8.5.** The review found the `inFlight` set and `refine` path fragile: the
+set outlived a pulled card (a card put back could adopt a stale or empty plan, or sit at "Looking…" for good
+when its plan task wedged), `refine` wrote the old `plan.card` back (a name typed or synced meanwhile reverted),
+a failed plan was never tried again, a refine landing late could overwrite a fresher plan, "Copy New Files from
+All" could start a card whose plan was still being made, and every mount or unmount planned every card again.
+There is now one path: `CardCopier.plan(_:store:previous:)` takes the card's earlier plan and reuses its
+fingerprints for files unchanged since (same path, size and time), so planning again after a copy or a sync
+pass is a listing of the card and one lookup; the card's record is re-read at the end so a name is current; and
+the ledger and library lookups are one read for all files (keys in chunks of 500) instead of one per file.
+In the model each card carries its own `Look` token: a result lands only if it is still the card's current
+look, so a card pulled and put back, an eject, or Look Again can never be answered by an older look; a request
+during a look sets `lookAgain` and one more look follows from the fresh fingerprints; `planning` is derived
+from the token; a card keeps its plan when another card mounts or unmounts, and only a fresh look (Look Again,
+another library) or a failed one plans it again. A card being looked at can't be copied, by its button or by
+"Copy New Files from All".
+
+**Editor.** The info strip (name, size, zoom, export state) floated over the bottom of the photo, covering it and
+any watermark placed there. It is a row of its own under the preview now, the photo fitting above it.
+
+**Team folder icons.** Folder-shaped symbols (`folder.badge.person.crop`, `photo.badge.checkmark`) instead of
+`person.3`, which was wide enough to run into the folder's name.

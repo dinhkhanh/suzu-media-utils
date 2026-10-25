@@ -27,7 +27,7 @@ struct CardCopyTool: View {
     /// Both places chosen for this card (videos' too, when they have their own).
     func ready(_ card: CardCopyModel.Card) -> Bool { destination(for: card) != nil && (!splitVideos || videoDestination != nil) }
 
-    var withNew: [CardCopyModel.Card] { model.cards.filter { c in !c.copying && !c.gone && ready(c) && (c.plan.map { !$0.new.isEmpty } ?? false) } }
+    var withNew: [CardCopyModel.Card] { model.cards.filter { c in !c.copying && !c.planning && !c.gone && ready(c) && (c.plan.map { !$0.new.isEmpty } ?? false) } }
     var copying: Int { model.cards.count(where: \.copying) }
 
     var body: some View {
@@ -57,7 +57,7 @@ struct CardCopyTool: View {
         .navigationSubtitle(subtitle)
         .toolbar {
             ToolbarItem {
-                Button { model.refresh(store: faces.store, sync: faces.service?.teamSync) } label: { Label("Look Again", systemImage: "arrow.clockwise") }
+                Button { model.refresh(store: faces.store, sync: faces.service?.teamSync, fresh: true) } label: { Label("Look Again", systemImage: "arrow.clockwise") }
                     .disabled(model.looking)
                     .help("Look for cards again (they are also noticed as they mount)")
             }
@@ -303,7 +303,7 @@ struct CardRow: View {
         if card.gone {
             pill("Removed", color: .orange)
         } else if card.planning {
-            pill("Looking…", color: .secondary)
+            pill(card.plan == nil ? "Looking…" : "Looking again…", color: .secondary)
         } else if card.copying {
             pill("Copying", color: .accent, dot: true)
         } else if let p = card.plan {
@@ -334,7 +334,7 @@ struct CardRow: View {
         if card.gone {
             Text(card.copying ? "The card was removed." : card.outcome?.interruption == nil ? "The card was removed." : "The card was removed. Put it back to go on.")
                 .foregroundStyle(.orange)
-        } else if card.planning {
+        } else if card.planning, card.plan == nil {
             HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Looking at the card…").foregroundStyle(.secondary) }
         } else if card.copying {
             VStack(alignment: .leading, spacing: 6) {
@@ -504,19 +504,26 @@ struct KnownCardRow: View {
 /// The mounted cards and what the library knows of them. Looks again whenever a volume mounts or unmounts.
 @MainActor
 final class CardCopyModel: ObservableObject {
+    /// One look at a card (its plan being made). The card holds the look under way; a result from any other look
+    /// (an older one, or one at a card since pulled and put back) is dropped.
+    final class Look: @unchecked Sendable { var cancelled = false }
+
     struct Card: Identifiable {
         var identity: CardCopier.Identity
         var plan: CardCopier.Plan?
-        var planning = true
+        /// The look under way (a card is listed and its look started in one go, so it shows the spinner from the
+        /// moment it appears) until its plan or error is in. Nil otherwise.
+        var look: Look?
+        var planning: Bool { look != nil }
+        /// Look once more when the look under way is done: the ledger changed meanwhile (the earlier plan's
+        /// fingerprints are reused, so that is a listing and a lookup).
+        var lookAgain = false
         var copying = false
         var progress = CardCopier.Progress()
         var outcome: CardCopier.Outcome?
         var error: String?
         /// Unmounted while it was being copied, or after an interrupted copy: kept on screen so the result shows.
         var gone = false
-        /// The ledger changed while the plan was being made: check the new files against it again when done
-        /// (from their fingerprints; the card is not read again).
-        var refineAfter = false
         var id: String { identity.uuid }
     }
 
@@ -526,9 +533,7 @@ final class CardCopyModel: ObservableObject {
     /// Cards with a destination of their own, by volume UUID (this Mac's paths: not part of the team's ledger).
     @Published private(set) var ownDestinations: [String: String] = UserDefaults.standard.dictionary(forKey: "cardCopyOwnDestinations") as? [String: String] ?? [:]
     private var again = false
-    /// Cards whose plan is being made right now (`Card.planning` is what the screen shows, and a card listed a
-    /// moment ago shows the spinner before its plan has even started).
-    private var inFlight: Set<String> = []
+    private var againFresh = false
     private var observers: [NSObjectProtocol] = []
     private var cancels: [String: Cancel] = [:]
     private var pending: LibraryStore?
@@ -560,50 +565,60 @@ final class CardCopyModel: ObservableObject {
     /// Looks for cards and what is new on them. The cards show at once; with a team, the teammates' logs are read
     /// in the background and a card's plan is made again if they brought a copy made on another Mac (reading them
     /// first used to hold the cards up for as long as a sync pass took, which under heavy processing is a while).
-    func refresh(store: LibraryStore?, sync: TeamSync? = nil) {
+    ///
+    /// A card already planned keeps its plan when another card mounts or unmounts; `fresh` (Look Again, or another
+    /// library) plans every card again, and a card whose look failed is looked at once more either way.
+    func refresh(store: LibraryStore?, sync: TeamSync? = nil, fresh: Bool = false) {
+        let fresh = fresh || pending !== store
         pending = store
         pendingSync = sync
         guard let store else { return }
         // A card mounted while the last look was under way: look once more when it is done.
-        if looking { again = true; return }
+        if looking { again = true; againFresh = againFresh || fresh; return }
         looking = true
-        let busy = Set(cards.filter(\.copying).map(\.id))
         Task {
             let (found, seen) = await Task.detached(priority: .userInitiated) { () -> ([CardCopier.Identity], [CardCopier.KnownCard]) in
                 (Self.volumes.compactMap { CardCopier.identify($0) }, (try? CardCopier.knownCards(store: store)) ?? [])
             }.value
-            // Cards being copied keep their state; the others start over, keeping an interrupted copy's result so
-            // the next copy goes on in its folder. A card pulled in the middle of its copy stays on screen.
+            // Cards still there keep their state. A card back after being pulled starts over, keeping an interrupted
+            // copy's result so the next copy goes on in its folder. A card pulled in the middle of its copy, or
+            // after one, stays on screen; its look, if one was under way, is dropped with it.
             var next: [Card] = []
+            var toPlan: [String] = []
             for id in found {
-                if busy.contains(id.uuid), let c = cards.first(where: { $0.id == id.uuid }) {
+                if let c = cards.first(where: { $0.id == id.uuid }), !c.gone {
                     var kept = c
-                    kept.gone = false
+                    kept.identity = id
                     next.append(kept)
+                    if !c.copying, fresh || (c.plan == nil && c.look == nil) { toPlan.append(id.uuid) }
                 } else {
                     var c = Card(identity: id)
                     if let before = cards.first(where: { $0.id == id.uuid })?.outcome, before.interruption != nil { c.outcome = before }
                     next.append(c)
+                    toPlan.append(id.uuid)
                 }
             }
-            for c in cards where !found.contains(where: { $0.uuid == c.id }) && (c.copying || c.outcome != nil) {
+            for c in cards where !found.contains(where: { $0.uuid == c.id }) {
+                c.look?.cancelled = true
+                guard c.copying || c.outcome != nil else { continue }
                 var g = c
                 g.gone = true
-                g.planning = false
+                g.look = nil
+                g.lookAgain = false
                 next.append(g)
             }
             cards = next
             known = seen
             looking = false
-            for id in found where !busy.contains(id.uuid) { plan(id.uuid, store: store) }
-            if again { again = false; refresh(store: store, sync: sync) }
+            for id in toPlan { plan(id, store: store) }
+            if again { again = false; let f = againFresh; againFresh = false; refresh(store: store, sync: sync, fresh: f) }
             if let sync, !found.isEmpty { catchUp(sync, store: store) }
         }
     }
 
     /// The team's ledger, without holding the cards up: one sync pass in the background; if it brought copies
-    /// teammates made, each card's new files are checked against the ledger again (from the fingerprints the plan
-    /// already read, in milliseconds) so those files aren't copied twice.
+    /// teammates made, each card is planned again (from the fingerprints the plan already read, in milliseconds)
+    /// so those files aren't copied twice.
     func catchUp(_ sync: TeamSync, store: LibraryStore) {
         let before = CardCopier.teammateCopies(store: store)
         sync.syncSoon { [weak self] in
@@ -611,47 +626,39 @@ final class CardCopyModel: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 known = (try? CardCopier.knownCards(store: store)) ?? known
-                for c in cards where !c.copying && !c.gone {
-                    if inFlight.contains(c.id), let i = cards.firstIndex(where: { $0.id == c.id }) { cards[i].refineAfter = true } else { refine(c.id, store: store) }
-                }
+                for c in cards where !c.copying && !c.gone { plan(c.id, store: store) }
             }
         }
     }
 
-    /// Reads the card once: every new file's fingerprint, matched against the ledger and the library. A request
-    /// while that is under way only asks for the ledger check to be redone when it is done.
+    /// Makes the card's plan: every new file's fingerprint, matched against the ledger and the library. While a
+    /// look is under way the card can't be copied, and a request meanwhile only asks for one more look when it is
+    /// done (from the fingerprints just read). The result lands only if this look is still the card's.
     func plan(_ id: String, store: LibraryStore) {
-        guard let i = cards.firstIndex(where: { $0.id == id }) else { return }
-        if inFlight.contains(id) { cards[i].refineAfter = true; return }
-        inFlight.insert(id)
-        cards[i].planning = true
+        guard let i = cards.firstIndex(where: { $0.id == id }), !cards[i].copying, !cards[i].gone else { return }
+        if cards[i].look != nil { cards[i].lookAgain = true; return }
+        let look = Look()
+        cards[i].look = look
+        cards[i].lookAgain = false
         cards[i].error = nil
         let identity = cards[i].identity
+        let previous = cards[i].plan
         Task {
-            let result = await Task.detached(priority: .userInitiated) { Result { try CardCopier.plan(identity, store: store) } }.value
-            inFlight.remove(id)
-            guard let i = cards.firstIndex(where: { $0.id == id }) else { return }
-            cards[i].planning = false
+            let result = await Task.detached(priority: .userInitiated) {
+                Result { try CardCopier.plan(identity, store: store, previous: previous, isCancelled: { look.cancelled }) }
+            }.value
+            guard let i = cards.firstIndex(where: { $0.id == id }), cards[i].look === look else { return }
+            cards[i].look = nil
             switch result {
             case .success(let p): cards[i].plan = p
             case .failure(let e): cards[i].error = e.localizedDescription
             }
-            if cards[i].refineAfter { cards[i].refineAfter = false; refine(id, store: store) }
-        }
-    }
-
-    /// The ledger check again for a planned card, without touching the card.
-    func refine(_ id: String, store: LibraryStore) {
-        guard let i = cards.firstIndex(where: { $0.id == id }), let current = cards[i].plan, !cards[i].copying else { return }
-        Task {
-            let refined = await Task.detached(priority: .userInitiated) { try? CardCopier.refine(current, store: store) }.value
-            guard let refined, let i = cards.firstIndex(where: { $0.id == id }), !cards[i].copying, !inFlight.contains(id) else { return }
-            cards[i].plan = refined
+            if cards[i].lookAgain { plan(id, store: store) }
         }
     }
 
     func copy(_ id: String, options: CardCopier.Options, store: LibraryStore, done: @escaping (CardCopier.Outcome) -> Void) {
-        guard let i = cards.firstIndex(where: { $0.id == id }), let todo = cards[i].plan, !cards[i].copying else { return }
+        guard let i = cards.firstIndex(where: { $0.id == id }), let todo = cards[i].plan, !cards[i].copying, !cards[i].planning else { return }
         cards[i].copying = true
         cards[i].outcome = nil
         cards[i].error = nil
@@ -727,6 +734,7 @@ final class CardCopyModel: ObservableObject {
         guard let c = cards.first(where: { $0.id == id }) else { return }
         do {
             try NSWorkspace.shared.unmountAndEjectDevice(at: c.identity.volume)
+            c.look?.cancelled = true
             cards.removeAll { $0.id == id }
         } catch {
             if let i = cards.firstIndex(where: { $0.id == id }) { cards[i].error = error.localizedDescription }

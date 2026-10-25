@@ -223,7 +223,11 @@ public enum CardCopier {
     /// Looks at the card and decides what is new. Files whose path, size and time match a ledger entry are done
     /// without reading them; the rest are read (1 MB each) and matched by contents against every card's ledger and
     /// the library, so a renamed file, or one copied by hand, is not copied twice.
-    public static func plan(_ identity: Identity, store: LibraryStore, isCancelled: () -> Bool = { false }) throws -> Plan {
+    ///
+    /// With `previous` (the plan made for this card a moment ago), files unchanged since (same path, size and
+    /// time) keep the fingerprint read then and are not read again: planning again after a copy, or after a sync
+    /// pass brought teammates' copies, is a listing of the card and one lookup, not another read of every file.
+    public static func plan(_ identity: Identity, store: LibraryStore, previous: Plan? = nil, isCancelled: () -> Bool = { false }) throws -> Plan {
         let card = try store.db.write { db in try upsert(identity, db: db) }
         var plan = Plan(card: card, identity: identity)
         plan.files = listFiles(on: identity.volume)
@@ -235,6 +239,9 @@ public enum CardCopier {
             }
             return out
         }
+        var before: [String: File] = [:]
+        for f in previous?.files ?? [] { before[f.relPath] = f }
+        var fingerprinted: [(file: File, key: String)] = []
         for f in plan.files {
             if isCancelled() { break }
             if let k = known[f.relPath], k.size == f.size, abs(k.mtime - f.mtime.timeIntervalSince1970) <= mtimeTolerance {
@@ -242,44 +249,61 @@ public enum CardCopier {
                 if k.elsewhere { plan.copiedElsewhere += 1 }
                 continue
             }
-            guard let key = ContentKey.compute(identity.volume.appendingPathComponent(f.relPath), size: f.size) else { plan.new.append(f); continue }
+            let key: String?
+            if let b = before[f.relPath], b.size == f.size, b.mtime == f.mtime, let k = previous?.keys[f.relPath] {
+                key = k
+            } else {
+                key = ContentKey.compute(identity.volume.appendingPathComponent(f.relPath), size: f.size)
+            }
+            guard let key else { plan.new.append(f); continue }
             plan.keys[f.relPath] = key
-            try place(f, key: key, in: &plan, store: store)
+            fingerprinted.append((f, key))
         }
+        try place(fingerprinted, in: &plan, store: store)
+        // The card's row as it is now: a name typed in, or a teammate's, while the files were being read.
+        plan.card = try store.db.read { db in try CardRecord.fetchOne(db, key: card.id) } ?? card
         return plan
     }
 
-    /// Files from the plan's "new" list that the ledger or the library know by now, moved where they belong: from
-    /// the fingerprints the plan already read, so nothing is read from the card again. For when teammates' copies
-    /// arrived after the plan was made.
-    public static func refine(_ plan: Plan, store: LibraryStore) throws -> Plan {
-        var p = plan
-        let candidates = p.new
-        p.new = []
-        for f in candidates {
-            guard let key = p.keys[f.relPath] else { p.new.append(f); continue }
-            try place(f, key: key, in: &p, store: store)
+    /// Puts the fingerprinted files in the plan: copied before (here or on a teammate's Mac), already in the
+    /// library, or new. One read of the ledger and the library for all of them.
+    static func place(_ files: [(file: File, key: String)], in plan: inout Plan, store: LibraryStore) throws {
+        guard !files.isEmpty else { return }
+        struct Hit { var to: String?; var elsewhere: Bool }
+        let (ledger, library): ([String: Hit], [String: String]) = try store.db.read { db in
+            var ledger: [String: Hit] = [:]
+            var library: [String: String] = [:]
+            let keys = Array(Set(files.map(\.key)))
+            for start in stride(from: 0, to: keys.count, by: 500) {
+                let chunk = Array(keys[start..<min(start + 500, keys.count)])
+                let marks = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+                // Newest copy first: the first row per key wins.
+                for r in try Row.fetchAll(db, sql: "SELECT contentKey, copiedTo, device FROM cardFile WHERE contentKey IN (\(marks)) ORDER BY copiedAt DESC",
+                                          arguments: StatementArguments(chunk)) {
+                    let k: String = r["contentKey"]
+                    if ledger[k] == nil {
+                        let to = (r["copiedTo"] as String?).flatMap { $0.isEmpty ? nil : $0 }
+                        ledger[k] = Hit(to: to, elsewhere: (r["device"] as String?) != nil)
+                    }
+                }
+                for r in try Row.fetchAll(db, sql: "SELECT contentKey, path FROM media WHERE contentKey IN (\(marks))", arguments: StatementArguments(chunk)) {
+                    let k: String = r["contentKey"]
+                    if library[k] == nil { library[k] = r["path"] }
+                }
+            }
+            return (ledger, library)
         }
-        return p
-    }
-
-    /// Puts a fingerprinted file in the plan: copied before (here or on a teammate's Mac), already in the library,
-    /// or new.
-    static func place(_ f: File, key: String, in plan: inout Plan, store: LibraryStore) throws {
-        let (ledger, elsewhere, library): (String?, Bool, String?) = try store.db.read { db in
-            let l = try Row.fetchOne(db, sql: "SELECT copiedTo, device FROM cardFile WHERE contentKey = ? ORDER BY copiedAt DESC LIMIT 1", arguments: [key])
-            let m = try String.fetchOne(db, sql: "SELECT path FROM media WHERE contentKey = ? LIMIT 1", arguments: [key])
-            return (l.map { ($0["copiedTo"] as String?) ?? "" }, (l?["device"] as String?) != nil, m)
-        }
-        if let ledger {
-            plan.copiedBefore.append(f)
-            if elsewhere { plan.copiedElsewhere += 1 }
-            plan.matched[f] = (key, ledger.isEmpty ? nil : ledger)
-        } else if let library {
-            plan.inLibrary.append(f)
-            plan.matched[f] = (key, library)
-        } else {
-            plan.new.append(f)
+        for (f, key) in files {
+            if let hit = ledger[key] {
+                plan.copiedBefore.append(f)
+                if hit.elsewhere { plan.copiedElsewhere += 1 }
+                plan.matched[f] = (key, hit.to)
+            } else if let path = library[key] {
+                plan.inLibrary.append(f)
+                plan.matched[f] = (key, path)
+            } else {
+                plan.new.append(f)
+            }
         }
     }
 

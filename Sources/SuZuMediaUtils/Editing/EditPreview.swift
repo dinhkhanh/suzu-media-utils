@@ -281,7 +281,7 @@ struct EditPreview: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if showGrid { grid } else { previewArea }
+            if showGrid { grid } else { previewArea; infoBar }
             if excluded != nil && samples.count > 1 { selectionBar }
             if filmstrip && samples.count > 1 && !showGrid { strip }
         }
@@ -453,7 +453,6 @@ struct EditPreview: View {
                 VStack(alignment: .trailing, spacing: 0) { HStack(spacing: 0) { tools; Spacer(minLength: 0) }; compareSwitch }
             }
         }
-        .overlay(alignment: .bottom) { if !cropping { infoBar } }
         .clipped()
         .environment(\.colorScheme, .dark)
         .simultaneousGesture(TapGesture().onEnded { focused = true })
@@ -918,6 +917,8 @@ struct EditPreview: View {
         .help("Crop this photo (C): handles to resize, drag to move, drag outside to turn. The menu picks its shape.")
     }
 
+    /// The photo's name, size, zoom and export state, in a strip of its own under the preview: never over the photo,
+    /// where it hid the bottom of the picture and a watermark placed there.
     var infoBar: some View {
         HStack(spacing: 10) {
             if samples.count > 1 {
@@ -942,9 +943,11 @@ struct EditPreview: View {
         .buttonStyle(.borderless)
         .font(.caption)
         .foregroundStyle(.white.opacity(0.85))
-        .padding(.horizontal, 10).padding(.vertical, 5)
-        .background(.black.opacity(0.55), in: Capsule())
-        .padding(10)
+        .lineLimit(1)
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: NSColor(white: 0.09, alpha: 1)))
+        .environment(\.colorScheme, .dark)
         .opacity(samples.isEmpty ? 0 : 1)
     }
 

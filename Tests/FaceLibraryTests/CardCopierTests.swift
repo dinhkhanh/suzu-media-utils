@@ -75,26 +75,38 @@ final class CardCopierTests: XCTestCase {
         }
     }
 
-    /// A teammate's copy that arrives after the plan was made is found by checking the plan again from the
-    /// fingerprints it already holds, without reading the card.
-    func testAPlanIsRefinedFromTheLedgerWithoutReadingTheCardAgain() throws {
+    /// A teammate's copy that arrives after the plan was made is found by planning again from the earlier plan:
+    /// files unchanged since keep the fingerprints read then (they are not read again), new ones are read, and the
+    /// card's record is the current one.
+    func testAPlanMadeAgainReusesItsFingerprintsAndReadsOnlyWhatChanged() throws {
         try shoot("IMG_0001.JPG", seed: 1)
         try shoot("IMG_0002.JPG", seed: 2)
         let p = try plan()
         XCTAssertEqual(p.new.map(\.name), ["IMG_0001.JPG", "IMG_0002.JPG"])
-        // The team's ledger says another Mac copied IMG_0002 (same contents, under another name there).
+        // The team's ledger says another Mac copied IMG_0002 (same contents, under another name there), and a
+        // teammate named the card.
         let key = try XCTUnwrap(p.keys["DCIM/100CANON/IMG_0002.JPG"])
         try store.db.write { db in
             try db.execute(sql: """
                 INSERT INTO cardFile (cardId, relPath, size, mtime, contentKey, copiedAt, copiedTo, device) VALUES (?, 'DCIM/100CANON/DSC_9.JPG', 3000, 0, ?, ?, '/Volumes/NAS/Gala/DSC_9.JPG', 'other-mac')
                 """, arguments: [p.card.id, key, Date()])
+            try db.execute(sql: "UPDATE card SET label = 'Nam R5 card 1' WHERE id = ?", arguments: [p.card.id])
         }
-        try FileManager.default.removeItem(at: card)  // the card is gone: the check must not need it
-        let r = try CardCopier.refine(p, store: store)
-        XCTAssertEqual(r.new.map(\.name), ["IMG_0001.JPG"])
+        // IMG_0002's bytes change under the same size and time: a plan made from the earlier one must not notice
+        // (it does not read the file again), a plan from scratch does.
+        let mtime = try XCTUnwrap(p.files.first { $0.name == "IMG_0002.JPG" }).mtime
+        try shoot("IMG_0002.JPG", seed: 7, mtime: mtime)
+        try shoot("IMG_0003.JPG", seed: 3)
+        let r = try CardCopier.plan(try XCTUnwrap(CardCopier.identify(card)), store: store, previous: p)
+        XCTAssertEqual(r.new.map(\.name), ["IMG_0001.JPG", "IMG_0003.JPG"])
         XCTAssertEqual(r.copiedBefore.map(\.name), ["IMG_0002.JPG"])
         XCTAssertEqual(r.copiedElsewhere, 1)
         XCTAssertEqual(r.matched.count, 1)
+        XCTAssertEqual(r.keys["DCIM/100CANON/IMG_0002.JPG"], key)
+        XCTAssertNotNil(r.keys["DCIM/100CANON/IMG_0003.JPG"])
+        XCTAssertEqual(r.card.label, "Nam R5 card 1")
+        let fresh = try plan()
+        XCTAssertEqual(fresh.new.map(\.name), ["IMG_0001.JPG", "IMG_0002.JPG", "IMG_0003.JPG"])
     }
 
     func testOnlyNewFilesAreCopiedAtTheNextHandOver() throws {

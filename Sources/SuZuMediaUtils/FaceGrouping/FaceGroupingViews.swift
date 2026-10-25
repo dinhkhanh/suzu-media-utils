@@ -261,9 +261,10 @@ struct ShareMenu: View {
 extension SourceSummary {
     var icon: String {
         if !online { return "externaldrive.badge.xmark" }
+        // Folder-shaped like the others ("person.3" is three people wide and ran into the name).
         switch share {
-        case .team: return "person.3"
-        case .edited: return "checkmark.rectangle.stack"
+        case .team: return "folder.badge.person.crop"
+        case .edited: return "photo.badge.checkmark"
         case .mac: return network ? "server.rack" : "folder"
         }
     }
