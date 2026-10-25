@@ -20,7 +20,10 @@ let package = Package(
         .target(name: "MediaKit", dependencies: ["FaceCore"], swiftSettings: v5),
         .target(name: "FaceLibrary", dependencies: ["FaceCore", "MediaKit", .product(name: "GRDB", package: "GRDB.swift")], swiftSettings: v5),
         .executableTarget(name: "facescan", dependencies: ["FaceCore", "MediaKit"], swiftSettings: v5),
-        .executableTarget(name: "SuZuMediaUtils", dependencies: ["FaceLibrary", "MediaKit", .product(name: "Sparkle", package: "Sparkle")], swiftSettings: v5),
+        // AVKit by name: `import AVKit` alone links only its SwiftUI overlay, and a VideoPlayer then crashes looking
+        // for AVPlayerView.
+        .executableTarget(name: "SuZuMediaUtils", dependencies: ["FaceLibrary", "MediaKit", .product(name: "Sparkle", package: "Sparkle")],
+                          swiftSettings: v5, linkerSettings: [.linkedFramework("AVKit")]),
         .testTarget(name: "FaceLibraryTests", dependencies: ["FaceLibrary", "MediaKit"], swiftSettings: v5),
         .testTarget(name: "MediaKitTests", dependencies: ["MediaKit"], swiftSettings: v5),
     ]

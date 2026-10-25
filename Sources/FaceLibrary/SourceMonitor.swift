@@ -347,8 +347,11 @@ public final class SourceMonitor: @unchecked Sendable {
                         affected.formUnion(try Int64.fetchAll(db, sql: "SELECT DISTINCT personId FROM face WHERE mediaId = ? AND personId IS NOT NULL", arguments: [id]))
                         try PersonMemory.remember("face.mediaId = ?", [id], db: db)
                         try db.execute(sql: "DELETE FROM face WHERE mediaId = ?", arguments: [id])
-                        try db.execute(sql: "UPDATE media SET size = ?, mtime = ?, contentKey = NULL, status = 'pending', duplicateOf = NULL, thumbAt = NULL WHERE id = ?",
-                                       arguments: [info.size, info.mtime, id])
+                        // Read again from scratch: in an edited folder that means skipped again (settleEditedFolders).
+                        try db.execute(sql: """
+                            UPDATE media SET size = ?, mtime = ?, contentKey = NULL, status = 'pending', duplicateOf = NULL, thumbAt = NULL,
+                                skippedAsEdited = 0 WHERE id = ?
+                            """, arguments: [info.size, info.mtime, id])
                     }
                 }
                 onChange(true, [])

@@ -29,6 +29,25 @@ public enum Selection {
         return out
     }
 
+    /// The RAW file shot with each of these photos (a camera shooting RAW+JPEG), by the JPEG's id. The library keeps
+    /// the JPEG as the pair's file for face work (the RAW is its companion, `duplicateOf` it); Edit & Export starts
+    /// from the RAW instead, which holds the most.
+    public static func rawPartners(_ db: Database, mediaIds: some Collection<Int64>) throws -> [Int64: URL] {
+        guard !mediaIds.isEmpty else { return [:] }
+        var out: [Int64: URL] = [:]
+        for r in try Row.fetchAll(db, sql: """
+            SELECT j.id, j.path AS jpeg, r.path AS raw FROM media r JOIN media j ON j.id = r.duplicateOf
+            WHERE r.duplicateOf IN (\(mediaIds.map(String.init).joined(separator: ","))) AND \(ImageLoader.rawSQL("r.path")) = 1
+            """) {
+            let jpeg: String = r["jpeg"], raw: String = r["raw"]
+            // A pair, not just identical bytes elsewhere: same folder and name.
+            if ImageLoader.pairKey(jpeg) == ImageLoader.pairKey(raw), !ImageLoader.isRaw(URL(fileURLWithPath: jpeg)) {
+                out[r["id"]] = URL(fileURLWithPath: raw, isDirectory: false)
+            }
+        }
+        return out
+    }
+
     /// Crop focus on one face, with the photo's other faces.
     public static func focus(face: Int64, box: CGRect, in faces: [(id: Int64, box: CGRect)]?) -> FocusHint {
         FocusHint(primary: box, others: (faces ?? []).filter { $0.id != face }.map(\.box))

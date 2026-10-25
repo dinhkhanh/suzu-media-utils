@@ -29,6 +29,9 @@ struct PeopleGrid: View {
     @State private var suggesting = false
     @State private var exportAll: ExportMode?
     @State private var galleryExport = false
+    /// The person whose face space enlarged (see `Peek`).
+    @State private var peek: PeekState<Int64>?
+    @State private var pointer = Peek<Int64>()
 
     init(path: Binding<NavigationPath>, filter: PeopleFilter = .all, scope: PeopleScope = .all) {
         _path = path
@@ -85,6 +88,7 @@ struct PeopleGrid: View {
             .background { Color.clear.contentShape(Rectangle()).onTapGesture { selected = []; editing = nil } }
         }
         .overlay(alignment: .bottom) { if !selected.isEmpty { selectionBar } }
+        .onWindowKeys { pointer.key($0, open: &peek, selection: selected, order: shown.map(\.id)) }
         // Clicking into a name field selects that person (the click lands in the field, not on the tile).
         .onChange(of: editing) { _, now in
             if let now {
@@ -143,6 +147,7 @@ struct PeopleGrid: View {
                               known: model.knownPeople, groups: model.groups, editing: editing == p.id, field: fieldFor == p.id, focus: $editing,
                               open: { path.append(PersonRoute(id: p.id)) },
                               click: {
+                                  pointer.clicked = p.id
                                   selected.click(p.id, in: order)
                                   // Typing a name and clicking another tile moves the typing there; a ⌘/⇧-click
                                   // that builds a selection ends it.
@@ -156,6 +161,11 @@ struct PeopleGrid: View {
                               list: { g, on in model.setGroup(g, people: targets(p), member: on) },
                               newList: { model.askNewGroup = targets(p) })
             .equatable()
+            .onHover { pointer.hover(p.id, $0) }
+            .peekPopover(p.id, open: $peek, keys: { pointer.key($0, open: &peek, selection: selected, order: order) }) { id in
+                let person = model.people.first { $0.id == id }
+                FacePeek(faceId: person?.coverFaceId, title: person?.displayName)
+            }
     }
 
     /// Right-click acts on the whole selection when the clicked person is part of it.
@@ -320,8 +330,7 @@ struct PersonGridCell: View, Equatable {
 
     var body: some View {
         PersonCell(person: person, selected: selected, groups: groups, editing: focus, keepField: field, onRename: rename, onSkip: skip)
-            .onTapGesture(count: 2, perform: open)
-            .onTapGesture(perform: click)
+            .onClick(click, double: open)
             .contextMenu {
                 Button("Open", action: open)
                 if mergeCount > 1 { Button("Merge \(mergeCount) People", action: mergeSelected) }
@@ -473,11 +482,16 @@ struct PersonDetail: View {
     @State private var selectedFaces: Set<Int64> = []
     /// Photos and videos selected in the grid (⌘-click for several), for Open.
     @State private var selectedMedia: Set<Int64> = []
+    /// The photo or video space opened (see `Peek`).
+    @State private var mediaPeek: PeekState<Int64>?
+    @State private var pointer = Peek<Int64>()
     @Environment(\.openWindow) private var openWindow
     @State private var export: ExportMode?
     @State private var sort = MediaSort.best
     @State private var collapseBursts = true
     @State private var topN: Int?
+    /// The Photos and Videos grids, worked out when what goes into them changes (see `relist`).
+    @State private var lists = MediaLists()
     @State private var notifyRule = false
     @State private var videoExport = false
     @State private var otherProjects: [String] = []
@@ -510,7 +524,11 @@ struct PersonDetail: View {
         }
         .navigationTitle(person?.displayName ?? "Person")
         .toolbar { toolbar }
+        .onWindowKeys(mediaKey)
         .task(id: reloadKey) { await reload() }
+        .onChange(of: sort) { relist() }
+        .onChange(of: collapseBursts) { relist() }
+        .onChange(of: topN) { relist() }
         // The name, once the model has the person (and after a rename elsewhere); not while it is being typed.
         .onChange(of: person?.name, initial: true) { if name != (person?.name ?? ""), name.isEmpty || name == person?.name { name = person?.name ?? "" } }
         .sheet(isPresented: $notifyRule) { RuleSheet(presetPerson: personId, notifyOnly: true) }
@@ -533,6 +551,7 @@ struct PersonDetail: View {
         otherProjects = others
         companions = together
         media = newMedia
+        relist()
         faces = newFaces
         selectedFaces = selectedFaces.intersection(faces.map(\.id))
         selectedMedia = selectedMedia.intersection(media.map(\.id))
@@ -678,7 +697,7 @@ struct PersonDetail: View {
                 }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().tint(.primary)
                 .help("Show only the best shots (sharp, eyes open, facing the camera, smiling)")
-                let hidden = media.filter { $0.kind == (tab == .videos ? .video : .photo) }.count - shown(tab == .videos ? .video : .photo, limit: false).count
+                let hidden = tab == .videos ? lists.hiddenVideos : lists.hiddenPhotos
                 Chip("Hide bursts", count: collapseBursts && hidden > 0 ? "−\(hidden)" : nil, on: collapseBursts,
                      help: "Show only the best photo of each burst of near-identical shots") { collapseBursts.toggle() }
             }
@@ -689,33 +708,50 @@ struct PersonDetail: View {
 
     func tabCount(_ t: DetailTab) -> Int {
         switch t {
-        case .photos: media.filter { $0.kind == .photo }.count
-        case .videos: media.filter { $0.kind == .video }.count
+        case .photos: lists.photoCount
+        case .videos: lists.videoCount
         case .faces: faces.count
         }
     }
 
     /// The grid after session filter, sort, burst collapsing and Top N.
-    func shown(_ kind: MediaKind, limit: Bool = true) -> [PersonMedia] {
-        var items = media.filter { $0.kind == kind }
+    func shown(_ kind: MediaKind) -> [PersonMedia] { kind == .video ? lists.videos : lists.photos }
+
+    /// Works the grids out again, when the media, the sort, bursts or Top N change. Not in `body`: every click
+    /// (a selection) redraws the page, and sorting a few thousand photos there each time made selecting lag.
+    func relist() {
+        let photos = media.filter { $0.kind == .photo }, videos = media.filter { $0.kind == .video }
+        let p = Self.list(photos, sort: sort, collapseBursts: collapseBursts, topN: topN)
+        let v = Self.list(videos, sort: sort, collapseBursts: collapseBursts, topN: topN)
+        lists = MediaLists(photos: p.items, videos: v.items, photoCount: photos.count, videoCount: videos.count,
+                           hiddenPhotos: p.hidden, hiddenVideos: v.hidden)
+    }
+
+    /// One kind's grid, and how many shots its bursts hide.
+    static func list(_ all: [PersonMedia], sort: MediaSort, collapseBursts: Bool, topN: Int?) -> (items: [PersonMedia], hidden: Int) {
+        var items = all
         if collapseBursts {
             var best: [Int64: Int] = [:]
             var out: [PersonMedia] = []
-            // The shot kept of a burst: a RAW file first (it holds the most), then the best by score.
-            for item in items.sorted(by: { (ImageLoader.isRaw($0.url) ? 1 : 0, $0.score) > (ImageLoader.isRaw($1.url) ? 1 : 0, $1.score) }) {
+            // The shot kept of a burst: a RAW file first (it holds the most), then the best by score. Whether a file
+            // is RAW is looked up once per file, not in every comparison.
+            let ranked = items.map { (raw: ImageLoader.isRaw($0.url) ? 1 : 0, item: $0) }
+                .sorted { ($0.raw, $0.item.score) > ($1.raw, $1.item.score) }
+            for (_, item) in ranked {
                 if let b = item.burstId, let i = best[b] { out[i].hiddenInBurst += 1; continue }
                 if let b = item.burstId { best[b] = out.count }
                 out.append(item)
             }
             items = out
         }
+        let hidden = all.count - items.count
         switch sort {
         case .best: items.sort { $0.score > $1.score }
         case .time: items.sort { ($0.takenAt ?? .distantPast, $0.path) < ($1.takenAt ?? .distantPast, $1.path) }
         case .name: items.sort { $0.path < $1.path }
         }
-        if limit, let n = topN { items = Array(items.sorted { $0.score > $1.score }.prefix(n)) }
-        return items
+        if let n = topN { items = Array(items.sorted { $0.score > $1.score }.prefix(n)) }
+        return (items, hidden)
     }
 
     // MARK: - Grids
@@ -733,8 +769,14 @@ struct PersonDetail: View {
             ForEach(items) { item in
                 PersonMediaTile(item: item, session: sessionName(item), selected: selectedMedia.contains(item.id))
                     .equatable()
-                    .onTapGesture(count: 2) { openWindow.edit([item.path], faces: [item.path: item.faceId]) }
-                    .onTapGesture { selectedMedia.click(item.id, in: order) }
+                    .onClick({ pointer.clicked = item.id; selectedMedia.click(item.id, in: order) },
+                             double: { openWindow.edit([item.path], faces: [item.path: item.faceId]) })
+                    .onHover { pointer.hover(item.id, $0) }
+                    .peekPopover(item.id, open: $mediaPeek, keys: mediaKey) { id in
+                        if let m = media.first(where: { $0.id == id }) {
+                            MediaPeek(url: m.url, mediaId: m.id, time: m.kind == .video ? m.time : nil, faceId: m.faceId)
+                        }
+                    }
                     .contextMenu {
                         // The selection when this photo is in it, else just this photo.
                         let open = selectedMedia.contains(item.id) ? items.filter { selectedMedia.contains($0.id) } : [item]
@@ -749,6 +791,13 @@ struct PersonDetail: View {
             }
         }
         .padding(20)
+    }
+
+    /// Space: a closer look at the photo or video under the mouse (else the one clicked last, else the first
+    /// selected); see `Peek`. The faces tab enlarges faces itself (`FaceGrid`).
+    func mediaKey(_ e: NSEvent) -> Bool {
+        guard tab != .faces else { return false }
+        return pointer.key(e, open: &mediaPeek, selection: selectedMedia, order: shown(tab == .videos ? .video : .photo).map(\.id))
     }
 
     /// The named session a photo was taken in, when the event has named sessions.
@@ -835,6 +884,15 @@ struct PersonDetail: View {
     }
 }
 
+/// A person's Photos and Videos grids (see `PersonDetail.relist`).
+struct MediaLists {
+    var photos: [PersonMedia] = [], videos: [PersonMedia] = []
+    /// Every photo and video, before bursts and Top N (the tabs' counts).
+    var photoCount = 0, videoCount = 0
+    /// Shots hidden behind the best of their burst.
+    var hiddenPhotos = 0, hiddenVideos = 0
+}
+
 /// A photo or video of the person: best-shot score, burst count, time and session.
 struct PersonMediaTile: View, Equatable {
     let item: PersonMedia
@@ -887,6 +945,9 @@ struct FaceGrid<Menu: View>: View {
     @Binding var selection: Set<Int64>
     @ViewBuilder var menu: (Int64) -> Menu
     @Environment(\.openWindow) private var openWindow
+    /// The face space enlarged (see `Peek`).
+    @State private var peek: PeekState<Int64>?
+    @State private var pointer = Peek<Int64>()
 
     var body: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 6)], spacing: 6) {
@@ -894,12 +955,14 @@ struct FaceGrid<Menu: View>: View {
                 FaceImage(faceId: f.id, side: 96)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(selection.contains(f.id) ? Color.accent : .clear, lineWidth: 3))
-                    .onTapGesture {
+                    .onHover { pointer.hover(f.id, $0) }
+                    .peekPopover(f.id, open: $peek, keys: key) { FacePeek(faceId: $0) }
+                    .onClick({
+                        pointer.clicked = f.id
                         // A click ticks or unticks; ⇧-click ticks everything from the selection to here.
                         if NSEvent.modifierFlags.contains(.shift) { selection.extend(to: f.id, in: faces.map(\.id)) }
                         else if selection.contains(f.id) { selection.remove(f.id) } else { selection.insert(f.id) }
-                    }
-                    .onTapGesture(count: 2) { NSWorkspace.shared.open(URL(fileURLWithPath: f.path, isDirectory: false)) }
+                    }, double: { NSWorkspace.shared.open(URL(fileURLWithPath: f.path, isDirectory: false)) })
                     .contextMenu {
                         // The selected faces' photos when this face is selected, else this face's photo.
                         let open = selection.contains(f.id) ? faces.filter { selection.contains($0.id) } : [f]
@@ -918,6 +981,11 @@ struct FaceGrid<Menu: View>: View {
             }
         }
         .padding(16)
+        .onWindowKeys(key)
+    }
+
+    func key(_ e: NSEvent) -> Bool {
+        pointer.key(e, open: &peek, selection: selection, order: faces.map(\.id))
     }
 }
 

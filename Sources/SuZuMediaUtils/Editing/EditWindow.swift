@@ -51,6 +51,8 @@ extension FaceGroupingModel {
                 let byPath = Dictionary(rows.map { ($0["path"] as String, $0) }, uniquingKeysWith: { a, _ in a })
                 let ids = rows.map { $0["id"] as Int64 }
                 let boxes = try Selection.faceBoxes(db, mediaIds: ids)
+                // A camera's RAW+JPEG pair opens as its RAW, which holds the most (the library works on the JPEG).
+                let raws = try Selection.rawPartners(db, mediaIds: ids)
                 var names: [Int64: Set<String>] = [:]
                 if !ids.isEmpty {
                     for r in try Row.fetchAll(db, sql: """
@@ -64,7 +66,7 @@ extension FaceGroupingModel {
                     let faces = boxes[id] ?? []
                     let main = request.faces[path].flatMap { f in faces.first { $0.id == f } }
                         ?? faces.max { $0.box.width * $0.box.height < $1.box.width * $1.box.height }
-                    return ToolItem(url: item.url, people: (names[id] ?? []).sorted(), takenAt: (row["takenAt"] as Double?).map(Date.init(timeIntervalSince1970:)),
+                    return ToolItem(url: raws[id] ?? item.url, people: (names[id] ?? []).sorted(), takenAt: (row["takenAt"] as Double?).map(Date.init(timeIntervalSince1970:)),
                                     focus: main.map { Selection.focus(face: $0.id, box: $0.box, in: faces) })
                 }
             }) ?? plain

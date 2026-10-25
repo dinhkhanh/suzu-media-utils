@@ -98,6 +98,8 @@ struct ToolInputView: View {
     let kinds: Set<String>
     let mediaKind: MediaKind?
     var label = "files"
+    /// A camera's RAW+JPEG pair comes in as its RAW (Edit & Export: it holds the most); else as its JPEG.
+    var rawPairs = false
     @State private var mode = 0
     @State private var files: [URL] = []
     @State private var chosen: Set<Int64> = []
@@ -122,7 +124,7 @@ struct ToolInputView: View {
             }
             .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 320)
             if mode == 0 {
-                FileInputList(files: $files, kinds: kinds, label: label)
+                FileInputList(files: $files, kinds: kinds, label: label, rawPairs: rawPairs)
                 if let s = faces.currentSession, !files.isEmpty {
                     Text(dating ? "Reading capture times…" : "\(items.count) of \(files.count) \(label) in \(faces.sessionTitle(s))")
                         .font(.caption).foregroundStyle(.secondary)
@@ -219,13 +221,15 @@ struct ToolInputView: View {
     func resolve() {
         guard let store = faces.store else { return }
         let ids = Array(chosen), kind = mediaKind, topN = topN, burst = bestOfBurst, project = faces.currentProject, taken = faces.sessionRange
+        let rawPairs = rawPairs
         resolving = true
         Task.detached(priority: .userInitiated) {
             let files = (try? Selection.files(store, personIds: ids, kind: kind, topN: topN, bestOfBurst: burst, project: project, taken: taken)) ?? []
+            let raws = rawPairs ? ((try? await store.db.read { db in try Selection.rawPartners(db, mediaIds: files.map(\.mediaId)) }) ?? [:]) : [:]
             // A photo of two chosen people is listed once (the first person's), or the tools would edit it twice.
             var seen: Set<String> = []
             let items = files.filter { seen.insert($0.url.path).inserted }
-                .map { ToolItem(url: $0.url, personName: $0.personName, people: $0.people, takenAt: $0.takenAt, focus: $0.focus) }
+                .map { ToolItem(url: raws[$0.mediaId] ?? $0.url, personName: $0.personName, people: $0.people, takenAt: $0.takenAt, focus: $0.focus) }
             await MainActor.run { self.items = items; resolving = false }
         }
     }
@@ -236,7 +240,13 @@ struct FileInputList: View {
     @Binding var files: [URL]
     let kinds: Set<String>
     var label = "files"
+    /// A RAW+JPEG pair is listed as its RAW; else as its JPEG (see `ToolInputView.rawPairs`).
+    var rawPairs = false
     @State private var scanning = false
+    /// Files picked in the list, and the one space opened (see `Peek`).
+    @State private var picked: Set<URL> = []
+    @State private var peek: PeekState<URL>?
+    @State private var pointer = Peek<URL>()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -250,10 +260,15 @@ struct FileInputList: View {
             }
             if !files.isEmpty {
                 // Long lists only show their start: thousands of rows would make every redraw slow.
-                List(files.prefix(300), id: \.self) { u in
+                List(files.prefix(300), id: \.self, selection: $picked) { u in
                     Text(u.lastPathComponent).font(.callout).lineLimit(1).help(u.path)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .peekPopover(u, open: $peek, keys: key) { MediaPeek(url: $0) }
                 }
                 .frame(minHeight: 90, maxHeight: 160)
+                .onWindowKeys(key)
+                .onChange(of: peek?.current) { if let c = peek?.current, picked != [c] { picked = [c] } }
+                .onChange(of: picked) { if picked.count == 1 { pointer.clicked = picked.first } }
                 if files.count > 300 { Text("…and \(files.count - 300) more").font(.caption).foregroundStyle(.secondary) }
             }
         }
@@ -271,13 +286,20 @@ struct FileInputList: View {
         }
     }
 
+    /// Space, and ← → esc while it is open: a closer look at the picked file (see `Peek`). Only while the list has
+    /// the keyboard: in Edit & Export, space on the photo ticks it.
+    func key(_ e: NSEvent) -> Bool {
+        guard peek != nil || e.window?.firstResponder is NSTableView else { return false }
+        return pointer.key(e, open: &peek, selection: picked, order: Array(files.prefix(300)))
+    }
+
     func pick() {
         Panels.choose(folders: true, files: true, multiple: true, prompt: "Add") { add($0) }
     }
 
     /// Folder scanning happens off the main thread (NAS folders can take seconds to list).
     func add(_ urls: [URL]) {
-        let current = files, kinds = kinds
+        let current = files, kinds = kinds, rawPairs = rawPairs
         scanning = true
         Task.detached(priority: .userInitiated) {
             var out = current
@@ -295,9 +317,14 @@ struct FileInputList: View {
             }
             var seen: Set<String> = []
             var result = out.filter { seen.insert($0.path).inserted }.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
-            // A camera's RAW+JPEG pair is one photo: the JPEG stands for both.
-            let jpegs = Set(result.filter { !ImageLoader.isRaw($0) }.map { ImageLoader.pairKey($0.path) })
-            result.removeAll { ImageLoader.isRaw($0) && jpegs.contains(ImageLoader.pairKey($0.path)) }
+            // A camera's RAW+JPEG pair is one photo: one file stands for both.
+            if rawPairs {
+                let raws = Set(result.filter { ImageLoader.isRaw($0) }.map { ImageLoader.pairKey($0.path) })
+                result.removeAll { !ImageLoader.isRaw($0) && raws.contains(ImageLoader.pairKey($0.path)) }
+            } else {
+                let jpegs = Set(result.filter { !ImageLoader.isRaw($0) }.map { ImageLoader.pairKey($0.path) })
+                result.removeAll { ImageLoader.isRaw($0) && jpegs.contains(ImageLoader.pairKey($0.path)) }
+            }
             let final = result
             await MainActor.run { files = final; scanning = false }
         }

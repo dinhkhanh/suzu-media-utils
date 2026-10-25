@@ -404,6 +404,115 @@ final class WatermarkTests: XCTestCase {
         let r = try JSONDecoder().decode(EditRecipe.self, from: Data(json.utf8))
         XCTAssertEqual(r.watermark?.logoPath, "/a.png")
         XCTAssertFalse(r.watermark!.isText)
+        XCTAssertNil(r.watermark!.extraText)
+    }
+
+    func testTextIsDrawnAsWellAsABanner() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("banner-text-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let bar = dir.appendingPathComponent("bar.png")
+        try CIContext().writePNGRepresentation(of: CIImage(color: .white).cropped(to: CGRect(x: 0, y: 0, width: 1400, height: 50)), to: bar,
+                                               format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+        var spec = WatermarkSpec(banner: bar.path)
+        spec.bannerHeight = 0.1
+        spec.extraText = WatermarkSpec.TextMark(text: "© SuZu Media", position: .topLeft)
+        spec.extraText?.opacity = 1
+        let canvas = CIImage(color: CIColor(red: 0.1, green: 0.1, blue: 0.1)).cropped(to: CGRect(x: 0, y: 0, width: 1200, height: 800))
+        func peak(_ image: CIImage, _ r: CGRect) -> Double {
+            let f = image.cropped(to: r).applyingFilter("CIAreaMaximum", parameters: [kCIInputExtentKey: CIVector(cgRect: r)])
+            var px = [UInt8](repeating: 0, count: 4)
+            CIContext().render(f, toBitmap: &px, rowBytes: 4, bounds: CGRect(x: 0, y: 0, width: 1, height: 1), format: .RGBA8, colorSpace: nil)
+            return Double(px[0]) / 255
+        }
+        let out = try EditPipeline.watermark(canvas, spec: spec)
+        XCTAssertGreaterThan(peak(out, CGRect(x: 0, y: 0, width: 1200, height: 100)), 0.9)     // the banner along the bottom
+        XCTAssertGreaterThan(peak(out, CGRect(x: 0, y: 600, width: 500, height: 200)), 0.9)    // the text, top left
+        XCTAssertLessThan(peak(out, CGRect(x: 700, y: 300, width: 500, height: 500)), 0.3)     // nothing else
+        // Text alone (no banner chosen yet) is still drawn; a text watermark ignores text "as well".
+        var textOnly = WatermarkSpec(logoPath: "")
+        textOnly.extraText = spec.extraText
+        XCTAssertFalse(textOnly.isEmpty)
+        XCTAssertGreaterThan(peak(try EditPipeline.watermark(canvas, spec: textOnly), CGRect(x: 0, y: 600, width: 500, height: 200)), 0.9)
+        var text = WatermarkSpec(text: "SuZu")
+        text.position = .bottomRight
+        text.extraText = spec.extraText
+        XCTAssertLessThan(peak(try EditPipeline.watermark(canvas, spec: text), CGRect(x: 0, y: 600, width: 500, height: 200)), 0.3)
+    }
+
+    func testTextAsWellIsKeptWhileOffAndTakesATextPreset() throws {
+        var preset = WatermarkSpec(text: "Ảnh: SuZu")
+        preset.position = .topLeft; preset.size = 0.18; preset.opacity = 0.7; preset.margin = 0.02
+        preset.textColor = .black; preset.font = "Courier"; preset.presetId = "p1"
+        var mark = WatermarkSpec.TextMark(preset)
+        XCTAssertTrue(mark.sameLook(as: preset))
+        XCTAssertEqual(mark.presetId, "p1")
+        XCTAssertEqual(mark.spec.font, "Courier")
+        XCTAssertEqual(mark.spec.position, .topLeft)
+        mark.off = true
+        XCTAssertFalse(mark.isShown)
+        XCTAssertTrue(mark.sameLook(as: preset), "turning it off doesn't change its look")
+        var spec = WatermarkSpec(logoPath: "")
+        spec.extraText = mark
+        XCTAssertTrue(spec.isEmpty, "off: nothing to draw")
+        XCTAssertNil(spec.shownExtraText)
+        spec.extraText?.off = nil
+        XCTAssertEqual(spec.shownExtraText?.text, "Ảnh: SuZu")
+        mark.size = 0.3
+        XCTAssertFalse(mark.sameLook(as: preset))
+    }
+
+    func testTextWatermarkUsesItsFont() throws {
+        // The same words are wider in Courier than in the default face, and each font's mark is kept apart.
+        let plain = try XCTUnwrap(EditPipeline.textMark("SuZu Media", color: .white))
+        let courier = try XCTUnwrap(EditPipeline.textMark("SuZu Media", color: .white, font: "Courier"))
+        XCTAssertGreaterThan(courier.extent.width, plain.extent.width * 1.05)
+        // Drawn on a photo one after the other, each comes out in its own font (not the first one's, from the cache).
+        let canvas = CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 600, height: 400))
+        var a = WatermarkSpec(text: "SuZu Media")
+        a.opacity = 1
+        var b = a
+        b.font = "Courier"
+        func pixels(_ spec: WatermarkSpec) throws -> [UInt8] {
+            var px = [UInt8](repeating: 0, count: 600 * 400 * 4)
+            CIContext().render(try EditPipeline.watermark(canvas, spec: spec), toBitmap: &px, rowBytes: 600 * 4,
+                               bounds: canvas.extent, format: .RGBA8, colorSpace: nil)
+            return px
+        }
+        XCTAssertNotEqual(try pixels(a), try pixels(b))
+    }
+
+    func testTextOnTheBannersEdgeKeepsItsMarginFromTheBanner() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("banner-margin-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let bar = dir.appendingPathComponent("red.png")
+        try CIContext().writePNGRepresentation(of: CIImage(color: .red).cropped(to: CGRect(x: 0, y: 0, width: 1400, height: 50)), to: bar,
+                                               format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+        // A red banner 120 px high along the bottom of 1200 x 800; white text bottom-left, its own margin 20 px.
+        var spec = WatermarkSpec(banner: bar.path)
+        spec.bannerHeight = 0.1
+        spec.extraText = WatermarkSpec.TextMark(text: "© SuZu Media", position: .bottomLeft)
+        spec.extraText?.opacity = 1
+        spec.extraText?.margin = 20.0 / 800
+        let canvas = CIImage(color: CIColor(red: 0.1, green: 0.1, blue: 0.1)).cropped(to: CGRect(x: 0, y: 0, width: 1200, height: 800))
+        let out = try EditPipeline.watermark(canvas, spec: spec)
+        func green(_ r: CGRect) -> Double {
+            let f = out.cropped(to: r).applyingFilter("CIAreaMaximum", parameters: [kCIInputExtentKey: CIVector(cgRect: r)])
+            var px = [UInt8](repeating: 0, count: 4)
+            CIContext().render(f, toBitmap: &px, rowBytes: 4, bounds: CGRect(x: 0, y: 0, width: 1, height: 1), format: .RGBA8, colorSpace: nil)
+            return Double(px[1]) / 255
+        }
+        XCTAssertLessThan(green(CGRect(x: 0, y: 0, width: 1200, height: 138)), 0.3)          // banner and the 20 px above it: no text
+        XCTAssertGreaterThan(green(CGRect(x: 0, y: 140, width: 500, height: 120)), 0.9)      // the text, just above that
+        // Text on another edge is measured from the photo's edge as usual.
+        spec.extraText?.position = .topLeft
+        let top = try EditPipeline.watermark(canvas, spec: spec)
+        let r = CGRect(x: 0, y: 660, width: 500, height: 120)
+        let f = top.cropped(to: r).applyingFilter("CIAreaMaximum", parameters: [kCIInputExtentKey: CIVector(cgRect: r)])
+        var px = [UInt8](repeating: 0, count: 4)
+        CIContext().render(f, toBitmap: &px, rowBytes: 4, bounds: CGRect(x: 0, y: 0, width: 1, height: 1), format: .RGBA8, colorSpace: nil)
+        XCTAssertGreaterThan(Double(px[1]) / 255, 0.9)
     }
 }
 

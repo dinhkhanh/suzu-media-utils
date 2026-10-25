@@ -649,12 +649,61 @@ struct WatermarkControls: View {
                       : "A wide bar across the whole photo (its sides are trimmed to fit): the one for landscape and square photos.") { if let u = $0.first { done(u.path) } }
 }
 
+/// A text watermark's font, from the fonts on this Mac: the family, then its style (Regular, Bold…). Equatable on the
+/// font alone: its menus list every family, and a slider dragged beside it shouldn't rebuild them.
+struct FontPicker: View, Equatable {
+    /// PostScript name; nil is `WatermarkSpec.defaultFont`.
+    @Binding var font: String?
+    static let families = NSFontManager.shared.availableFontFamilies
+
+    static func == (a: FontPicker, b: FontPicker) -> Bool { a.font == b.font }
+
+    var current: String { font ?? WatermarkSpec.defaultFont }
+    /// The family of the chosen face; its own name when that font isn't on this Mac (a preset from another Mac).
+    var family: String { NSFont(name: current, size: 12)?.familyName ?? current }
+
+    var body: some View {
+        let faces = Self.faces(family)
+        HStack(spacing: 6) {
+            Picker("Font", selection: Binding(get: { family }, set: { font = Self.startFace(of: $0) })) {
+                if !Self.families.contains(family) { Text("\(family) (not on this Mac)").tag(family) }
+                ForEach(Self.families, id: \.self) { Text($0).tag($0) }
+            }
+            Picker("Style", selection: Binding(get: { current }, set: { font = $0 })) {
+                if !faces.contains(where: { $0.name == current }) { Text("—").tag(current) }
+                ForEach(faces, id: \.name) { Text($0.style).tag($0.name) }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+        .help("The text's font and style, from the fonts installed on this Mac")
+    }
+
+    /// A family's faces: (PostScript name, style name).
+    static func faces(_ family: String) -> [(name: String, style: String)] {
+        (NSFontManager.shared.availableMembers(ofFontFamily: family) ?? []).compactMap { m in
+            guard m.count > 1, let name = m[0] as? String, let style = m[1] as? String else { return nil }
+            return (name, style)
+        }
+    }
+
+    /// The face a family starts on when picked: Medium (the default's weight), else Regular, else its first.
+    static func startFace(of family: String) -> String? {
+        let f = faces(family)
+        return (f.first { $0.style == "Medium" } ?? f.first { $0.style == "Regular" } ?? f.first)?.name
+    }
+}
+
 /// What a watermark is: a small logo, a line of text, or a banner across the whole width.
 enum WatermarkKind: Hashable { case logo, text, banner }
 
 /// The look of one watermark: logo or text, where it sits, how big and how strong.
 struct WatermarkFields: View {
     @Binding var spec: WatermarkSpec
+    @ObservedObject private var presets = WatermarkPresets.shared
+    @Environment(\.openSettings) private var openSettings
+    @State private var namingText = false
+    @State private var textPresetName = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -691,6 +740,7 @@ struct WatermarkFields: View {
             } else if spec.text != nil {
                 TextField("Text", text: Binding(get: { spec.text ?? "" }, set: { spec.text = $0 }), prompt: Text("© SuZu Media"))
                     .textFieldStyle(.roundedBorder)
+                FontPicker(font: $spec.font).equatable()
                 Picker("Colour", selection: Binding(get: { spec.textColor ?? .white }, set: { spec.textColor = $0 })) {
                     Text("White").tag(WatermarkSpec.TextColor.white)
                     Text("Black").tag(WatermarkSpec.TextColor.black)
@@ -719,17 +769,108 @@ struct WatermarkFields: View {
                     }
                 }
             }
+            if spec.text == nil { extraTextFields }
         }
+    }
+
+    /// A line of text as well as the logo or banner, placed on its own. Turned off it is kept, so turning it on
+    /// again brings it back as it was.
+    @ViewBuilder var extraTextFields: some View {
+        Divider().padding(.vertical, 2)
+        Toggle("Text as well", isOn: Binding(get: { spec.extraText.map { $0.off != true } ?? false }, set: { on in
+            var s = spec
+            if s.extraText != nil {
+                s.extraText?.off = on ? nil : true
+            } else if on {
+                // Out of the main mark's way: a corner of its own beside a logo, the top beside a bottom banner.
+                let place: WatermarkSpec.Position = s.isBanner ? (s.position == .top ? .bottomRight : .topRight)
+                    : s.position == .bottomRight ? .bottomLeft : .bottomRight
+                s.extraText = WatermarkSpec.TextMark(text: "© SuZu Media", position: place)
+            }
+            spec = s
+        }))
+        .help("Draw a line of text too, e.g. a credit with the event's banner")
+        if let t = spec.extraText, t.off != true {
+            textPresetRow(t)
+            TextField("Text", text: extra(\.text, ""), prompt: Text("© SuZu Media"))
+                .textFieldStyle(.roundedBorder)
+            FontPicker(font: extra(\.font, nil)).equatable()
+            Picker("Colour", selection: Binding(get: { spec.extraText?.textColor ?? .white }, set: { spec.extraText?.textColor = $0 })) {
+                Text("White").tag(WatermarkSpec.TextColor.white)
+                Text("Black").tag(WatermarkSpec.TextColor.black)
+            }
+            .pickerStyle(.segmented)
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Position").font(.caption).foregroundStyle(.secondary)
+                    AlignmentGrid(position: extra(\.position, .bottomRight))
+                }
+                VStack(spacing: 2) {
+                    CompactSlider(label: "Size", value: extra(\.size, 0.25), range: 0.06...0.6)
+                    CompactSlider(label: "Opacity", value: extra(\.opacity, 0.9), range: 0.15...1)
+                    CompactSlider(label: "Margin", value: extra(\.margin, 0.035), range: 0...0.12)
+                }
+            }
+        }
+    }
+
+    /// The text presets (saved text watermarks) to take the look from, and saving this one as one.
+    func textPresetRow(_ t: WatermarkSpec.TextMark) -> some View {
+        let textPresets = presets.presets.filter { $0.spec.isText }
+        let current = presets.preset(t.presetId).flatMap { $0.spec.isText ? $0 : nil }
+        let title = current.map { $0.name + (t.sameLook(as: $0.spec) ? "" : " (edited)") } ?? "Custom"
+        return HStack {
+            Text("Preset")
+            Spacer()
+            Menu(title) {
+                ForEach(textPresets) { p in
+                    Button(p.name) {
+                        // The preset's whole look, kept on.
+                        var s = spec
+                        s.extraText = WatermarkSpec.TextMark(p.spec)
+                        spec = s
+                    }
+                }
+                if textPresets.isEmpty { Text("No text presets yet") }
+                Divider()
+                Button("Save as Text Preset…") { textPresetName = ""; namingText = true }
+                Button("Manage Presets…") { openSettings() }
+            }
+            .fixedSize()
+            .help("Take the text, font, colour, place and size from a saved text watermark")
+        }
+        .alert("Save Text Preset", isPresented: $namingText) {
+            TextField("Name", text: $textPresetName)
+            Button("Save") {
+                guard let t = spec.extraText else { return }
+                var look = t.spec
+                look.presetId = nil
+                let saved = presets.upsert(WatermarkPreset(name: textPresetName.isEmpty ? t.text : textPresetName, spec: look))
+                spec.extraText?.presetId = saved.id
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("A text watermark preset: pick it on its own, or as the text with a logo or banner.")
+        }
+    }
+
+    /// One field of the text drawn as well.
+    func extra<T>(_ field: WritableKeyPath<WatermarkSpec.TextMark, T>, _ fallback: T) -> Binding<T> {
+        Binding(get: { spec.extraText?[keyPath: field] ?? fallback }, set: { spec.extraText?[keyPath: field] = $0 })
     }
 
     var kind: Binding<WatermarkKind> {
         Binding(get: { spec.isBanner ? .banner : spec.text != nil ? .text : .logo }, set: { k in
-            let wasBanner = spec.isBanner
-            spec.text = k == .text ? (spec.text ?? "© SuZu Media") : nil
-            spec.banner = k == .banner ? true : nil
+            // Changed on a copy and written back once: written field by field, each write started again from the
+            // spec as it was drawn, so only the last one (the margin) stuck and the kind never changed.
+            var s = spec
+            let wasBanner = s.isBanner
+            s.text = k == .text ? (s.text ?? "© SuZu Media") : nil
+            s.banner = k == .banner ? true : nil
             // A banner sits flush on an edge at full strength; a mark goes back to the corner.
-            if k == .banner && !wasBanner { spec.position = .bottom; spec.margin = 0; spec.opacity = 1 }
-            if k != .banner && wasBanner { spec.position = .bottomRight; spec.margin = 0.035 }
+            if k == .banner && !wasBanner { s.position = .bottom; s.margin = 0; s.opacity = 1 }
+            if k != .banner && wasBanner { s.position = .bottomRight; s.margin = 0.035 }
+            spec = s
         })
     }
 

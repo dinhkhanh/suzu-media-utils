@@ -18,9 +18,6 @@ struct SessionBar: View {
                 bar
                 if divider { Divider() }
             }
-            // The bar is part of the screen's header: the toolbar draws no line of its own above it, so the header
-            // has one separator (under the bar) instead of two stacked ones.
-            .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         }
     }
 

@@ -260,8 +260,11 @@ public final class LibraryService: @unchecked Sendable {
         var affected: Set<Int64> = []
         while true {
             let n = try store.db.write { db -> Int in
+                // Also a skipped file waiting again: libraries before 0.8.13 put a changed file back to pending with
+                // its skip kept, and the processor never takes an edited folder's file, so it waited for good.
                 let ids = try Int64.fetchAll(db, sql: """
-                    SELECT id FROM media WHERE sourceId IN (\(SourceShare.editedIds)) AND duplicateOf IS NULL AND NOT skippedAsEdited LIMIT 500
+                    SELECT id FROM media WHERE sourceId IN (\(SourceShare.editedIds)) AND duplicateOf IS NULL
+                      AND (NOT skippedAsEdited OR status = 'pending') LIMIT 500
                     """)
                 for id in ids { affected.formUnion(try skipAsEdited(id, db: db)) }
                 return ids.count

@@ -134,7 +134,8 @@ Camera RAW files (Canon, Nikon, Sony, Fujifilm, Olympus, Panasonic, Pentax, Leic
 are photos like any other: recognised, searched, exported and edited (an edited RAW comes out as a JPEG). The camera's
 embedded preview is used wherever it is big enough, so RAW files are not slower to process. A RAW file next to its
 JPEG (RAW+JPEG shooting, same name) is the JPEG's companion: it shows the JPEG's people and is never processed or
-exported on its own, so a person's folder gets one file per shot.
+exported on its own, so a person's folder gets one file per shot. Edit & Export is the exception: there a pair comes in
+as its RAW (from files and folders, from people, or opened from the library), which holds the most to edit.
 
 Skip similar shots and Skip blurry shots (under the photos) check the photos before the export and untick the ones to
 leave out, with the reason on hover, so any can be ticked back. Similar shots are taken within a couple of seconds of

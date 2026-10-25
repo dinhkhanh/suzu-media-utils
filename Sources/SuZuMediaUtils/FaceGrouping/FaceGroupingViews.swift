@@ -45,7 +45,7 @@ struct FaceGroupingDetail: View {
                 case .source(let id): SourceView(sourceId: id)
                 }
             }
-            .navigationDestination(for: PersonRoute.self) { PersonDetail(personId: $0.id, path: $path) }
+            .navigationDestination(for: PersonRoute.self) { PersonDetail(personId: $0.id, path: $path).screenHeader() }
             .alert("Something went wrong", isPresented: Binding(get: { model.actionError != nil }, set: { if !$0 { model.actionError = nil } })) {
                 Button("OK") { model.actionError = nil }
             } message: {

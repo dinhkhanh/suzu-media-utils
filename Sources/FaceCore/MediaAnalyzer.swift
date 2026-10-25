@@ -158,24 +158,33 @@ extension MediaAnalyzer {
     /// JPEG of the area around one face, cut from a sharp decode of the original (not the small preview), for
     /// sending to a recognition service. `box` is normalized, top-left origin; `time` selects the video frame.
     public static func faceContextJPEG(_ url: URL, box: CGRect, time: Double?, maxSide: Int = 640) -> Data? {
+        guard let crop = faceContext(url, box: box, time: time, maxSide: maxSide) else { return nil }
+        let data = NSMutableData()
+        guard let dst = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dst, crop, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
+        CGImageDestinationFinalize(dst)
+        return data as Data
+    }
+
+    /// The area around one face, a square centred on it: `pad` of the face box on each side (0.6, head and shoulders;
+    /// 0.35, the framing of the face crops). At most `maxSide` pixels, cut from a decode of the original just big
+    /// enough for that (never more than 3000 px).
+    public static func faceContext(_ url: URL, box: CGRect, time: Double?, maxSide: Int = 640, pad: Double = 0.6) -> CGImage? {
+        let span = 1 + 2 * pad
+        // The decode size that gives the square `maxSide` pixels once cut out.
+        let wanted = min(3000, max(800, Int(Double(maxSide) / (span * max(0.01, min(box.width, box.height))))))
         let image: CGImage?
         if isVideo(url) {
-            image = VideoSampler.frameSync(url, at: time ?? 0, maxPixel: 3000)
+            image = VideoSampler.frameSync(url, at: time ?? 0, maxPixel: wanted)
         } else if let (src, _) = try? ImageLoader.source(url) {
-            image = ImageLoader.decode(src, maxPixel: min(3000, max(1, ImageLoader.pixelLongSide(src))))
+            image = ImageLoader.decode(src, maxPixel: min(wanted, max(1, ImageLoader.pixelLongSide(src))))
         } else {
             image = nil
         }
         guard let image else { return nil }
         let W = Double(image.width), H = Double(image.height)
         let face = CGRect(x: box.minX * W, y: box.minY * H, width: box.width * W, height: box.height * H)
-        // Head and shoulders: a square 2.2x the face box, centred on the face.
-        let out = min(maxSide, max(80, Int(max(face.width, face.height) * 2.2)))
-        guard let crop = FaceAligner.preview(image, rect: face, side: out, pad: 0.6) else { return nil }
-        let data = NSMutableData()
-        guard let dst = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(dst, crop, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
-        CGImageDestinationFinalize(dst)
-        return data as Data
+        let out = min(maxSide, max(80, Int(max(face.width, face.height) * span)))
+        return FaceAligner.preview(image, rect: face, side: out, pad: pad)
     }
 }

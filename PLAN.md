@@ -878,3 +878,36 @@ the preview, regular size, on a dark disc, and takes no clicks.
   placed again with whoever it looks most like, this person included, else clustered or left unassigned. Faces
   placed by hand stay, so after a wrong merge a few faces moved to each right name steer the rest. The bar also has
   Select All.
+
+## v0.8.13 (2026-10-26): Space for a closer look; text with logos and banners; RAW in Edit & Export
+
+- **Space peeks** (`Peek.swift`): `Peek<ID>` keeps the tile under the mouse and the last clicked one outside SwiftUI
+  state (hover redraws nothing); space opens the hovered tile, else the clicked one, else the first selected.
+  `PeekState` is the tile the popover hangs from plus the one shown: ← → change the shown one while the popover stays
+  put (moving a popover tile to tile closes and reopens it, and quick steps lost it). `FacePeek` shows the cached
+  crop at once, then `MediaAnalyzer.faceContext` (the crop's framing, pad 0.35, cut from a decode just big enough,
+  ≤ 3000 px) via `Thumbnails.closeUp`. `MediaPeek` (photos: library thumbnail, then a 1600 px decode; videos: an
+  AVPlayer from the person's time) has Edit and Copy Path; it replaced Quick Look in the media grids, Files (where
+  stepping moves the selection) and the tools' list (which takes space only while the list has the keyboard: space
+  ticks photos in Edit & Export). The popover's own window gets the keys too (`onWindowKeys` inside it).
+- **AVKit linked by name** (`Package.swift`): `import AVKit` linked only `_AVKit_SwiftUI`, so a `VideoPlayer` crashed
+  looking for `AVPlayerView` (the Cull window's video too).
+- **Person page selection 690 ms → 16 ms**: `body` sorted every photo on each click (`ImageLoader.isRaw` making a
+  URL per comparison). The grids are now `MediaLists`, worked out in `relist()` when media, sort, bursts or Top N
+  change. Grid clicks use `onClick(_:double:)` (click count of the event) instead of `onTapGesture(count: 2)` beside a
+  tap, which held every click for the double-click time.
+- **Headers**: `screenHeader()` (toolbar background hidden) on every sidebar screen and on pushed ones (a person),
+  which don't take it from the screen they were pushed from.
+- **Watermarks**: the kind picker writes the spec once (field by field, each write started from the drawn spec on
+  macOS 27, so only the margin stuck). `WatermarkSpec.extraText` (`TextMark`): text drawn as well as a logo or
+  banner, kept while off (`off`), with its own look or a text preset's (`presetId`, `sameLook`); on the banner's
+  edge its margin counts from the banner (`EditPipeline.mark(inset:)`). `font` (PostScript name, default
+  HelveticaNeue-Medium) on text watermarks and `TextMark`, part of the text mark's cache key; `FontPicker` lists
+  families and their styles.
+- **RAW in Edit & Export**: `rawPairs` on `ToolInputView`/`FileInputList` keeps a pair's RAW (other tools keep the
+  JPEG); people and library-opened photos swap to the RAW via `Selection.rawPartners` (the RAW `duplicateOf` its
+  JPEG, same pair key).
+- **Stuck "Processing N files"**: a changed file in an edited folder went back to pending with `skippedAsEdited`
+  kept, which `settleEditedFolders` skipped and the processor refuses. The scan now clears the flag, and the settle
+  pass also takes `skippedAsEdited AND status = 'pending'` (36 such files in the event library).
+

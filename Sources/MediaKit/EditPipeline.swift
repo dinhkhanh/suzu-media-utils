@@ -476,11 +476,35 @@ public enum EditPipeline {
 
     static let logoCache = NSCache<NSString, CIImage>()
 
+    /// The logo, text or banner, then the text drawn as well (`extraText`). Text on the banner's edge keeps its
+    /// margin from the banner, not from the photo's edge, so it sits beside the banner instead of on it.
     public static func watermark(_ image: CIImage, spec: WatermarkSpec) throws -> CIImage {
-        guard !spec.isEmpty else { return image }
+        var out = try mark(image, spec: spec)
+        if let t = spec.shownExtraText {
+            var inset = (top: CGFloat(0), bottom: CGFloat(0))
+            if spec.isBanner && spec.hasMark {
+                let ext = image.extent
+                let band = max(ext.width, ext.height) * (spec.bannerHeight ?? WatermarkSpec.defaultBannerHeight) + min(ext.width, ext.height) * spec.margin
+                switch WatermarkSpec.Position.allCases.firstIndex(of: spec.position)! / 3 {
+                case 0: inset.top = band
+                case 2: inset.bottom = band
+                default: break
+                }
+            }
+            out = try mark(out, spec: t.spec, inset: inset)
+        }
+        return out
+    }
+
+    /// One mark; `inset` moves the top and bottom rows in from those edges (past a banner there).
+    static func mark(_ image: CIImage, spec: WatermarkSpec, inset: (top: CGFloat, bottom: CGFloat) = (0, 0)) throws -> CIImage {
+        guard spec.hasMark else { return image }
         let ext = image.extent
         let path = spec.logoPath(for: ext.size)
-        let logo = try spec.isText ? cachedMark("text|\(spec.textColor?.rawValue ?? "")|\(spec.text!)", path) { textMark(spec.text!, color: spec.textColor ?? .white) }
+        let font = spec.font ?? WatermarkSpec.defaultFont
+        let logo = try spec.isText ? cachedMark("text|\(spec.textColor?.rawValue ?? "")|\(font)|\(spec.text!)", path) {
+            textMark(spec.text!, color: spec.textColor ?? .white, font: font)
+        }
             : loadLogo(path)
         let short = min(ext.width, ext.height), long = max(ext.width, ext.height)
         var mark: CIImage
@@ -498,7 +522,7 @@ public enum EditPipeline {
         mark = mark.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: spec.opacity)])
         let m = short * spec.margin, w = mark.extent.width, h = mark.extent.height
         let xs: [CGFloat] = spec.isBanner ? Array(repeating: (ext.width - w) / 2, count: 3) : [m, (ext.width - w) / 2, ext.width - w - m]
-        let ys: [CGFloat] = [ext.height - h - m, (ext.height - h) / 2, m]  // top, middle, bottom (bottom-left origin)
+        let ys: [CGFloat] = [ext.height - h - m - inset.top, (ext.height - h) / 2, m + inset.bottom]  // top, middle, bottom (bottom-left origin)
         let idx = WatermarkSpec.Position.allCases.firstIndex(of: spec.position)!
         let pos = CGPoint(x: xs[idx % 3], y: ys[idx / 3])
         mark = mark.transformed(by: CGAffineTransform(translationX: ext.minX + pos.x - mark.extent.minX, y: ext.minY + pos.y - mark.extent.minY))
@@ -517,9 +541,10 @@ public enum EditPipeline {
     }
 
     /// Text drawn large with a soft shadow (legible on light and dark areas), then scaled like a logo.
-    static func textMark(_ text: String, color: WatermarkSpec.TextColor) -> CIImage? {
+    static func textMark(_ text: String, color: WatermarkSpec.TextColor, font name: String = WatermarkSpec.defaultFont) -> CIImage? {
         let fontSize: CGFloat = 160
-        let font = CTFontCreateWithName("HelveticaNeue-Medium" as CFString, fontSize, nil)
+        // A font no longer installed falls back to Core Text's choice for the name (Helvetica), not a failure.
+        let font = CTFontCreateWithName(name as CFString, fontSize, nil)
         let white = color == .white
         let attr = NSAttributedString(string: text, attributes: [
             .init(kCTFontAttributeName as String): font,

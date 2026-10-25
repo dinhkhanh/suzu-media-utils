@@ -684,6 +684,19 @@ extension LibraryTests {
         XCTAssertNil(try row(xCopy).duplicateOf)
         XCTAssertEqual(try row(xCopy).status, .pending)
 
+        // An edited file saved again over itself is skipped again, not left waiting (the processor never takes it).
+        try Data((0..<5000).map { UInt8(truncatingIfNeeded: $0 &* 9) }).write(to: z)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -1800)], ofItemAtPath: z.path)
+        try scanEdited()
+        XCTAssertEqual(try row(z).status, .pending)
+        _ = try LibraryService.settleEditedFolders(store: store)
+        XCTAssertEqual(try row(z).status, .done)
+        XCTAssertTrue(try row(z).skippedAsEdited)
+        // One already stuck that way (an older version kept the skip when the file changed) is finished too.
+        try store.db.write { db in try db.execute(sql: "UPDATE media SET status = 'pending' WHERE id = ?", arguments: [try row(z).id!]) }
+        _ = try LibraryService.settleEditedFolders(store: store)
+        XCTAssertEqual(try row(z).status, .done)
+
         // No longer an edited folder: its files are processed.
         try setEdited(false)
         (_, reopened) = try LibraryService.settleEditedFolders(store: store)
@@ -774,6 +787,11 @@ extension LibraryTests {
         all = try media()
         XCTAssertNil(all.first { $0.url.lastPathComponent == "IMG_0005.dng" }!.duplicateOf)
         XCTAssertEqual(all.first { $0.url.lastPathComponent == "IMG_0005.jpg" }!.status, .pending)
+
+        // Edit & Export starts from a pair's RAW: found by the JPEG's id; nothing for a lone JPEG or RAW.
+        let lone = all.first { $0.url.lastPathComponent == "zz_0002.jpg" }!, nef = all.first { $0.url.lastPathComponent == "DSC_0003.nef" }!
+        let partners = try store.db.read { db in try Selection.rawPartners(db, mediaIds: [jpg.id!, lateJpg.id!, lone.id!, nef.id!]) }
+        XCTAssertEqual(partners.mapValues(\.lastPathComponent), [jpg.id!: "IMG_0001.CR2", lateJpg.id!: "IMG_0004.cr3"])
 
         // Companions are left out of exports and searches, like copies.
         XCTAssertTrue(ImageLoader.isRaw(raw.url))

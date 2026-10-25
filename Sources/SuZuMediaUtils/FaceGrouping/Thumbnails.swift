@@ -1,6 +1,7 @@
 import AppKit
 import FaceCore
 import FaceLibrary
+import GRDB
 import QuickLookThumbnailing
 import SwiftUI
 
@@ -87,6 +88,30 @@ final class Thumbnails: @unchecked Sendable {
         }
         return image
     }
+
+    /// A face sharp enough to check (the crops are small): the crop's framing cut from the original photo or video
+    /// frame, with the file it is in and where in a video. Kept, so stepping back to a face is instant.
+    func closeUp(_ faceId: Int64, side: Int) async -> (image: NSImage?, path: String, time: Double?)? {
+        guard let store else { return nil }
+        let found = await Task.detached(priority: .userInitiated) { () -> (path: String, box: CGRect, time: Double?)? in
+            let row = try? store.db.read { db in
+                try Row.fetchOne(db, sql: "SELECT m.path, f.x, f.y, f.w, f.h, f.time FROM face f JOIN media m ON m.id = f.mediaId WHERE f.id = ?",
+                                 arguments: [faceId])
+            }
+            guard let row = row ?? nil else { return nil }
+            let x: Double = row["x"], y: Double = row["y"], w: Double = row["w"], h: Double = row["h"]
+            return (row["path"], CGRect(x: x, y: y, width: w, height: h), row["time"])
+        }.value
+        guard let (path, box, time) = found else { return nil }
+        let key = "c\(faceId)#\(side)" as NSString
+        if let img = cache.object(forKey: key) { return (img, path, time) }
+        let made = await Task.detached(priority: .userInitiated) {
+            MediaAnalyzer.faceContext(URL(fileURLWithPath: path, isDirectory: false), box: box, time: time, maxSide: side, pad: 0.35)
+        }.value
+        let image = made.map { NSImage(cgImage: $0, size: .zero) }
+        if let image { cache.setObject(image, forKey: key) }
+        return (image, path, time)
+    }
 }
 
 /// At most `limit` holders at a time; others wait their turn without blocking a thread.
@@ -163,6 +188,19 @@ extension Set {
         let picked = order.indices.filter { contains(order[$0]) }
         guard let lo = picked.min(), let hi = picked.max() else { return i...i }
         return i < lo ? i...hi : lo...i
+    }
+}
+
+extension View {
+    /// A click in a grid that shows at once, and a double-click. Every click runs `click` (the second of a
+    /// double-click too, so a tick-on-click grid ends where it started); the second also runs `double`. Not
+    /// `onTapGesture(count: 2)` beside a plain tap: SwiftUI then holds every click until the double-click time has
+    /// passed, and the selection ring came late.
+    func onClick(_ click: @escaping () -> Void, double: @escaping () -> Void) -> some View {
+        onTapGesture {
+            click()
+            if (NSApp.currentEvent?.clickCount ?? 1) == 2 { double() }
+        }
     }
 }
 

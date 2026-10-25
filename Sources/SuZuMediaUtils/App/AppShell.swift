@@ -97,6 +97,7 @@ struct AppShell: View {
                 case .tool(let t): ToolDetail(route: t)
                 }
             }
+            .screenHeader()
         }
         .onChange(of: route) {
             path = NavigationPath()
@@ -141,6 +142,16 @@ struct AppShell: View {
             Button("Cancel", role: .cancel) { listName = "" }
         }
         .onChange(of: faces.askRenameGroup) { if let g = faces.askRenameGroup { listName = g.name } }
+    }
+}
+
+extension View {
+    /// For every screen of the main window, the sidebar's and those pushed from them (a person): the header is the
+    /// toolbar and what the screen puts under it (the sessions bar), and the toolbar draws no background or line of
+    /// its own, which stacked a second line on the screen's and stepped the sidebar's edge where its background
+    /// began. A pushed screen doesn't take this from the one it was pushed from.
+    func screenHeader() -> some View {
+        toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
     }
 }
 

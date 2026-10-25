@@ -20,6 +20,9 @@ struct SearchView: View {
     @State private var generation = 0
     /// Files selected in the grid (⌘-click for several), for Open.
     @State private var selected: Set<Int64> = []
+    /// The file space opened (see `Peek`).
+    @State private var peek: PeekState<Int64>?
+    @State private var pointer = Peek<Int64>()
     @Environment(\.openWindow) private var openWindow
 
     var album: SmartAlbum? { albumId.flatMap { id in model.albums.first { $0.id == id } } }
@@ -40,8 +43,15 @@ struct SearchView: View {
                         MediaThumbnail(item: PersonMedia(id: h.id, path: h.path, kind: h.kind, faceId: h.faceId ?? 0, time: h.time,
                                                          score: h.score, takenAt: h.takenAt, burstId: h.burstId), side: 170)
                             .overlay(RoundedRectangle(cornerRadius: 6).stroke(selected.contains(h.id) ? Color.accent : .clear, lineWidth: 3))
-                            .onTapGesture(count: 2) { NSWorkspace.shared.open(URL(fileURLWithPath: h.path, isDirectory: false)) }
-                            .onTapGesture { selected.click(h.id, in: hits.map(\.id)) }
+                            .onClick({ pointer.clicked = h.id; selected.click(h.id, in: hits.map(\.id)) },
+                                     double: { NSWorkspace.shared.open(URL(fileURLWithPath: h.path, isDirectory: false)) })
+                            .onHover { pointer.hover(h.id, $0) }
+                            .peekPopover(h.id, open: $peek, keys: key) { id in
+                                if let h = hits.first(where: { $0.id == id }) {
+                                    MediaPeek(url: URL(fileURLWithPath: h.path, isDirectory: false), mediaId: h.id,
+                                              time: h.kind == .video ? h.time : nil, faceId: h.faceId)
+                                }
+                            }
                             .contextMenu {
                                 // The selection when this file is in it, else just this file.
                                 let open = selected.contains(h.id) ? hits.filter { selected.contains($0.id) } : [h]
@@ -63,6 +73,7 @@ struct SearchView: View {
         }
         .navigationTitle(album?.name ?? "Search")
         .navigationSubtitle("\(hits.count) files")
+        .onWindowKeys(key)
         .toolbar {
             ToolbarItem {
                 Button(album == nil ? "Save as Smart Album…" : "Update Album") {
@@ -99,6 +110,12 @@ struct SearchView: View {
             }
         }
         .task { await benchFilters() }
+    }
+
+    /// Space: a closer look at the file under the mouse (else the one clicked last, else the first selected); see
+    /// `Peek`.
+    func key(_ e: NSEvent) -> Bool {
+        pointer.key(e, open: &peek, selection: selected, order: hits.prefix(shown).map(\.id))
     }
 
     /// SUZU_BENCH_SEARCH=1 (testing): flips through filter combinations like a user would; any value logs results.

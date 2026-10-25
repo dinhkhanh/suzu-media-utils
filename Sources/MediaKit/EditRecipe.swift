@@ -326,6 +326,9 @@ public struct WatermarkSpec: Codable, Sendable, Equatable, Hashable {
     /// When not empty, the mark is this text (e.g. "© SuZu Media") instead of the logo.
     public var text: String?
     public var textColor: TextColor?
+    /// The text's font, by PostScript name (one face: family and style); nil is `defaultFont`.
+    public var font: String?
+    public static let defaultFont = "HelveticaNeue-Medium"
     /// A bar across the whole width (e.g. an event banner) instead of a small mark: `logoPath` is the banner for
     /// landscape and square photos, `portraitLogoPath` the one for portrait photos. It is `bannerHeight` high whatever
     /// the photo's shape, centred, with its sides trimmed to the photo's width. The position's row picks top, middle
@@ -341,6 +344,50 @@ public struct WatermarkSpec: Codable, Sendable, Equatable, Hashable {
     public static let bannerReferenceSide = 2048.0
     /// The saved preset this came from (for the editor; rendering ignores it).
     public var presetId: String?
+    /// A line of text drawn as well as the logo or banner (e.g. "© SuZu Media" with the event's banner), in its own
+    /// place. Ignored on a text watermark, which is text already.
+    public var extraText: TextMark?
+
+    /// Text to go with a logo or banner: the same choices as a text watermark.
+    public struct TextMark: Codable, Sendable, Equatable, Hashable {
+        public var text: String
+        public var position: Position
+        public var size = 0.25
+        public var opacity = 0.9
+        public var margin = 0.035
+        public var textColor: TextColor?
+        /// PostScript name; nil is `WatermarkSpec.defaultFont`.
+        public var font: String?
+        /// Turned off: not drawn, but kept, so turning it on again brings it back as it was.
+        public var off: Bool?
+        /// The text preset it came from (for the editor; rendering ignores it).
+        public var presetId: String?
+
+        public init(text: String, position: Position) { self.text = text; self.position = position }
+
+        /// The look of a text watermark (a text preset), to go with a logo or banner.
+        public init(_ spec: WatermarkSpec) {
+            text = spec.text ?? ""
+            position = spec.position; size = spec.size; opacity = spec.opacity; margin = spec.margin
+            textColor = spec.textColor; font = spec.font; presetId = spec.presetId
+        }
+
+        public var isShown: Bool { off != true && !text.trimmingCharacters(in: .whitespaces).isEmpty }
+
+        /// Same look as a text watermark (a preset's), whichever preset it came from and whether it is on.
+        public func sameLook(as spec: WatermarkSpec) -> Bool {
+            var a = self, b = TextMark(spec)
+            a.off = nil; a.presetId = nil; b.presetId = nil
+            return a == b
+        }
+
+        /// Drawn as a text watermark of its own.
+        public var spec: WatermarkSpec {
+            var s = WatermarkSpec(text: text)
+            s.position = position; s.size = size; s.opacity = opacity; s.margin = margin; s.textColor = textColor; s.font = font
+            return s
+        }
+    }
 
     public init(logoPath: String) { self.logoPath = logoPath }
     public init(text: String) { logoPath = ""; self.text = text; size = 0.3 }
@@ -355,8 +402,12 @@ public struct WatermarkSpec: Codable, Sendable, Equatable, Hashable {
 
     public var isBanner: Bool { banner == true && !isText }
     public var isText: Bool { !(text ?? "").trimmingCharacters(in: .whitespaces).isEmpty }
-    /// Nothing to draw: no logo chosen and no text.
-    public var isEmpty: Bool { !isText && logoPath.isEmpty && (!isBanner || (portraitLogoPath ?? "").isEmpty) }
+    /// Nothing to draw: no logo chosen and no text, of its own or as well.
+    public var isEmpty: Bool { !hasMark && !(extraText?.isShown ?? false) }
+    /// The logo, text or banner itself has something to draw (not counting `extraText`).
+    public var hasMark: Bool { isText || !logoPath.isEmpty || (isBanner && !(portraitLogoPath ?? "").isEmpty) }
+    /// The text drawn as well as the logo or banner, when there is one.
+    public var shownExtraText: TextMark? { isText ? nil : extraText.flatMap { $0.isShown ? $0 : nil } }
 
     /// The image file drawn on a photo of this size (banners have one per orientation).
     public func logoPath(for size: CGSize) -> String {

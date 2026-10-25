@@ -1,5 +1,4 @@
 import FaceLibrary
-import QuickLook
 import SwiftUI
 
 /// A folder or a file in the Files browser.
@@ -127,7 +126,9 @@ struct FilesBrowser: View {
     /// Show only files with all of these people in them.
     @State private var withPeople: Set<Int64> = []
     @State private var selection: Set<String> = []
-    @State private var preview: URL?
+    /// The file space opened (see `Peek`): stepping with ← → moves the selection along, as Quick Look does.
+    @State private var peek: PeekState<String>?
+    @State private var pointer = Peek<String>()
     /// The search applied to the list: what was typed, once typing pauses.
     @State private var search = ""
     /// What is in the search field. Not observed: a keystroke redraws nothing (in a big project the whole screen),
@@ -186,8 +187,9 @@ struct FilesBrowser: View {
         .searchable(text: Binding(get: { typed.text }, set: searchTyped), placement: .toolbar, prompt: "Name or person")
         .toolbar { toolbar }
         .onWindowKeys(key)
-        // The files to step through, made only while Quick Look is open (every redraw of a big folder otherwise).
-        .quickLookPreview($preview, in: preview == nil ? [] : listed.files.map(\.url))
+        .onChange(of: peek?.current) { if let c = peek?.current, selection != [c] { selection = [c] } }
+        // Space opens what was picked last (the Table changes the selection itself, without a tap to note).
+        .onChange(of: selection) { if selection.count == 1 { pointer.clicked = selection.first } }
         .sheet(item: $exportScope) { ExportSheet(scope: $0, mode: .copy, initialName: folder.map { ($0 as NSString).lastPathComponent } ?? model.projectName) }
         .confirmationDialog("Write ratings and labels into \(confirmWrite?.count ?? 0) file\(confirmWrite?.count == 1 ? "" : "s")?",
                             isPresented: Binding(get: { confirmWrite != nil }, set: { if !$0 { confirmWrite = nil } })) {
@@ -259,8 +261,8 @@ struct FilesBrowser: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: iconSize + 8, maximum: iconSize + 48), spacing: 10, alignment: .top)], spacing: 14) {
                 ForEach(items) { item in
                     FileIcon(item: item, side: iconSize, selected: selection.contains(item.id)).equatable()
-                        .onTapGesture(count: 2) { open([item.id]) }
-                        .onTapGesture { selection.click(item.id, in: items.map(\.id)); focused = true }
+                        .peekPopover(item.id, open: $peek, keys: key) { peekContent($0) }
+                        .onClick({ selection.click(item.id, in: items.map(\.id)); focused = true }, double: { open([item.id]) })
                         .contextMenu { menu(for: selection.contains(item.id) ? selection : [item.id]) }
                 }
             }
@@ -282,6 +284,7 @@ struct FilesBrowser: View {
                     if let l = item.file?.label { Circle().fill(l.color).frame(width: 8, height: 8) }
                 }
                 .opacity(item.file?.flag == .reject ? 0.45 : 1)
+                .peekPopover(item.id, open: $peek, keys: key) { peekContent($0) }
             }
             .width(min: 180, ideal: 300)
             TableColumn("Rating", value: \.rating) { item in
@@ -497,7 +500,7 @@ struct FilesBrowser: View {
             Button("Open") { go(to: f.id) }
         } else if !chosenFiles.isEmpty {
             Button(chosenFiles.count > 1 ? "Open \(chosenFiles.count) Files" : "Open") { open(ids) }
-            Button("Quick Look") { preview = chosenFiles.first?.url }
+            Button("Quick Look") { if let f = chosenFiles.first { peek = PeekState(anchor: f.path, current: f.path) } }
             Button("Open With Default App") { chosenFiles.forEach { NSWorkspace.shared.open($0.url) } }
             if chosenFiles.count > 1 { Button("Cull \(chosenFiles.count) Files") { cull(chosenFiles) } }
             Divider()
@@ -518,10 +521,8 @@ struct FilesBrowser: View {
 
     /// Plain keys: culling marks on the selection, space for Quick Look, return to open, F to cull.
     func key(_ event: NSEvent) -> Bool {
-        if event.keyCode == KeyCode.space {
-            if preview != nil { preview = nil } else { preview = selectedFiles.first?.url }
-            return preview != nil || !selection.isEmpty
-        }
+        // Space, and ← → esc while it is open: a closer look at the selected file (see `Peek`).
+        if pointer.key(event, open: &peek, selection: selection, order: items.filter { !$0.isFolder }.map(\.id)) { return true }
         if event.keyCode == KeyCode.returnKey || event.keyCode == KeyCode.enter {
             guard !selection.isEmpty else { return false }
             open(selection)
@@ -534,6 +535,12 @@ struct FilesBrowser: View {
         guard !selectedFiles.isEmpty, let change = MarkChange.forKey(event, current: selectedFiles) else { return false }
         mark(change, selection)
         return true
+    }
+
+    @ViewBuilder func peekContent(_ id: String) -> some View {
+        if let f = listed.index[id].map({ items[$0] })?.file {
+            MediaPeek(url: f.url, mediaId: f.id)
+        }
     }
 
     // MARK: - Data

@@ -63,7 +63,7 @@ struct BatchExportTool: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
                         InspectorSection(title: "Photos") {
-                            ToolInputView(items: $items, kinds: MediaTypes.photos, mediaKind: .photo, label: "photos")
+                            ToolInputView(items: $items, kinds: MediaTypes.photos, mediaKind: .photo, label: "photos", rawPairs: true)
                         }
                         EditControls(recipe: $recipe, photo: shownPhoto, photoCount: items.count)
                         Text(fromPeople ? "Crops keep each person's face in frame; names are written into the files."
