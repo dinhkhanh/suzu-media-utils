@@ -242,6 +242,8 @@ struct EditPreview: View {
     /// The current photo's latest export, for the info bar.
     @State private var lastExport: ExportHistory.Record?
     @State private var exports = 0
+    /// The path just copied with Copy Path: the button says "Copied" for a moment.
+    @State private var copiedPath: String?
     /// Arrow keys step through the photos (Space ticks or unticks, Return opens a grid photo large) while the
     /// preview has the keyboard focus, which a click on it or on the strip gives it.
     @FocusState private var focused: Bool
@@ -941,11 +943,26 @@ struct EditPreview: View {
             }
             Spacer(minLength: 8)
             if let current {
+                let path = current.url.path
+                let copied = copiedPath == path
                 Button {
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(current.url.path, forType: .string)
-                } label: { Label("Copy Path", systemImage: "doc.on.doc") }
-                    .help("Copy the photo's full path: \(current.url.path)")
+                    NSPasteboard.general.setString(path, forType: .string)
+                    withAnimation(.easeOut(duration: 0.15)) { copiedPath = path }
+                    // Back to "Copy Path" after a moment, unless it was clicked again meanwhile.
+                    Task {
+                        try? await Task.sleep(for: .seconds(1.5))
+                        if copiedPath == path { withAnimation(.easeOut(duration: 0.2)) { copiedPath = nil } }
+                    }
+                } label: {
+                    // Both labels take the same room, so the strip doesn't shift when the text changes.
+                    ZStack(alignment: .leading) {
+                        Label("Copy Path", systemImage: "doc.on.doc").opacity(copied ? 0 : 1)
+                        Label("Copied", systemImage: "checkmark").foregroundStyle(.green).opacity(copied ? 1 : 0)
+                    }
+                }
+                .help(copied ? "Copied to the clipboard: \(path)" : "Copy the photo's full path: \(path)")
+                .accessibilityLabel(copied ? "Path copied" : "Copy Path")
             }
         }
         .buttonStyle(.borderless)

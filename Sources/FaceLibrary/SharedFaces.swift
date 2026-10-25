@@ -35,6 +35,24 @@ extension TeamSync {
     static let faceFileLimit = 64 << 20
     /// Files published per pass, so a pass stays short while a backlog drains.
     static let facePublishBatch = 150
+    /// Seconds one pass spends publishing before it leaves the rest to the next pass.
+    static let facePublishTimeBox: TimeInterval = 20
+    /// Crop files written to the share at once.
+    static let cropCopyLanes = 8
+
+    /// Copies small files (face crops, thumbnails) to the team folder: their bytes only, `cropCopyLanes` at a
+    /// time. A missing source is skipped; a failed write leaves no partial file under the final name.
+    static func copyCrops(_ copies: [(from: URL, to: URL)]) {
+        guard !copies.isEmpty else { return }
+        DispatchQueue.concurrentPerform(iterations: min(cropCopyLanes, copies.count)) { lane in
+            var i = lane
+            while i < copies.count {
+                let c = copies[i]
+                if let data = try? Data(contentsOf: c.from) { try? data.write(to: c.to, options: .atomic) }
+                i += cropCopyLanes
+            }
+        }
+    }
     /// Content keys computed per pass for waiting files (one read of 1 MB each).
     static let faceKeyBatch = 300
     /// A file's record is written again at most this often while its faces keep changing.
@@ -222,7 +240,14 @@ extension TeamSync {
         var lines = Data()
         let encoder = JSONEncoder()
         var written: [Int64] = []
+        var handled: [Int64] = []
+        var copies: [(from: URL, to: URL)] = []
+        let started = Date()
         for mid in ids {
+            // A backlog is published over several passes: one pass never holds the team's queue (and every other
+            // team change behind it) for minutes.
+            if !handled.isEmpty, Date().timeIntervalSince(started) > Self.facePublishTimeBox { break }
+            handled.append(mid)
             guard let (payload, faceIds) = try payload(for: mid) else { continue }
             lines += try encoder.encode(payload)
             lines += Data("\n".utf8)
@@ -232,14 +257,16 @@ extension TeamSync {
             if !fm.fileExists(atPath: cropDir.path) {
                 try? fm.createDirectory(at: cropDir, withIntermediateDirectories: true)
                 for (i, fid) in faceIds.enumerated() {
-                    let src = store.faceCropURL(fid)
-                    if fm.fileExists(atPath: src.path) { try? fm.copyItem(at: src, to: cropDir.appendingPathComponent("\(i).jpg")) }
+                    copies.append((store.faceCropURL(fid), cropDir.appendingPathComponent("\(i).jpg")))
                 }
                 // The file's thumbnail too, so the other Macs never read the file for their grids.
-                let thumb = store.thumbnailURL(mid)
-                if fm.fileExists(atPath: thumb.path) { try? fm.copyItem(at: thumb, to: cropDir.appendingPathComponent("thumb.jpg")) }
+                copies.append((store.thumbnailURL(mid), cropDir.appendingPathComponent("thumb.jpg")))
             }
         }
+        // Before the records that name them. Plain bytes, several at a time: a Finder-style copy also sets owner,
+        // mode, flags and extended attributes, each a round trip to the NAS, and copying them one by one made a
+        // pass take minutes.
+        Self.copyCrops(copies)
         if !lines.isEmpty {
             let file = try Self.currentRecordFile(dir)
             if !fm.fileExists(atPath: file.path) { fm.createFile(atPath: file.path, contents: nil) }
@@ -248,7 +275,8 @@ extension TeamSync {
             try h.seekToEnd()
             try h.write(contentsOf: lines)
         }
-        let list = ids.map(String.init).joined(separator: ",")
+        guard !handled.isEmpty else { return false }
+        let list = handled.map(String.init).joined(separator: ",")
         try store.db.write { db in
             try db.execute(sql: "DELETE FROM facePublish WHERE mediaId IN (\(list))")
             try db.execute(sql: "DELETE FROM faceChange WHERE faceId IN (SELECT id FROM face WHERE mediaId IN (\(list)))")

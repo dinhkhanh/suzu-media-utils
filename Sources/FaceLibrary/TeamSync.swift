@@ -302,6 +302,11 @@ public final class TeamSync: @unchecked Sendable {
             }
             status.reachable = true
             status.error = nil
+            // Reachable is known now: say so before the pass's work (publishing a backlog of faces can take a
+            // while), so the team shows its Macs and "syncing…" instead of "Connecting…" until the pass ends.
+            if status.devices.isEmpty { status.devices = devices(team) }
+            lock.withLock { statuses[team.id!] = status }
+            onChange?()
             do {
                 // A teammate renamed the team, or chose the Mac that processes faces.
                 var team = team

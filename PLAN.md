@@ -807,3 +807,16 @@ team's status (Macs, "synced") and forced a full sync pass; Join also waited for
 project. `TeamSync.relocate` now returns early when the canonical path is unchanged (a pass only if the folder
 was unreachable), and `FaceGroupingModel.joinTeam` recognises a team already joined through that folder
 (`TeamSync.member(of:)`) and just opens its project (test).
+
+## v0.8.8 (2026-10-25): a team stuck at "Connecting…"; Copy Path says it copied
+
+**"Connecting…" with the team folder reachable.** Sampled on the processing Mac: the team queue sat in
+`publishFaces` for minutes, copying face crops and thumbnails to the share with `FileManager.copyItem`, one by
+one. Over SMB each copy also sets owner, mode, flags and extended attributes, each a round trip; with a backlog
+(1,846 files queued, ~96,000 face changes) one pass ran for minutes, and the team's status was only stored at
+the end of a pass, so the header said "Connecting…" (no status) and every other team change waited behind it.
+Now: the status is stored as soon as `team.json` is found (reachable, the Macs), before the pass's work; crops
+are written as plain bytes, `cropCopyLanes` (8) at a time (`SharedFaces.copyCrops`); and a pass publishes for
+at most `facePublishTimeBox` (20 s), deleting only what it handled from the queues, the rest left for the next.
+
+**Copy Path** shows "Copied" with a checkmark for 1.5 s; both labels share one frame so the strip doesn't move.
