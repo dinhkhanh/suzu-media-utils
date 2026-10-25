@@ -617,6 +617,83 @@ final class ReferenceTests: XCTestCase {
     }
 }
 
+extension LibraryTests {
+    /// An edited folder's files are finished work (edits of photos already here): never read for faces. Faces they
+    /// had go to an identical copy outside the folder when there is one, else they are dropped; a folder that is no
+    /// longer an edited one is processed again.
+    func testEditedFoldersAreNeverReadForFaces() throws {
+        let editedRoot = URL(fileURLWithPath: canonicalPath(tmp), isDirectory: true).appendingPathComponent("Edited", isDirectory: true)
+        try FileManager.default.createDirectory(at: editedRoot, withIntermediateDirectories: true)
+        var edited = SourceRecord(path: editedRoot.path)
+        try store.db.write { db in try edited.insert(db) }
+        func write(_ url: URL, seed: UInt8) throws {
+            try Data((0..<4096).map { UInt8(truncatingIfNeeded: $0 &* Int(seed)) }).write(to: url)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -3600)], ofItemAtPath: url.path)
+        }
+        func scanEdited() throws {
+            let s = try store.db.read { db in try SourceRecord.fetchOne(db, key: edited.id!)! }
+            SourceMonitor(source: s, store: store) { _, _ in }.scan()
+        }
+        func row(_ url: URL) throws -> MediaRecord { try media().first { $0.path == url.path }! }
+        func faces(_ url: URL) throws -> Int {
+            let id = try row(url).id!
+            return try store.db.read { db in try FaceRecord.filter(Column("mediaId") == id).fetchCount(db) }
+        }
+        func setEdited(_ on: Bool) throws {
+            try store.db.write { db in try db.execute(sql: "UPDATE source SET share = ? WHERE id = ?", arguments: [on ? "edited" : "mac", edited.id!]) }
+        }
+
+        // Processed while still an ordinary folder; the event folder has a copy of one of its files.
+        let x = editedRoot.appendingPathComponent("x.jpg"), y = editedRoot.appendingPathComponent("y.jpg")
+        try write(x, seed: 5)
+        try write(y, seed: 6)
+        try scanEdited()
+        let an = try newPerson("An")
+        _ = try addFace(mediaId: try row(x).id!, personId: an)
+        _ = try addFace(mediaId: try row(y).id!, personId: an)
+        let yCopy = root.appendingPathComponent("y.jpg")
+        try FileManager.default.copyItem(at: y, to: yCopy)
+        monitor().scan()
+        XCTAssertEqual(try row(yCopy).duplicateOf, try row(y).id)
+
+        try setEdited(true)
+        var (affected, reopened) = try LibraryService.settleEditedFolders(store: store)
+        XCTAssertEqual(affected, [an])
+        XCTAssertFalse(reopened)
+        XCTAssertEqual(try faces(x), 0)
+        XCTAssertTrue(try row(x).skippedAsEdited)
+        XCTAssertEqual(try row(x).status, .done)
+        XCTAssertEqual(try faces(yCopy), 1, "the copy outside the edited folder keeps the face")
+        XCTAssertNil(try row(yCopy).duplicateOf)
+        XCTAssertEqual(try row(y).duplicateOf, try row(yCopy).id)
+        let remembered = try store.db.read { db in try Int.fetchOne(db, sql: "SELECT count FROM personMemory WHERE personId = ?", arguments: [an]) }
+        XCTAssertEqual(remembered, 1, "the named face dropped from x is remembered")
+
+        // A new file there is listed, not processed; a copy of a skipped file elsewhere is its own original.
+        let z = editedRoot.appendingPathComponent("z.jpg")
+        try write(z, seed: 7)
+        try scanEdited()
+        XCTAssertEqual(try row(z).status, .pending)
+        (affected, _) = try LibraryService.settleEditedFolders(store: store)
+        XCTAssertTrue(affected.isEmpty)
+        XCTAssertEqual(try row(z).status, .done)
+        XCTAssertTrue(try row(z).skippedAsEdited)
+        let xCopy = root.appendingPathComponent("x.jpg")
+        try FileManager.default.copyItem(at: x, to: xCopy)
+        monitor().scan()
+        XCTAssertNil(try row(xCopy).duplicateOf)
+        XCTAssertEqual(try row(xCopy).status, .pending)
+
+        // No longer an edited folder: its files are processed.
+        try setEdited(false)
+        (_, reopened) = try LibraryService.settleEditedFolders(store: store)
+        XCTAssertTrue(reopened)
+        XCTAssertEqual(try [x, z].map { try row($0).status }, [.pending, .pending])
+        XCTAssertFalse(try row(x).skippedAsEdited)
+        XCTAssertEqual(try row(y).duplicateOf, try row(yCopy).id, "a copy stays a copy")
+    }
+}
+
 /// Removal logic without the model-dependent processor.
 struct LibraryServiceStub {
     let store: LibraryStore

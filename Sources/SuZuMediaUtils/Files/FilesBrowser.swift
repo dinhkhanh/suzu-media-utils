@@ -110,19 +110,31 @@ struct FilesBrowser: View {
     @EnvironmentObject var model: FaceGroupingModel
     @Environment(\.openWindow) private var openWindow
     @State private var files: [ProjectFile] = []
+    /// Bumped whenever `files` changes: comparing tens of thousands of files to see whether they did is itself slow.
+    @State private var filesVersion = 0
+    /// Files under each folder (at any depth), for the folder column.
+    @State private var folderCounts = FolderCounts()
     @State private var loaded = false
     /// The folder shown; nil = the project's folders.
     @State private var folder: String?
     @State private var back: [String?] = []
     @State private var forward: [String?] = []
-    @State private var items: [FileItem] = []
+    /// What is shown, built in the background (see `ListInput`).
+    @State private var listed = Listed()
+    var items: [FileItem] { listed.items }
     /// People in the folder (and its subfolders) with how many files each is in, most first.
     @State private var present: [(id: Int64, count: Int)] = []
     /// Show only files with all of these people in them.
     @State private var withPeople: Set<Int64> = []
     @State private var selection: Set<String> = []
     @State private var preview: URL?
+    /// The search applied to the list: what was typed, once typing pauses.
     @State private var search = ""
+    /// What is in the search field. Not observed: a keystroke redraws nothing (in a big project the whole screen),
+    /// it only restarts the pause before `search` follows.
+    @State private var typed = SearchText()
+    /// The list being rebuilt in the background; a newer rebuild replaces it.
+    @State private var relisting: Task<Void, Never>?
     @State private var exportScope: ExportScope?
     @State private var confirmWrite: [Int64]?
     @State private var writeResult: String?
@@ -154,7 +166,7 @@ struct FilesBrowser: View {
         VStack(spacing: 0) {
             SessionBar(divider: true)
             HStack(spacing: 0) {
-                FolderColumn(files: files, folder: folder, go: go)
+                FolderColumn(counts: folderCounts, folder: folder, go: go)
                 Divider()
                 VStack(spacing: 0) {
                     filterRow
@@ -171,10 +183,11 @@ struct FilesBrowser: View {
         .overlay(alignment: .bottom) { if !selectedFiles.isEmpty { selectionBar } }
         .navigationTitle(folder.map { ($0 as NSString).lastPathComponent } ?? model.projectName)
         .navigationSubtitle(subtitle)
-        .searchable(text: $search, placement: .toolbar, prompt: "Name or person")
+        .searchable(text: Binding(get: { typed.text }, set: searchTyped), placement: .toolbar, prompt: "Name or person")
         .toolbar { toolbar }
         .onWindowKeys(key)
-        .quickLookPreview($preview, in: items.compactMap { $0.file?.url })
+        // The files to step through, made only while Quick Look is open (every redraw of a big folder otherwise).
+        .quickLookPreview($preview, in: preview == nil ? [] : listed.files.map(\.url))
         .sheet(item: $exportScope) { ExportSheet(scope: $0, mode: .copy, initialName: folder.map { ($0 as NSString).lastPathComponent } ?? model.projectName) }
         .confirmationDialog("Write ratings and labels into \(confirmWrite?.count ?? 0) file\(confirmWrite?.count == 1 ? "" : "s")?",
                             isPresented: Binding(get: { confirmWrite != nil }, set: { if !$0 { confirmWrite = nil } })) {
@@ -191,7 +204,7 @@ struct FilesBrowser: View {
             Text(writeResult ?? "")
         }
         .task(id: model.currentProject) {
-            folder = nil; back = []; forward = []; selection = []; withPeople = []; files = []; loaded = false
+            folder = nil; back = []; forward = []; selection = []; withPeople = []; files = []; filesVersion += 1; folderCounts = FolderCounts(); loaded = false
             // Files arrive and get processed in the background: re-read when the library changed, at most every 3 s.
             var stats: LibraryStats?, people: [PersonSummary] = [], marks = -1
             while !Task.isCancelled {
@@ -202,7 +215,7 @@ struct FilesBrowser: View {
                 try? await Task.sleep(for: .seconds(3))
             }
         }
-        .onChange(of: files) { relist() }
+        .onChange(of: filesVersion) { relist() }
         .onChange(of: listing) { relist() }
         // Folders added, removed, moved or gone offline: not every tick of a scan's count, which would rebuild the
         // list on the main thread once a second while a card's files land.
@@ -452,7 +465,7 @@ struct FilesBrowser: View {
                 Button("Cull Everything Shown") { cull(nil) }
                 Button("Cull Selection") { cull(selectedFiles) }.disabled(selectedFiles.count < 2)
                 Divider()
-                let hinted = shownFiles.filter { ($0.eyesClosed || $0.soft) && $0.flag == .none }
+                let hinted = listed.hinted
                 Button("Reject \(hinted.count) Shot\(hinted.count == 1 ? "" : "s") with Closed Eyes or Soft Focus") { mark(.flag(.reject), Set(hinted.map(\.path))) }
                     .disabled(hinted.isEmpty)
                 Divider()
@@ -476,7 +489,8 @@ struct FilesBrowser: View {
     }
 
     @ViewBuilder func menu(for ids: Set<String>) -> some View {
-        let chosen = items.filter { ids.contains($0.id) }
+        // Built for every icon on screen whenever the list changes: look the few chosen ones up, in the list's order.
+        let chosen = chosen(ids)
         let urls = chosen.map { URL(fileURLWithPath: $0.id, isDirectory: $0.isFolder) }
         let chosenFiles = chosen.compactMap(\.file)
         if chosen.count == 1, let f = chosen.first, f.isFolder {
@@ -524,14 +538,17 @@ struct FilesBrowser: View {
 
     // MARK: - Data
 
-    var shownFiles: [ProjectFile] { items.compactMap(\.file) }
-    var selectedFiles: [ProjectFile] { items.compactMap { selection.contains($0.id) ? $0.file : nil } }
+    var shownFiles: [ProjectFile] { listed.files }
+    var selectedFiles: [ProjectFile] { chosen(selection).compactMap(\.file) }
+
+    /// These items, in the list's order, looked up by id: a big folder has too many to go through each time.
+    func chosen(_ ids: Set<String>) -> [FileItem] {
+        ids.compactMap { listed.index[$0] }.sorted().map { items[$0] }
+    }
 
     var subtitle: String {
-        let shown = shownFiles
-        guard !shown.isEmpty else { return "" }
-        let videos = shown.filter { $0.kind == .video }.count
-        let photos = shown.count - videos
+        guard !listed.files.isEmpty else { return "" }
+        let (photos, videos) = (listed.photos, listed.videos)
         return "\(photos.formatted()) photo\(photos == 1 ? "" : "s") · \(videos.formatted()) video\(videos == 1 ? "" : "s")"
     }
 
@@ -552,11 +569,20 @@ struct FilesBrowser: View {
     func load() async {
         guard let store = model.store else { return }
         let project = model.currentProject
-        let list = await Task.detached(priority: .userInitiated) {
-            (try? store.db.read { db in try ProjectFiles.list(db, project: project) }) ?? []
+        let current = files
+        // Read, compared with what is shown, and counted per folder in the background: in a big project each of
+        // these takes a while (long paths, many of them with accents).
+        let read = await Task.detached(priority: .userInitiated) { () -> (files: [ProjectFile], counts: FolderCounts)? in
+            let list = (try? store.db.read { db in try ProjectFiles.list(db, project: project) }) ?? []
+            return list == current ? nil : (list, FolderCounts(list))
         }.value
         guard project == model.currentProject, !Task.isCancelled else { return }
-        if list != files { files = list }
+        if let read {
+            files = read.files
+            folderCounts = read.counts
+            filesVersion += 1
+        }
+        let list = files
         // SUZU_START_CULL=1 | <part of a file name> (testing): cull everything as soon as the files are in.
         if !loaded, let start = ProcessInfo.processInfo.environment["SUZU_START_CULL"], !list.isEmpty {
             openWindow(id: "cull", value: CullRequest(ids: list.map(\.id), start: list.first { $0.name.contains(start) }?.id, title: model.projectName))
@@ -564,45 +590,33 @@ struct FilesBrowser: View {
         loaded = true
     }
 
-    /// Rebuilds what's shown from the files, the folder, the filters and the order.
+    /// Rebuilds what's shown from the files, the folder, the filters and the order: in the background, since a big
+    /// project has tens of thousands of files to filter and sort by name.
     func relist() {
-        let label = ColorLabel(rawValue: labelFilter)
-        // Everything in the folder and its subfolders (and in the session picked, when one is): the people found
-        // there, and what a search or people filter covers.
-        let session = model.sessionRange
-        let scope = (folder.map { ProjectFiles.contents(of: $0, in: files, recursive: true).files } ?? files)
-            .filter { f in filter == .all || f.kind == (filter == .photos ? .photo : .video) }
-            .filter { f in session.map { r in f.takenAt.map(r.contains) ?? false } ?? true }
-        var counts: [Int64: Int] = [:]
-        for f in scope { for p in f.personIds { counts[p, default: 0] += 1 } }
-        present = counts.map { (id: $0.key, count: $0.value) }.sorted { $0.count != $1.count ? $0.count > $1.count : $0.id < $1.id }
-        withPeople.formIntersection(counts.keys)
+        let input = ListInput(files: files, folder: folder, filter: filter, session: model.sessionRange, minRating: minRating,
+                              flag: flagFilter, label: labelFilter, people: withPeople, query: search.trimmingCharacters(in: .whitespaces),
+                              subfolders: subfolders || marksFiltered, sort: sortKey, ascending: ascending,
+                              sources: model.projectSources.map { (path: $0.path, name: $0.name, online: $0.online) })
+        relisting?.cancel()
+        relisting = Task {
+            let built = await Task.detached(priority: .userInitiated) { input.build() }.value
+            guard !Task.isCancelled else { return }
+            present = built.present.map { (id: $0.id, count: $0.count) }
+            withPeople.formIntersection(built.present.map(\.id))
+            listed = Listed(built, version: listed.version + 1)
+            selection = selection.filter { listed.index[$0] != nil }
+        }
+    }
 
-        let pool = scope.filter { f in
-            f.rating >= minRating && flagFilter.allows(f.flag)
-                && (labelFilter.isEmpty || (labelFilter == "none" ? f.label == nil : f.label == label))
-                && withPeople.isSubset(of: f.personIds)
+    /// A change in the search field. Cleared: shown at once. Typing: once it pauses, so a long list isn't rebuilt for
+    /// every letter.
+    func searchTyped(_ text: String) {
+        typed.text = text
+        typed.pause?.cancel()
+        typed.pause = Task {
+            if !text.isEmpty { try? await Task.sleep(for: .milliseconds(250)) }
+            if !Task.isCancelled { search = text }
         }
-        let query = search.trimmingCharacters(in: .whitespaces)
-        // Searching and filtering by marks or people look in every subfolder, as Finder's search does.
-        let flat = subfolders || !query.isEmpty || marksFiltered || !withPeople.isEmpty
-        var result: [FileItem]
-        if let folder, !flat {
-            let c = ProjectFiles.contents(of: folder, in: pool)
-            result = c.folders.map { FileItem(folder: $0.key, count: $0.value) } + c.files.map(FileItem.init)
-        } else if flat {
-            result = pool.map(FileItem.init)
-        } else {
-            result = model.projectSources.map { s in
-                FileItem(folder: s.path, name: s.name, count: pool.count { $0.path.hasPrefix(s.path + "/") }, offline: !s.online)
-            }
-        }
-        if !query.isEmpty {
-            result = result.filter { $0.name.localizedCaseInsensitiveContains(query) || $0.people.localizedCaseInsensitiveContains(query) }
-        }
-        result.sort(using: sortKey.comparator(ascending ? .forward : .reverse))
-        items = result.filter(\.isFolder) + result.filter { !$0.isFolder }
-        selection.formIntersection(items.map(\.id))
     }
 
     /// The table's header clicks and the Sort By menu share one order.
@@ -647,7 +661,7 @@ struct FilesBrowser: View {
 
     /// One folder: go into it. Files: photos open in Edit & Export, videos in their own app.
     func open(_ ids: Set<String>) {
-        let chosen = items.filter { ids.contains($0.id) }
+        let chosen = chosen(ids)
         if chosen.count == 1, let f = chosen.first, f.isFolder { return go(to: f.id) }
         let paths = chosen.compactMap(\.file?.path)
         if !paths.isEmpty { openWindow.edit(paths) }
@@ -660,6 +674,7 @@ struct FilesBrowser: View {
             files[i].apply(change)
             ids.append(files[i].id)
         }
+        filesVersion += 1
         model.mark(ids, change)
     }
 
@@ -674,7 +689,7 @@ struct FilesBrowser: View {
     /// Copies the chosen files, and everything under the chosen folders, into one folder.
     func export(_ ids: Set<String>) {
         var media: [Int64] = []
-        for item in items where ids.contains(item.id) {
+        for item in chosen(ids) {
             if let f = item.file { media.append(f.id) } else { media += ProjectFiles.contents(of: item.id, in: files, recursive: true).files.map(\.id) }
         }
         guard !media.isEmpty else { return }
@@ -682,11 +697,134 @@ struct FilesBrowser: View {
     }
 }
 
+/// What the Files list is built from, and the building (off the main thread).
+private struct ListInput: Sendable {
+    var files: [ProjectFile]
+    var folder: String?
+    var filter: FileFilter
+    var session: ClosedRange<Double>?
+    var minRating: Int
+    var flag: FlagFilter
+    var label: String
+    var people: Set<Int64>
+    var query: String
+    /// Every subfolder's files in one list (asked for, or filtering by marks).
+    var subfolders: Bool
+    var sort: FileSort
+    var ascending: Bool
+    var sources: [(path: String, name: String, online: Bool)]
+
+    struct Built: Sendable {
+        var items: [FileItem]
+        /// The people found in the folder (and its subfolders) with how many files each is in, most first.
+        var present: [PersonCount]
+        var index: [String: Int]
+        var files: [ProjectFile]
+        /// Unmarked shots with closed eyes or soft focus.
+        var hinted: [ProjectFile]
+    }
+    struct PersonCount: Sendable { var id: Int64, count: Int }
+
+    func build() -> Built {
+        let label = ColorLabel(rawValue: self.label)
+        // Everything in the folder and its subfolders (and in the session picked, when one is): the people found
+        // there, and what a search or people filter covers.
+        let scope = (folder.map { ProjectFiles.contents(of: $0, in: files, recursive: true).files } ?? files)
+            .filter { f in filter == .all || f.kind == (filter == .photos ? .photo : .video) }
+            .filter { f in session.map { r in f.takenAt.map(r.contains) ?? false } ?? true }
+        var counts: [Int64: Int] = [:]
+        for f in scope { for p in f.personIds { counts[p, default: 0] += 1 } }
+        let present = counts.map { PersonCount(id: $0.key, count: $0.value) }.sorted { $0.count != $1.count ? $0.count > $1.count : $0.id < $1.id }
+        let people = self.people.intersection(counts.keys)
+
+        let pool = scope.filter { f in
+            f.rating >= minRating && flag.allows(f.flag)
+                && (self.label.isEmpty || (self.label == "none" ? f.label == nil : f.label == label))
+                && people.isSubset(of: f.personIds)
+        }
+        // Searching and filtering by people look in every subfolder, as Finder's search does.
+        let flat = subfolders || !query.isEmpty || !people.isEmpty
+        var result: [FileItem]
+        if let folder, !flat {
+            let c = ProjectFiles.contents(of: folder, in: pool)
+            result = c.folders.map { FileItem(folder: $0.key, count: $0.value) } + c.files.map(FileItem.init)
+        } else if flat {
+            result = pool.map(FileItem.init)
+        } else {
+            result = sources.map { s in
+                FileItem(folder: s.path, name: s.name, count: pool.count { $0.path.hasPrefix(s.path + "/") }, offline: !s.online)
+            }
+        }
+        if !query.isEmpty {
+            result = result.filter { $0.name.localizedCaseInsensitiveContains(query) || $0.people.localizedCaseInsensitiveContains(query) }
+        }
+        result.sort(using: sort.comparator(ascending ? .forward : .reverse))
+        let shown = result.filter(\.isFolder) + result.filter { !$0.isFolder }
+        let files = shown.compactMap(\.file)
+        return Built(items: shown, present: present, index: Dictionary(shown.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { a, _ in a }),
+                     files: files, hinted: files.filter { ($0.eyesClosed || $0.soft) && $0.flag == .none })
+    }
+}
+
+/// The Files list as shown. Equal when it is the same build: SwiftUI compares a changed value with the old one,
+/// which for tens of thousands of files (paths with accents especially) took longer than building it.
+struct Listed: Equatable {
+    var items: [FileItem] = []
+    var index: [String: Int] = [:]
+    var files: [ProjectFile] = []
+    var hinted: [ProjectFile] = []
+    var photos = 0, videos = 0
+    var version = 0
+
+    init() {}
+    fileprivate init(_ built: ListInput.Built, version: Int) {
+        items = built.items; index = built.index; files = built.files; hinted = built.hinted
+        videos = files.count { $0.kind == .video }
+        photos = files.count - videos
+        self.version = version
+    }
+    static func == (a: Listed, b: Listed) -> Bool { a.version == b.version }
+}
+
+/// How many files each folder holds at any depth, and its subfolders that hold any, worked out once per change of
+/// the files (the folder column showed them by going through every file for every row).
+struct FolderCounts: Sendable {
+    var total = 0
+    var under: [String: Int] = [:]
+    /// Sorted by name, as Finder does.
+    var subfolders: [String: [String]] = [:]
+
+    init() {}
+    init(_ files: [ProjectFile]) {
+        total = files.count
+        // By the folder each file is in (a few hundred), then up through its parents.
+        var direct: [String: Int] = [:]
+        for f in files { direct[f.folder, default: 0] += 1 }
+        var children: [String: Set<String>] = [:]
+        for (dir, n) in direct {
+            var path = dir
+            while path.count > 1 {
+                under[path, default: 0] += n
+                let parent = (path as NSString).deletingLastPathComponent
+                children[parent, default: []].insert(path)
+                path = parent
+            }
+        }
+        subfolders = children.mapValues { $0.sorted { $0.localizedStandardCompare($1) == .orderedAscending } }
+    }
+}
+
+/// The search field's text, outside SwiftUI's view state (see `FilesBrowser.typed`).
+final class SearchText {
+    var text = ""
+    var pause: Task<Void, Never>?
+}
+
 /// The project's folders down the left of Files: each folder with how many files it holds, the open folder's
 /// subfolders under it, offline folders flagged. Right-click a folder for Finder, Rescan, Locate and Remove.
 struct FolderColumn: View {
     @EnvironmentObject var model: FaceGroupingModel
-    let files: [ProjectFile]
+    let counts: FolderCounts
     let folder: String?
     let go: (String?) -> Void
 
@@ -694,7 +832,7 @@ struct FolderColumn: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 1) {
                 SectionLabel("Folders").padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 4)
-                row(title: model.projectName, icon: "calendar", count: files.count, path: nil, depth: 0)
+                row(title: model.projectName, icon: "calendar", count: counts.total, path: nil, depth: 0)
                 if model.foldersGrouped {
                     // In a team: the team's folders, the editing Mac's, then this Mac's own.
                     ForEach(SourceShare.allCases.reversed(), id: \.self) { share in
@@ -752,11 +890,9 @@ struct FolderColumn: View {
         }
     }
 
-    func count(under path: String) -> Int { files.count { $0.path.hasPrefix(path + "/") } }
+    func count(under path: String) -> Int { counts.under[path] ?? 0 }
 
-    func subfolders(of path: String) -> [String] {
-        ProjectFiles.contents(of: path, in: files).folders.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-    }
+    func subfolders(of path: String) -> [String] { counts.subfolders[path] ?? [] }
 
     func row(title: String, icon: String, count: Int, path: String?, depth: Int, offline: Bool = false) -> some View {
         let selected = folder == path

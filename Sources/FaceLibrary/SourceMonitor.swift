@@ -280,7 +280,7 @@ public final class SourceMonitor: @unchecked Sendable {
             let sameKindSizes = Set(try store.db.read { db in
                 try Int64.fetchAll(db, sql: """
                     SELECT DISTINCT m.size FROM media m JOIN source s ON s.id = m.sourceId
-                    WHERE m.duplicateOf IS NULL AND \(Self.sameGroup)
+                    WHERE m.duplicateOf IS NULL AND NOT m.skippedAsEdited AND \(Self.sameGroup)
                     """, arguments: [sourceId, sourceId])
             })
             // A camera shooting RAW+JPEG: the RAW file is its JPEG's companion (shown with the JPEG's faces, never
@@ -372,12 +372,12 @@ public final class SourceMonitor: @unchecked Sendable {
     static let sameGroup = "s.kind = (SELECT kind FROM source WHERE id = ?) AND s.projectId IS (SELECT projectId FROM source WHERE id = ?)"
 
     /// An original (not a copy) in a folder of this source's kind with this fingerprint, fingerprinting same-size
-    /// candidates on demand.
+    /// candidates on demand. Never an edited folder's file: it has no faces to share with its copies.
     func originalWithKey(_ key: String, size: Int64) throws -> Int64? {
         let cands = try store.db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT m.id, m.path, m.contentKey FROM media m JOIN source s ON s.id = m.sourceId
-                WHERE m.size = ? AND m.duplicateOf IS NULL AND \(Self.sameGroup)
+                WHERE m.size = ? AND m.duplicateOf IS NULL AND NOT m.skippedAsEdited AND \(Self.sameGroup)
                 """, arguments: [size, sourceId, sourceId])
         }
         for c in cands {

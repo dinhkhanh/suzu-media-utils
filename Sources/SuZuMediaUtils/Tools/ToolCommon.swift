@@ -312,9 +312,49 @@ struct FolderField: View {
             Text(title)
             Text(url?.path ?? "Not chosen").foregroundStyle(url == nil ? .secondary : .primary).lineLimit(1).truncationMode(.middle)
             Spacer()
+            if let url { CopyPathButton(path: url.path, what: "folder", iconOnly: true) }
             Button("Choose…") { Panels.chooseFolder { url = $0 } }
         }
     }
+}
+
+/// Copies a full path to the clipboard, and says "Copied" (a checkmark) for a moment after.
+struct CopyPathButton: View {
+    let path: String
+    /// What the path is, for the tooltip ("photo", "folder").
+    var what = "file"
+    var iconOnly = false
+    @State private var copiedPath: String?
+
+    var body: some View {
+        let copied = copiedPath == path
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(path, forType: .string)
+            withAnimation(.easeOut(duration: 0.15)) { copiedPath = path }
+            // Back to "Copy Path" after a moment, unless it was clicked again meanwhile.
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                if copiedPath == path { withAnimation(.easeOut(duration: 0.2)) { copiedPath = nil } }
+            }
+        } label: {
+            // Both labels take the same room, so nothing shifts when the text changes.
+            ZStack(alignment: .leading) {
+                Label("Copy Path", systemImage: "doc.on.doc").opacity(copied ? 0 : 1)
+                Label("Copied", systemImage: "checkmark").foregroundStyle(.green).opacity(copied ? 1 : 0)
+            }
+            .labelStyle(iconOnly ? AnyLabelStyle(.iconOnly) : AnyLabelStyle(.titleAndIcon))
+        }
+        .help(copied ? "Copied to the clipboard: \(path)" : "Copy the \(what)'s full path: \(path)")
+        .accessibilityLabel(copied ? "Path copied" : "Copy Path")
+    }
+}
+
+/// A label style chosen at run time.
+struct AnyLabelStyle: LabelStyle {
+    private let make: (Configuration) -> AnyView
+    init<S: LabelStyle>(_ style: S) { make = { AnyView(style.makeBody(configuration: $0)) } }
+    func makeBody(configuration: Configuration) -> some View { make(configuration) }
 }
 
 /// Lays its children out left to right and wraps to the next line when the window is narrow.

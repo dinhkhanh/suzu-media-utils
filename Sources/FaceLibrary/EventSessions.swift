@@ -26,7 +26,7 @@ public enum EventSessions {
     public static func list(_ db: Database, project: Int64?, gap: TimeInterval = defaultGap) throws -> [EventSession] {
         let rows = try Row.fetchAll(db, sql: """
             SELECT m.takenAt, m.kind FROM media m LEFT JOIN source s ON s.id = m.sourceId
-            WHERE m.duplicateOf IS NULL AND m.takenAt IS NOT NULL AND \(ProjectScope.sql(project))
+            WHERE m.duplicateOf IS NULL AND m.takenAt IS NOT NULL AND NOT m.skippedAsEdited AND \(ProjectScope.sql(project))
             ORDER BY m.takenAt
             """)
         var out: [EventSession] = []

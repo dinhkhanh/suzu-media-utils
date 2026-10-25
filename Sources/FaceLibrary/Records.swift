@@ -17,8 +17,12 @@ public enum SourceShare: String, Codable, Sendable, CaseIterable {
     case mac
     /// A folder the whole team works on (the sources on the NAS): on every Mac of the team.
     case team
-    /// The folder the Mac in charge of editing / filtering / selecting fills: on every Mac of the team.
+    /// The folder the Mac in charge of editing / filtering / selecting fills: on every Mac of the team. Its files
+    /// are finished work (edits of photos already in the library), so they are never read for faces.
     case edited
+
+    /// SQL: the ids of the edited folders.
+    public static let editedIds = "SELECT id FROM source WHERE share = 'edited'"
 
     public var title: String {
         switch self {
@@ -116,6 +120,8 @@ public struct MediaRecord: Codable, FetchableRecord, MutablePersistableRecord, I
     public var localWork = false
     /// When the library first saw the file, seconds since 1970.
     public var seenAt: Double?
+    /// In an edited folder (finished work, mostly edits of photos already here): listed, never read for faces.
+    public var skippedAsEdited = false
 
     public init(sourceId: Int64?, path: String, kind: MediaKind, size: Int64, mtime: Double, contentKey: String?) {
         self.sourceId = sourceId; self.path = path; self.kind = kind; self.size = size; self.mtime = mtime

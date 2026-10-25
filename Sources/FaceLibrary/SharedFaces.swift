@@ -173,7 +173,7 @@ extension TeamSync {
             try db.execute(sql: """
                 INSERT OR IGNORE INTO facePublish (mediaId)
                 SELECT m.id FROM media m JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId
-                WHERE p.teamId = ? AND m.status = 'done' AND m.duplicateOf IS NULL AND m.importedFrom IS NULL
+                WHERE p.teamId = ? AND m.status = 'done' AND m.duplicateOf IS NULL AND m.importedFrom IS NULL AND NOT m.skippedAsEdited
                 """, arguments: [teamId])
         }
     }
@@ -415,7 +415,7 @@ extension TeamSync {
         let waiting = try store.db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT m.id, m.path, m.size, m.contentKey FROM media m JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId
-                WHERE p.teamId = ? AND m.status = 'pending' AND m.duplicateOf IS NULL AND NOT m.localWork
+                WHERE p.teamId = ? AND m.status = 'pending' AND m.duplicateOf IS NULL AND NOT m.localWork AND s.share != 'edited'
                   AND (m.contentKey IS NULL OR m.contentKey IN (SELECT contentKey FROM faceIndex WHERE teamId = ?))
                   AND (NOT ? OR m.contentKey IS NOT NULL OR m.seenAt > ?)
                 ORDER BY m.id LIMIT ?
@@ -463,7 +463,7 @@ extension TeamSync {
         let authoritative = device == processorId
         let rows = try Row.fetchAll(db, sql: """
             SELECT m.id, m.status, m.importedFrom FROM media m JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId
-            WHERE m.contentKey = ? AND m.duplicateOf IS NULL AND p.teamId = ?
+            WHERE m.contentKey = ? AND m.duplicateOf IS NULL AND p.teamId = ? AND s.share != 'edited' AND NOT m.skippedAsEdited
             """, arguments: [payload.key, team.id])
         var affected: Set<Int64> = []
         for r in rows {

@@ -30,7 +30,10 @@ public final class LibraryService: @unchecked Sendable {
         processor.processesLocally = { [teamSync] sourceId in teamSync.processesLocally(sourceId: sourceId) }
         processor.graceFor = { [teamSync] sourceId in teamSync.processingGrace(sourceId: sourceId) }
         teamSync.onRolesChanged = { [weak self] in self?.applyRoles() }
-        teamSync.onSourcesChanged = { [weak self] in self?.reconcileMonitorsSoon() }
+        teamSync.onSourcesChanged = { [weak self] in
+            self?.reconcileMonitorsSoon()
+            self?.maintenanceQueue.async { self?.settleEditedFolders() }
+        }
         applyRoles()
     }
 
@@ -51,6 +54,7 @@ public final class LibraryService: @unchecked Sendable {
     public func start() {
         // Interrupted runs leave nothing half-written (faces and status change in one transaction); just requeue.
         engine.start()
+        settleEditedFolders()
         processor.enqueuePending()
         teamSync.start()
         for s in (try? store.db.read { db in try SourceRecord.filter(Column("removedAt") == nil).fetchAll(db) }) ?? [] { startMonitor(s) }
@@ -67,6 +71,7 @@ public final class LibraryService: @unchecked Sendable {
     /// Returns true when there is nothing left to do.
     @discardableResult
     public func maintain() -> Bool {
+        settleEditedFolders()
         guard processor.queuedCount == 0, (try? pendingCount()) == 0 else { return false }
         if processor.backgroundCount > 0 { return false }
         let (old, noPrint, wantBursts, noThumb) = (try? store.db.read { db in
@@ -103,7 +108,10 @@ public final class LibraryService: @unchecked Sendable {
     func startMonitor(_ s: SourceRecord) {
         let m = SourceMonitor(source: s, store: store) { [weak self] newPending, affected in
             guard let self else { return }
-            if newPending { processor.enqueuePending() }
+            if newPending {
+                settleEditedFolders()
+                processor.enqueuePending()
+            }
             if !affected.isEmpty {
                 engine.peopleChanged(affected)
                 deleteEmptyPeople()
@@ -223,7 +231,81 @@ public final class LibraryService: @unchecked Sendable {
             try db.execute(sql: "UPDATE source SET share = ?, shareAt = ?, fromDevice = CASE WHEN ? = 'mac' THEN NULL ELSE fromDevice END WHERE id = ?",
                            arguments: [share.rawValue, Date().timeIntervalSince1970, share.rawValue, sourceId])
         }
+        if share == .edited || s.share == .edited { maintenanceQueue.async { [weak self] in self?.settleEditedFolders() } }
         teamSync.pushSoon()
+    }
+
+    /// Edited folders hold finished work, mostly edits of photos already in the library: their files are listed
+    /// but never read for faces, or everyone in them would be found twice. A folder that has become an edited one
+    /// loses its files' faces (to an identical copy outside it when there is one, which then stands for the file);
+    /// one that is no longer an edited folder has its files processed.
+    func settleEditedFolders() {
+        let (affected, reopened): (Set<Int64>, Bool)
+        do {
+            (affected, reopened) = try Self.settleEditedFolders(store: store)
+        } catch {
+            NSLog("edited folders: \(error)")
+            return
+        }
+        if !affected.isEmpty {
+            engine.peopleChanged(affected)
+            deleteEmptyPeople()
+        }
+        if reopened { processor.enqueuePending() }
+    }
+
+    /// The database side of `settleEditedFolders`: returns the people who lost faces, and whether files are
+    /// waiting to be processed again.
+    static func settleEditedFolders(store: LibraryStore) throws -> (affected: Set<Int64>, reopened: Bool) {
+        var affected: Set<Int64> = []
+        while true {
+            let n = try store.db.write { db -> Int in
+                let ids = try Int64.fetchAll(db, sql: """
+                    SELECT id FROM media WHERE sourceId IN (\(SourceShare.editedIds)) AND duplicateOf IS NULL AND NOT skippedAsEdited LIMIT 500
+                    """)
+                for id in ids { affected.formUnion(try skipAsEdited(id, db: db)) }
+                return ids.count
+            }
+            if n == 0 { break }
+        }
+        let reopened = try store.db.write { db in
+            try db.execute(sql: """
+                UPDATE media SET status = 'pending', error = NULL, skippedAsEdited = 0, featurePrint = NULL
+                WHERE skippedAsEdited AND sourceId NOT IN (\(SourceShare.editedIds))
+                """)
+            return db.changesCount > 0
+        }
+        return (affected, reopened)
+    }
+
+    /// Takes an edited folder's file out of face work. Its faces go to an identical copy outside edited folders,
+    /// which becomes the original (this file its copy); without one they are forgotten (named people remembered,
+    /// see PersonMemory). Returns the people who lost faces.
+    static func skipAsEdited(_ id: Int64, db: Database) throws -> Set<Int64> {
+        if let heir = try Int64.fetchOne(db, sql: """
+            SELECT id FROM media WHERE duplicateOf = ? AND sourceId NOT IN (\(SourceShare.editedIds)) ORDER BY id LIMIT 1
+            """, arguments: [id]) {
+            try db.execute(sql: "UPDATE face SET mediaId = ? WHERE mediaId = ?", arguments: [heir, id])
+            try db.execute(sql: """
+                UPDATE media SET duplicateOf = NULL, status = old.status, error = old.error, width = old.width, height = old.height,
+                    duration = old.duration, takenAt = old.takenAt, featurePrint = old.featurePrint, burstId = old.burstId,
+                    analysisVersion = old.analysisVersion, importedFrom = old.importedFrom
+                FROM (SELECT * FROM media WHERE id = ?) AS old WHERE media.id = ?
+                """, arguments: [id, heir])
+            try db.execute(sql: "UPDATE media SET duplicateOf = ? WHERE duplicateOf = ?", arguments: [heir, id])
+            try db.execute(sql: "UPDATE media SET duplicateOf = ?, status = 'done', error = NULL WHERE id = ?", arguments: [heir, id])
+            return []
+        }
+        let people = Set(try Int64.fetchAll(db, sql: "SELECT DISTINCT personId FROM face WHERE mediaId = ? AND personId IS NOT NULL", arguments: [id]))
+        try PersonMemory.remember("face.mediaId = ?", [id], db: db)
+        try db.execute(sql: "DELETE FROM face WHERE mediaId = ?", arguments: [id])
+        try db.execute(sql: "DELETE FROM facePublish WHERE mediaId = ?", arguments: [id])
+        // Done as far as face work goes: no fingerprint for bursts either (an empty one is "nothing to do").
+        try db.execute(sql: """
+            UPDATE media SET status = 'done', error = NULL, skippedAsEdited = 1, importedFrom = NULL, featurePrint = X'',
+                burstId = NULL, analysisVersion = ? WHERE id = ?
+            """, arguments: [BestShot.analysisVersion, id])
+        return people
     }
 
     /// Throws when the folder is already in the library, or inside / around one that is (its files would be listed

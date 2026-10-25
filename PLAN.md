@@ -846,3 +846,23 @@ shown size); a still thumbnail is cached once for every size.
 
 The render spinner sat in the preview's top-left corner, small, and was hard to see. It is now in the middle of
 the preview, regular size, on a dark disc, and takes no clicks.
+
+## v0.8.11 (2026-10-25): edited folders skip face work; a fast Files search
+
+- **Edited folders are never read for faces.** They hold finished work, mostly edits of photos already in the
+  library, so reading them found everyone twice. Their files are listed (with thumbnails) and marked
+  `media.skippedAsEdited`; they skip face detection, bursts and session counts, and are neither published to nor
+  taken from the team's face records. `LibraryService.settleEditedFolders` runs at launch, after scans, on share
+  changes (here or from a teammate) and every maintenance tick. A folder that becomes an edited one loses its
+  files' faces: to an identical copy outside it when there is one (that copy becomes the original), else dropped
+  with named people remembered (PersonMemory). A folder that stops being one is processed again. A skipped file is
+  never the original of a copy elsewhere, so the copy is processed itself.
+- **Files search without lag.** The list was rebuilt on the main thread for every letter, every visible icon's
+  right-click menu went through every file, the folder column recounted every file per row, and comparing
+  tens of thousands of accented paths (Unicode normalization) cost seconds per reload during scans. Now: the
+  search applies when typing pauses and a keystroke redraws nothing; the list, its id index and per-folder counts
+  are built in the background; the list is compared by build version; Quick Look's file list is made only while
+  it is open. On a 16,906-file project: a keystroke 0.02 ms, a reload during a scan 0.2 s (was 0.9–2.8 s).
+- **Copy a folder's path.** "Save to" rows (the editor's Output, video tools, Copy Verifier) have a copy button
+  beside Choose…, with the same "Copied" check as the editor strip's Copy Path (one shared `CopyPathButton`).
+- **One line under the header.** With the sessions bar, the toolbar no longer draws its own line above it.

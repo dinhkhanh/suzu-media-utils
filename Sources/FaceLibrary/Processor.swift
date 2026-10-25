@@ -76,7 +76,10 @@ public final class Processor: @unchecked Sendable {
     /// Queues every pending media in the library (call at launch and after scans).
     public func enqueuePending() {
         let rows = (try? store.db.read { db in
-            try Row.fetchAll(db, sql: "SELECT id, sourceId, localWork FROM media WHERE status = 'pending' AND duplicateOf IS NULL ORDER BY path")
+            try Row.fetchAll(db, sql: """
+                SELECT id, sourceId, localWork FROM media WHERE status = 'pending' AND duplicateOf IS NULL
+                  AND sourceId NOT IN (\(SourceShare.editedIds)) ORDER BY path
+                """)
         }) ?? []
         for r in rows where (r["localWork"] as Bool) || processesLocally?(r["sourceId"]) ?? true { enqueue(r["id"], first: r["localWork"]) }
     }
@@ -100,7 +103,9 @@ public final class Processor: @unchecked Sendable {
     /// Returns whether the file was worked on (false: not this Mac's to do, or put off for a moment).
     @discardableResult
     func process(_ mediaId: Int64) -> Bool {
-        guard let media = try? store.db.read({ db in try MediaRecord.fetchOne(db, key: mediaId) }), media.status == .pending else { return false }
+        guard let (media, edited) = try? store.db.read({ db in
+            try MediaRecord.fetchOne(db, key: mediaId).map { ($0, try Bool.fetchOne(db, sql: "SELECT share = 'edited' FROM source WHERE id = ?", arguments: [$0.sourceId]) ?? false) }
+        }), media.status == .pending, !edited else { return false }
         let mine = processesLocally?(media.sourceId) ?? true
         guard media.localWork || mine else { return false }
         // A fresh file of a team whose copying Macs send the faces of the cards they copy: their record saves

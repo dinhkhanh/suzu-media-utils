@@ -435,6 +435,11 @@ public final class LibraryStore: @unchecked Sendable {
             try db.execute(sql: "ALTER TABLE media ADD COLUMN localWork BOOLEAN NOT NULL DEFAULT 0")
             try db.execute(sql: "ALTER TABLE media ADD COLUMN seenAt DOUBLE")
         }
+        m.registerMigration("v18-edited-folders") { db in
+            /// A file of an edited folder: listed, never read for faces (see `LibraryService.settleEditedFolders`).
+            try db.execute(sql: "ALTER TABLE media ADD COLUMN skippedAsEdited BOOLEAN NOT NULL DEFAULT 0")
+            try db.execute(sql: "CREATE INDEX media_skippedAsEdited ON media(sourceId) WHERE skippedAsEdited")
+        }
         return m
     }
 }
