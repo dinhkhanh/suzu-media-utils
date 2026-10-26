@@ -687,6 +687,57 @@ final class RetouchTests: XCTestCase {
         XCTAssertEqual(value(dark, 170, 50), value(photo, 170, 50), accuracy: 0.01)
     }
 
+    func testRefinedMaskFollowsThePhotosEdge() {
+        // Skin on the left 40% of the photo, a blue wall right of it; the model's face skin reaches 45% across (two
+        // of its pixels too far, as it does).
+        let e = CGRect(x: 0, y: 0, width: 400, height: 200)
+        let photo = CIImage(color: CIColor(red: 0.85, green: 0.65, blue: 0.55)).cropped(to: CGRect(x: 0, y: 0, width: 160, height: 200))
+            .composited(over: CIImage(color: CIColor(red: 0.2, green: 0.35, blue: 0.7)).cropped(to: e))
+        let w = 40, h = 20
+        var planes = [[Float]](repeating: [Float](repeating: 0, count: w * h), count: BodyParts.Kind.allCases.count)
+        for y in 0..<h { for x in 0..<(w * 45 / 100) { planes[BodyParts.Kind.faceSkin.rawValue][y * w + x] = 1 } }
+        let parts = BodyParts(width: w, height: h, planes: planes, byModel: true)
+        XCTAssertGreaterThan(value(parts.mask(.faceSkin, extent: e), 170, 100), 0.9)   // as found: over the wall
+        parts.refine(with: photo)
+        let mask = parts.mask(.faceSkin, extent: e)
+        XCTAssertGreaterThan(value(mask, 100, 100), 0.95)   // the skin
+        XCTAssertGreaterThan(value(mask, 150, 100), 0.9)    // up to its edge
+        XCTAssertLessThan(value(mask, 166, 100), 0.1)       // the wall left out
+        XCTAssertLessThan(value(mask, 175, 100), 0.02)
+        XCTAssertLessThan(value(mask, 350, 100), 0.02)
+        // The same at another size (a preview, then the export).
+        XCTAssertLessThan(value(parts.mask(.faceSkin, extent: CGRect(x: 0, y: 0, width: 800, height: 400)), 440, 200), 0.02)
+    }
+
+    func testBrowHairsLeaveTheSkinAroundThem() {
+        // Skin, with a brow of dark hairs (every other column) inside a brow outline that sits a little high.
+        let w = 120, h = 80
+        var guide = [[Float]](repeating: [Float](repeating: 0, count: w * h), count: 3)
+        for i in 0..<(w * h) { guide[0][i] = 0.85; guide[1][i] = 0.65; guide[2][i] = 0.55 }
+        for y in 38..<44 { for x in stride(from: 40, to: 80, by: 2) { for c in 0..<3 { guide[c][y * w + x] = 0.15 } } }
+        var q = [Float](repeating: 1, count: w * h)
+        let outline = [CGPoint(x: 40, y: 34), CGPoint(x: 60, y: 31), CGPoint(x: 80, y: 34), CGPoint(x: 60, y: 39)]
+        BodyParts.cutFeatures([(outline, true)], from: &q, guide: guide, width: w, height: h)
+        XCTAssertLessThan(q[40 * w + 60], 0.05)          // a hair
+        XCTAssertGreaterThan(q[40 * w + 61], 0.95)       // the skin between hairs
+        XCTAssertGreaterThan(q[46 * w + 60], 0.95)       // under the brow
+        XCTAssertGreaterThan(q[33 * w + 60], 0.95)       // above it, in its outline
+        XCTAssertEqual(q[10 * w + 10], 1)                // the rest of the face
+    }
+
+    func testGuidedFilterMovesAnEdgeOntoThePhotos() {
+        // Guide: dark left of x = 30, light from it; the mask's edge is at x = 33.
+        let w = 64, h = 8
+        let row = (0..<w).map { Float($0 < 30 ? 0.2 : 0.8) }
+        let guide = [[Float]](repeating: (0..<h).flatMap { _ in row }, count: 3)
+        let p = (0..<h).flatMap { _ in (0..<w).map { Float($0 < 33 ? 0 : 1) } }
+        let q = BodyParts.guidedFilter(guide: guide, input: p, width: w, height: h, radius: 8, eps: 0.0015)
+        let mid = 4 * w
+        XCTAssertGreaterThan(q[mid + 30], 0.5)   // the light side, though the mask had it out
+        XCTAssertLessThan(q[mid + 29], 0.02)     // the dark side stays out
+        XCTAssertGreaterThan(q[mid + 50], 0.95)
+    }
+
     func testRetouchSettingsSaveAndOlderEditsLoad() throws {
         var r = Retouch()
         r.smooth = 0.4

@@ -4,6 +4,7 @@ import FaceCore
 import Foundation
 import ImageIO
 import MediaKit
+import Vision
 
 // facescan scan <folder> --out <dir> [--workers 8] [--detect 1500] [--hires 0|3000] [--models ArcFaceR50,SFace]
 //                        [--models-dir models/compiled] [--limit N]
@@ -65,6 +66,42 @@ case "tilt":
         }
         print(line.joined(separator: "\t"))
     }
+case "mask":
+    // facescan mask <photo> --out x.jpg [--part faceSkin] [--soft 0.3] [--face] [--plain] [--model BodyParts.mlmodelc]
+    //               [--long 1600] : the photo with a part's mask (as the retouch uses it) in red over it, to see where
+    //               it reaches; --face: only the biggest face, close up; --plain: the mask alone.
+    BodyParts.modelURL = opts["model"].map(URL.init(fileURLWithPath:))
+    guard let src = CGImageSourceCreateWithURL(target as CFURL, nil),
+          let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                                               kCGImageSourceThumbnailMaxPixelSize: Int(opts["long"] ?? "1600")!,
+                                                               kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) else { exit(1) }
+    let image = CIImage(cgImage: cg)
+    let part = Retouch.Part(rawValue: opts["part"] ?? "faceSkin")!
+    let t0 = now()
+    guard let parts = BodyParts.find(in: image) else { print("nobody"); exit(1) }
+    print("found in \(fmt(now() - t0, 2))s, by model: \(parts.byModel)")
+    var retouch = Retouch()
+    var look = PartLook()
+    if let soft = opts["soft"].flatMap(Double.init) { look.softness = soft }
+    retouch.setLook(look, for: part)
+    let mask = EditPipeline.partMask(part, retouch, parts: parts, extent: image.extent)
+    let red = CIImage(color: CIColor(red: 1, green: 0, blue: 0)).cropped(to: image.extent)
+    let tinted = red.applyingFilter("CISourceOverCompositing", parameters: [kCIInputBackgroundImageKey: image])
+        .applyingFilter("CIDissolveTransition", parameters: [kCIInputTargetImageKey: image, kCIInputTimeKey: 0.5])
+    var out = flags.contains("plain") ? mask
+        : tinted.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: image, kCIInputMaskImageKey: mask])
+    if flags.contains("face") {
+        // Only the biggest face and a little around it, to see its edge up close.
+        let req = VNDetectFaceRectanglesRequest()
+        try? VNImageRequestHandler(ciImage: image).perform([req])
+        if let b = req.results?.max(by: { $0.boundingBox.width < $1.boundingBox.width })?.boundingBox {
+            let e = image.extent
+            let r = CGRect(x: b.minX * e.width, y: b.minY * e.height, width: b.width * e.width, height: b.height * e.height)
+            out = out.cropped(to: r.insetBy(dx: -r.width * 0.45, dy: -r.height * 0.45))
+        }
+    }
+    try! CIContext().writeJPEGRepresentation(of: out, to: URL(fileURLWithPath: opts["out"]!), colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+    print("ok")
 case "sheet":
     try! VideoTools.contactSheet(target, to: URL(fileURLWithPath: opts["out"]!))
     print("ok")

@@ -23,12 +23,21 @@ public final class BodyParts: @unchecked Sendable {
     /// One plane per kind, rows from the top, 0…1.
     let planes: [[Float]]
     /// Closer looks at faces: each over its rect (normalized, top-left origin), same kinds.
-    let details: [(rect: CGRect, width: Int, height: Int, planes: [[Float]])]
+    var details: [(rect: CGRect, width: Int, height: Int, planes: [[Float]])]
     /// Found by the model (else by Vision).
     public let byModel: Bool
-    /// Eyes and brows (outlines, normalized, top-left origin): kept out of face skin, so smoothing it leaves lashes
-    /// and brows sharp.
-    var features: [[CGPoint]] = []
+    /// Eyes and brows (outlines, normalized, top-left origin): their hairs (and the eyes) are kept out of face skin
+    /// when it is refined, so smoothing it leaves lashes and brows sharp while the skin around them is retouched.
+    var features: [(outline: [CGPoint], brow: Bool)] = []
+    /// Parts found again for the faces the model missed (heavy make-up or a smoothed, doll-like photo can leave a
+    /// face and its neck empty), each laid over these around its `regions` (normalized, top-left origin): the model's
+    /// again with the photo smaller, in place of these (`replace`); Apple Vision's face and body skin and lips,
+    /// wherever they find more.
+    var fallbacks: [(parts: BodyParts, regions: [CGRect], replace: Bool)] = []
+    /// The masks fitted to the photo's own edges (`refine`): the whole photo first, then the faces' closer looks,
+    /// each over its rect (normalized, top-left origin) at width x height, with one byte plane (rows from the top)
+    /// per kind the editor changes (face skin, body skin, lips, clothes), kept only over the box where it isn't empty. Empty: drawn from the planes as found.
+    var layers: [(rect: CGRect, width: Int, height: Int, planes: [Kind: (box: CGRect, bytes: [UInt8])])] = []
 
     init(width: Int, height: Int, planes: [[Float]], details: [(rect: CGRect, width: Int, height: Int, planes: [[Float]])] = [], byModel: Bool) {
         self.width = width; self.height = height; self.planes = planes; self.details = details; self.byModel = byModel
@@ -42,47 +51,68 @@ public final class BodyParts: @unchecked Sendable {
     /// A kind's mask over a photo of `extent` (Core Image: bottom-left origin), white where the part is, with the
     /// faces' closer looks laid over it.
     public func mask(_ kind: Kind, extent: CGRect) -> CIImage {
+        guard let first = layers.first, first.planes[kind] != nil else { return coarse(kind, extent: extent) }
+        var out: CIImage?
+        for l in layers {
+            guard let p = l.planes[kind] else { continue }
+            let r = Self.place(l.rect, in: extent)
+            let patch = Self.image(bytes: p.bytes, box: p.box, width: l.width, height: l.height, into: r)
+            out = out.map { Self.overlay(patch, over: $0, rect: r) } ?? patch
+        }
+        return (out ?? coarse(kind, extent: extent)).cropped(to: extent)
+    }
+
+    /// A kind's mask as the model (or Vision) gave it, faces' closer looks included: soft and coarse at its edges.
+    func coarse(_ kind: Kind, extent: CGRect) -> CIImage {
         var out = Self.image(planes[kind.rawValue], width: width, height: height, into: extent)
         for d in details {
-            // Top-left normalized rect → Core Image rect in the extent.
-            let r = CGRect(x: extent.minX + d.rect.minX * extent.width, y: extent.minY + (1 - d.rect.maxY) * extent.height,
-                           width: d.rect.width * extent.width, height: d.rect.height * extent.height)
-            let patch = Self.image(d.planes[kind.rawValue], width: d.width, height: d.height, into: r)
-            // Faded in from its edges, so no seam shows where the closer look ends.
-            let fade = CIImage(color: .white).cropped(to: r.insetBy(dx: r.width * 0.12, dy: r.height * 0.12))
-                .applyingGaussianBlur(sigma: Double(min(r.width, r.height)) * 0.06).cropped(to: r)
-            out = patch.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: out, kCIInputMaskImageKey: fade])
+            let r = Self.place(d.rect, in: extent)
+            out = Self.overlay(Self.image(d.planes[kind.rawValue], width: d.width, height: d.height, into: r), over: out, rect: r)
         }
-        if kind == .faceSkin, let holes = featureMask(extent: extent) {
-            out = out.applyingFilter("CIMultiplyCompositing", parameters: [kCIInputBackgroundImageKey: holes])
+        for fb in fallbacks where fb.replace || [.faceSkin, .bodySkin, .lips].contains(kind) {
+            // Only around the missed faces, soft-edged.
+            var around = CIImage(color: .black).cropped(to: extent)
+            for n in fb.regions {
+                let r = Self.place(n, in: extent)
+                around = CIImage(color: .white).cropped(to: r).applyingGaussianBlur(sigma: Double(min(r.width, r.height)) * 0.08)
+                    .applyingFilter("CIMaximumCompositing", parameters: [kCIInputBackgroundImageKey: around])
+            }
+            let other = fb.parts.coarse(kind, extent: extent)
+            out = fb.replace
+                ? other.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: out, kCIInputMaskImageKey: around])
+                : other.applyingFilter("CIMultiplyCompositing", parameters: [kCIInputBackgroundImageKey: around])
+                    .applyingFilter("CIMaximumCompositing", parameters: [kCIInputBackgroundImageKey: out])
         }
         return out.cropped(to: extent)
     }
 
-    /// White everywhere but the eyes and brows (a little wider than their outlines, soft-edged).
-    func featureMask(extent: CGRect) -> CIImage? {
-        guard !features.isEmpty else { return nil }
-        let scale = min(1, 1600 / max(extent.width, extent.height))
-        let w = max(1, Int(extent.width * scale)), h = max(1, Int(extent.height * scale))
-        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(),
-                                  bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
-        ctx.setFillColor(gray: 1, alpha: 1)
-        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
-        ctx.setFillColor(gray: 0, alpha: 1)
-        ctx.setStrokeColor(gray: 0, alpha: 1)
-        for outline in features where outline.count > 2 {
-            // Bottom-left origin in the context; outlines are top-left normalized.
-            let pts = outline.map { CGPoint(x: $0.x * CGFloat(w), y: (1 - $0.y) * CGFloat(h)) }
-            let xs = pts.map(\.x), ys = pts.map(\.y)
-            ctx.setLineWidth(max(2, (max(xs.max()! - xs.min()!, ys.max()! - ys.min()!)) * 0.35))
-            ctx.setLineJoin(.round)
-            ctx.addLines(between: pts); ctx.closePath()
-            ctx.drawPath(using: .fillStroke)
-        }
-        guard let cg = ctx.makeImage() else { return nil }
-        let img = CIImage(cgImage: cg).transformed(by: CGAffineTransform(scaleX: extent.width / CGFloat(w), y: extent.height / CGFloat(h))
-            .concatenating(CGAffineTransform(translationX: extent.minX, y: extent.minY)))
-        return img.clampedToExtent().applyingGaussianBlur(sigma: 1.5 / scale).cropped(to: extent)
+    /// A top-left normalized rect as a Core Image rect in `extent`.
+    static func place(_ n: CGRect, in extent: CGRect) -> CGRect {
+        CGRect(x: extent.minX + n.minX * extent.width, y: extent.minY + (1 - n.maxY) * extent.height,
+               width: n.width * extent.width, height: n.height * extent.height)
+    }
+
+    /// A closer look over the mask under it, faded in from its edges, so no seam shows where it ends.
+    static func overlay(_ patch: CIImage, over base: CIImage, rect r: CGRect) -> CIImage {
+        let fade = CIImage(color: .white).cropped(to: r.insetBy(dx: r.width * 0.12, dy: r.height * 0.12))
+            .applyingGaussianBlur(sigma: Double(min(r.width, r.height)) * 0.06).cropped(to: r)
+        return patch.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: base, kCIInputMaskImageKey: fade])
+    }
+
+    /// A refined plane (bytes over `box`, in a width x height layer, rows from the top) stretched over `rect`;
+    /// black in the rest of it.
+    static func image(bytes: [UInt8], box: CGRect, width: Int, height: Int, into rect: CGRect) -> CIImage {
+        let black = CIImage(color: .black).cropped(to: rect)
+        guard box.width > 0, box.height > 0 else { return black }
+        var bytes = bytes
+        let data = Data(bytes: &bytes, count: bytes.count)
+        let small = CIImage(bitmapData: data, bytesPerRow: Int(box.width), size: box.size, format: .L8, colorSpace: nil)
+        let sx = rect.width / CGFloat(width), sy = rect.height / CGFloat(height)
+        // The box counts rows from the top; Core Image from the bottom.
+        let at = CGPoint(x: rect.minX + box.minX * sx, y: rect.minY + (CGFloat(height) - box.maxY) * sy)
+        // Its border pixels are (all but) empty, so stretched without clamping nothing leaks past them.
+        let patch = small.samplingLinear().transformed(by: CGAffineTransform(scaleX: sx, y: sy).concatenating(CGAffineTransform(translationX: at.x, y: at.y)))
+        return patch.composited(over: black).cropped(to: rect)
     }
 
     static func image(_ plane: [Float], width: Int, height: Int, into rect: CGRect) -> CIImage {
@@ -116,7 +146,9 @@ public final class BodyParts: @unchecked Sendable {
         if let hit = cache[key] { lock.unlock(); return hit }
         lock.unlock()
         let found = (try? fromModel(image)) ?? fromVision(image)
+        if let found, found.byModel { found.fillMissedFaces(in: image) }
         found?.features = eyesAndBrows(in: image)
+        found?.refine(with: image)
         lock.lock()
         defer { lock.unlock() }
         if let found {
@@ -281,18 +313,18 @@ public final class BodyParts: @unchecked Sendable {
     }
 
     /// Every face's eyes and brows (normalized, top-left origin), from Apple Vision's face landmarks.
-    static func eyesAndBrows(in image: CIImage) -> [[CGPoint]] {
+    static func eyesAndBrows(in image: CIImage) -> [(outline: [CGPoint], brow: Bool)] {
         let req = VNDetectFaceLandmarksRequest()
         try? VNImageRequestHandler(ciImage: image).perform([req])
-        var out: [[CGPoint]] = []
+        var out: [(outline: [CGPoint], brow: Bool)] = []
         for f in req.results ?? [] {
             guard let lm = f.landmarks else { continue }
-            for region in [lm.leftEye, lm.rightEye, lm.leftEyebrow, lm.rightEyebrow] {
+            for (region, brow) in [(lm.leftEye, false), (lm.rightEye, false), (lm.leftEyebrow, true), (lm.rightEyebrow, true)] {
                 guard let region else { continue }
                 // Landmark points are in the face box, bottom-left origin.
-                out.append(region.normalizedPoints.map { p in
+                out.append((region.normalizedPoints.map { p in
                     CGPoint(x: f.boundingBox.minX + p.x * f.boundingBox.width, y: 1 - (f.boundingBox.minY + p.y * f.boundingBox.height))
-                })
+                }, brow))
             }
         }
         return out
@@ -305,6 +337,338 @@ public final class BodyParts: @unchecked Sendable {
         return (req.results ?? []).map { o in
             CGRect(x: o.boundingBox.minX, y: 1 - o.boundingBox.maxY, width: o.boundingBox.width, height: o.boundingBox.height)
         }.sorted { $0.width * $0.height > $1.width * $1.height }
+    }
+
+    /// Faces the model left (mostly) without face skin are looked at again (`fallbacks`), with the neck and
+    /// shoulders below: by the model with the photo smaller (it can miss a face at one size and find it at
+    /// another), and those still missed by Vision. Their closer looks, missed too, are dropped.
+    func fillMissedFaces(in image: CIImage) {
+        let faces = Self.faces(in: image)
+        var missed = missed(faces)
+        guard !missed.isEmpty else { return }
+        details.removeAll { d in missed.contains { d.rect.contains(CGPoint(x: $0.midX, y: $0.midY)) } }
+        func around(_ f: CGRect) -> CGRect {
+            CGRect(x: f.minX - f.width * 0.6, y: f.minY - f.height * 0.3, width: f.width * 2.2, height: f.height * 3.3)
+                .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+        if let model = try? Self.loadModel(),
+           let (w, h, planes) = try? Self.cover(image, scale: min(1, CGFloat(Self.tileH) / image.extent.height) * 0.6, model: model) {
+            let again = BodyParts(width: w, height: h, planes: planes, byModel: true)
+            let still = again.missed(missed)
+            let found = missed.filter { !still.contains($0) }
+            if !found.isEmpty { fallbacks.append((again, found.map(around), true)) }
+            missed = still
+        }
+        if !missed.isEmpty, let vision = Self.fromVision(image) { fallbacks.append((vision, missed.map(around), false)) }
+    }
+
+    /// The faces (normalized, top-left origin) these parts leave (mostly) without face skin.
+    func missed(_ faces: [CGRect]) -> [CGRect] {
+        guard !faces.isEmpty else { return [] }
+        // Face skin, small: enough to tell a face found from one missed. Rows from the top.
+        let k = 512 / CGFloat(max(width, height))
+        let w = max(1, Int(CGFloat(width) * k)), h = max(1, Int(CGFloat(height) * k))
+        var p = [Float](repeating: 0, count: w * h)
+        Self.context.render(coarse(.faceSkin, extent: CGRect(x: 0, y: 0, width: w, height: h)), toBitmap: &p, rowBytes: w * 4,
+                            bounds: CGRect(x: 0, y: 0, width: w, height: h), format: .Lf, colorSpace: nil)
+        // The mean over a part of a face's box (fractions of it).
+        func mean(_ f: CGRect, _ xs: (CGFloat, CGFloat), _ ys: (CGFloat, CGFloat)) -> Float? {
+            let x0 = Int((f.minX + f.width * xs.0) * CGFloat(w)), x1 = Int((f.minX + f.width * xs.1) * CGFloat(w))
+            let y0 = Int((f.minY + f.height * ys.0) * CGFloat(h)), y1 = Int((f.minY + f.height * ys.1) * CGFloat(h))
+            var sum: Float = 0, n: Float = 0
+            for y in max(0, y0)...max(0, min(h - 1, y1)) { for x in max(0, x0)...max(0, min(w - 1, x1)) { sum += p[y * w + x]; n += 1 } }
+            return n >= 2 ? sum / n : nil
+        }
+        return faces.filter { f in
+            // Its cheeks and its chin: skin when the face is found (the far cheek at least half, turned away); a
+            // missed face may still have its nose or the skin under its eyes, or lose only its jaw.
+            guard let left = mean(f, (0.15, 0.35), (0.5, 0.75)), let right = mean(f, (0.65, 0.85), (0.5, 0.75)) else { return false }
+            let chin = mean(f, (0.35, 0.65), (0.88, 0.98)) ?? 1
+            return (left + right) / 2 < 0.5 || chin < 0.5
+        }
+    }
+
+    // MARK: - Fitting them to the photo
+
+    /// Fits the masks to the photo (`layers`): the model sees the photo small, so its edges are a few of the photo's
+    /// pixels off and spill onto hair and background. Each is redrawn, in more detail than the model had: along its
+    /// edge each pixel goes with the side whose colour it has, then a guided filter mattes it onto the photo's own
+    /// edges; then the eyes, lashes and brow hairs are taken out of face skin, leaving the skin between and around
+    /// them in.
+    func refine(with image: CIImage) {
+        let e = image.extent
+        guard e.width >= 16, e.height >= 16 else { return }
+        // The whole photo at 2048 on the long side, then each closer look at twice its own detail (never more than
+        // the photo has).
+        let s = min(1, 2048 / max(e.width, e.height))
+        var regions: [(rect: CGRect, scale: CGFloat, step: Double, detail: Int?)] = [(CGRect(x: 0, y: 0, width: 1, height: 1), s, Double(e.height * s) / Double(height), nil)]
+        for (i, d) in details.enumerated() {
+            let ds = min(1, CGFloat(d.width) * 2 / (d.rect.width * e.width))
+            regions.append((d.rect, ds, Double(d.rect.height * e.height * ds) / Double(d.height), i))
+        }
+        var out: [(rect: CGRect, width: Int, height: Int, planes: [Kind: (box: CGRect, bytes: [UInt8])])] = []
+        for region in regions {
+            let px = Self.place(region.rect, in: e)
+            let gw = max(4, Int((px.width * region.scale).rounded())), gh = max(4, Int((px.height * region.scale).rounded()))
+            let layerRect = CGRect(x: 0, y: 0, width: gw, height: gh)
+            // The photo there, as the guide: r, g, b planes 0…1, rows from the top.
+            let guideImage = image.cropped(to: px).transformed(by: CGAffineTransform(translationX: -px.minX, y: -px.minY)
+                .concatenating(CGAffineTransform(scaleX: CGFloat(gw) / px.width, y: CGFloat(gh) / px.height)))
+            var rgba = [UInt8](repeating: 0, count: gw * gh * 4)
+            Self.context.render(guideImage.clampedToExtent(), toBitmap: &rgba, rowBytes: gw * 4, bounds: layerRect, format: .RGBA8,
+                                colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+            let guide = (0..<3).map { c in (0..<(gw * gh)).map { Float(rgba[$0 * 4 + c]) / 255 } }
+            // About two and a half of the model's pixels either way: as far as its edges are off.
+            let radius = max(2, Int((region.step * 2.5).rounded()))
+            // This region's features, in its pixels.
+            let feats = features.map { f in
+                (f.outline.map { CGPoint(x: ($0.x - region.rect.minX) / region.rect.width * CGFloat(gw),
+                                         y: ($0.y - region.rect.minY) / region.rect.height * CGFloat(gh)) }, f.brow)
+            }.filter { f in f.0.contains { layerRect.insetBy(dx: -20, dy: -20).contains($0) } }
+            func found(_ kind: Kind) -> [Float] {
+                let coarse = region.detail.map { Self.image(details[$0].planes[kind.rawValue], width: details[$0].width, height: details[$0].height, into: layerRect) }
+                    ?? self.coarse(kind, extent: layerRect)
+                var p = [Float](repeating: 0, count: gw * gh)
+                Self.context.render(coarse, toBitmap: &p, rowBytes: gw * 4, bounds: layerRect, format: .Lf, colorSpace: nil)
+                return p
+            }
+            // Decided by colour along the edge, then matted onto the photo's edges (a strand of hair, a soft jaw) in a
+            // smaller window; what is left faint on either side (a glow over hair or a collar, a dip on skin) is
+            // pushed to none or all.
+            func fitted(_ p: [Float]) -> [Float] {
+                var q = Self.snap(guide: guide, input: p, width: gw, height: gh, radius: radius)
+                q = Self.guidedFilter(guide: guide, input: q, width: gw, height: gh, radius: max(2, radius / 2), eps: 0.001)
+                for i in q.indices { let t = max(0, min(1, (q[i] - 0.12) / 0.76)); q[i] = t * t * (3 - 2 * t) }
+                return q
+            }
+            var planes: [Kind: (box: CGRect, bytes: [UInt8])] = [:]
+            let done = NSLock()
+            // Skin, lips and clothes side by side.
+            DispatchQueue.concurrentPerform(iterations: 3) { job in
+                var fit: [Kind: (box: CGRect, bytes: [UInt8])] = [:]
+                if job == 0 {
+                    // Face and body skin meet on skin (neck and chest): fitted as one, so no seam opens between them,
+                    // then shared out as the model has them, each taking all of the skin where it has at least half
+                    // of it (so the two together, as the retouch takes them, are the whole skin).
+                    let face = found(.faceSkin), body = found(.bodySkin)
+                    let skin = fitted(zip(face, body).map { min(1, $0 + $1) })
+                    let share = Self.boxMean(zip(face, body).map { $0 + $1 > 0.02 ? $0 / ($0 + $1) : 0 }, width: gw, height: gh, radius: max(1, radius / 2))
+                    var faceSkin = zip(skin, share).map { $0 * min(1, 2 * $1) }
+                    Self.cutFeatures(feats, from: &faceSkin, guide: guide, width: gw, height: gh)
+                    fit[.faceSkin] = Self.packed(faceSkin, width: gw, height: gh)
+                    fit[.bodySkin] = Self.packed(zip(skin, share).map { $0 * min(1, 2 * (1 - $1)) }, width: gw, height: gh)
+                } else {
+                    let kind: Kind = job == 1 ? .lips : .clothes
+                    fit[kind] = Self.packed(fitted(found(kind)), width: gw, height: gh)
+                }
+                done.lock(); planes.merge(fit) { a, _ in a }; done.unlock()
+            }
+            out.append((region.rect, gw, gh, planes))
+        }
+        layers = out
+    }
+
+    /// A plane as bytes, kept only over the box where it isn't empty (and a pixel around it).
+    static func packed(_ q: [Float], width w: Int, height h: Int) -> (box: CGRect, bytes: [UInt8]) {
+        var x0 = w, y0 = h, x1 = -1, y1 = -1
+        for y in 0..<h { for x in 0..<w where q[y * w + x] > 0.004 { x0 = min(x0, x); x1 = max(x1, x); y0 = min(y0, y); y1 = max(y1, y) } }
+        guard x1 >= 0 else { return (.zero, []) }
+        x0 = max(0, x0 - 1); y0 = max(0, y0 - 1); x1 = min(w - 1, x1 + 1); y1 = min(h - 1, y1 + 1)
+        let bw = x1 - x0 + 1, bh = y1 - y0 + 1
+        var bytes = [UInt8](repeating: 0, count: bw * bh)
+        for y in 0..<bh { for x in 0..<bw { bytes[y * bw + x] = UInt8((max(0, min(1, q[(y0 + y) * w + x0 + x])) * 255).rounded()) } }
+        return (CGRect(x: x0, y: y0, width: bw, height: bh), bytes)
+    }
+
+    /// Along a mask's edge (within `radius` of it, where the model may be wrong), each pixel goes with the side whose
+    /// colour it is nearer: the colours of what is surely in and surely out, nearby. Where the two sides look alike
+    /// (skin against a skin-coloured wall), the mask is left as it was.
+    static func snap(guide: [[Float]], input p: [Float], width w: Int, height h: Int, radius r: Int) -> [Float] {
+        var x0 = w, y0 = h, x1 = -1, y1 = -1
+        for y in 0..<h { for x in 0..<w where p[y * w + x] > 0.004 { x0 = min(x0, x); x1 = max(x1, x); y0 = min(y0, y); y1 = max(y1, y) } }
+        var out = p
+        guard x1 >= 0 else { return out }
+        x0 = max(0, x0 - 3 * r); y0 = max(0, y0 - 3 * r); x1 = min(w - 1, x1 + 3 * r); y1 = min(h - 1, y1 + 3 * r)
+        let bw = x1 - x0 + 1, bh = y1 - y0 + 1, n = bw * bh
+        func crop(_ a: [Float]) -> [Float] {
+            var c = [Float](repeating: 0, count: n)
+            for y in 0..<bh { for x in 0..<bw { c[y * bw + x] = a[(y0 + y) * w + x0 + x] } }
+            return c
+        }
+        let I = guide.map(crop), P = crop(p)
+        // Surely in: all in, as far as the model can be off; surely out, likewise.
+        let near = boxMean(P, width: bw, height: bh, radius: r)
+        let sureIn = near.map { $0 > 0.97 ? Float(1) : 0 }, sureOut = near.map { $0 < 0.03 ? Float(1) : 0 }
+        // Their colours nearby (in a wider window, so both sides are in it).
+        func colours(_ core: [Float]) -> (count: [Float], rgb: [[Float]]) {
+            (boxMean(core, width: bw, height: bh, radius: 2 * r),
+             I.map { c in boxMean(zip(c, core).map { $0 * $1 }, width: bw, height: bh, radius: 2 * r) })
+        }
+        let inside = colours(sureIn), outside = colours(sureOut)
+        for y in 0..<bh {
+            for x in 0..<bw {
+                let i = y * bw + x
+                guard sureIn[i] == 0, sureOut[i] == 0, inside.count[i] > 0.02, outside.count[i] > 0.02 else { continue }
+                var dIn: Float = 0, dOut: Float = 0, apart: Float = 0
+                for c in 0..<3 {
+                    let a = inside.rgb[c][i] / inside.count[i], b = outside.rgb[c][i] / outside.count[i], v = I[c][i]
+                    dIn += (v - a) * (v - a); dOut += (v - b) * (v - b); apart += (a - b) * (a - b)
+                }
+                // In by how much nearer it is to the inside's colour; trusted as far as the two sides differ.
+                let t = dOut / (dIn + dOut + 1e-6)
+                let trust = max(0, min(1, (apart - 0.003) / 0.017))
+                out[(y0 + y) * w + x0 + x] = trust * t + (1 - trust) * P[i]
+            }
+        }
+        return out
+    }
+
+    /// He, Sun and Tang's guided filter with a colour guide: in every window the mask is fitted as a linear mix of
+    /// the photo's r, g and b, so where the photo has an edge (skin against hair or background) the mask's edge
+    /// moves onto it, and where it has none the mask stays smooth. `eps` is how much colour change counts as an
+    /// edge (as a variance, colours 0…1). Worked out only over the box the mask reaches (and a window around it).
+    static func guidedFilter(guide: [[Float]], input p: [Float], width w: Int, height h: Int, radius r: Int, eps: Float) -> [Float] {
+        var x0 = w, y0 = h, x1 = -1, y1 = -1
+        for y in 0..<h { for x in 0..<w where p[y * w + x] > 0.004 { x0 = min(x0, x); x1 = max(x1, x); y0 = min(y0, y); y1 = max(y1, y) } }
+        var out = [Float](repeating: 0, count: w * h)
+        guard x1 >= 0 else { return out }
+        x0 = max(0, x0 - 2 * r); y0 = max(0, y0 - 2 * r); x1 = min(w - 1, x1 + 2 * r); y1 = min(h - 1, y1 + 2 * r)
+        let bw = x1 - x0 + 1, bh = y1 - y0 + 1, n = bw * bh
+        func crop(_ a: [Float]) -> [Float] {
+            var c = [Float](repeating: 0, count: n)
+            for y in 0..<bh { for x in 0..<bw { c[y * bw + x] = a[(y0 + y) * w + x0 + x] } }
+            return c
+        }
+        let I = guide.map(crop), P = crop(p)
+        func mean(_ a: [Float]) -> [Float] { boxMean(a, width: bw, height: bh, radius: r) }
+        func product(_ a: [Float], _ b: [Float]) -> [Float] { var c = [Float](repeating: 0, count: n); vDSP_vmul(a, 1, b, 1, &c, 1, vDSP_Length(n)); return c }
+        let mI = I.map(mean), mP = mean(P)
+        let mIP = I.map { mean(product($0, P)) }
+        // Second moments of the guide: rr, rg, rb, gg, gb, bb.
+        let pairs = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)]
+        let mII = pairs.map { mean(product(I[$0.0], I[$0.1])) }
+        var a = [[Float]](repeating: [Float](repeating: 0, count: n), count: 3), b = [Float](repeating: 0, count: n)
+        for i in 0..<n {
+            let mr = mI[0][i], mg = mI[1][i], mb = mI[2][i], mp = mP[i]
+            // Covariance of the guide (plus eps) and of guide with mask.
+            let srr = mII[0][i] - mr * mr + eps, srg = mII[1][i] - mr * mg, srb = mII[2][i] - mr * mb
+            let sgg = mII[3][i] - mg * mg + eps, sgb = mII[4][i] - mg * mb, sbb = mII[5][i] - mb * mb + eps
+            let cr = mIP[0][i] - mr * mp, cg = mIP[1][i] - mg * mp, cb = mIP[2][i] - mb * mp
+            // The 3 x 3 inverse by cofactors.
+            let c00 = sgg * sbb - sgb * sgb, c01 = srb * sgb - srg * sbb, c02 = srg * sgb - srb * sgg
+            let c11 = srr * sbb - srb * srb, c12 = srb * srg - srr * sgb, c22 = srr * sgg - srg * srg
+            let det = srr * c00 + srg * c01 + srb * c02
+            guard abs(det) > 1e-12 else { b[i] = mp; continue }
+            let ar = (c00 * cr + c01 * cg + c02 * cb) / det
+            let ag = (c01 * cr + c11 * cg + c12 * cb) / det
+            let ab = (c02 * cr + c12 * cg + c22 * cb) / det
+            a[0][i] = ar; a[1][i] = ag; a[2][i] = ab
+            b[i] = mp - ar * mr - ag * mg - ab * mb
+        }
+        let ma = a.map(mean), mb = mean(b)
+        for y in 0..<bh {
+            for x in 0..<bw {
+                let i = y * bw + x
+                let q = ma[0][i] * I[0][i] + ma[1][i] * I[1][i] + ma[2][i] * I[2][i] + mb[i]
+                out[(y0 + y) * w + x0 + x] = max(0, min(1, q))
+            }
+        }
+        return out
+    }
+
+    /// The mean over a (2r+1)-square window around each pixel (fewer at the borders), by running sums.
+    static func boxMean(_ a: [Float], width w: Int, height h: Int, radius r: Int) -> [Float] {
+        var rows = [Float](repeating: 0, count: w * h), out = rows
+        a.withUnsafeBufferPointer { src in
+            rows.withUnsafeMutableBufferPointer { dst in
+                for y in 0..<h {
+                    let o = y * w
+                    var sum: Float = 0
+                    for x in 0...min(r, w - 1) { sum += src[o + x] }
+                    for x in 0..<w {
+                        let lo = max(0, x - r), hi = min(w - 1, x + r)
+                        dst[o + x] = sum / Float(hi - lo + 1)
+                        if x + r + 1 < w { sum += src[o + x + r + 1] }
+                        if x - r >= 0 { sum -= src[o + x - r] }
+                    }
+                }
+            }
+        }
+        rows.withUnsafeBufferPointer { src in
+            out.withUnsafeMutableBufferPointer { dst in
+                var sum = [Float](repeating: 0, count: w)
+                for y in 0...min(r, h - 1) { for x in 0..<w { sum[x] += src[y * w + x] } }
+                for y in 0..<h {
+                    let lo = max(0, y - r), hi = min(h - 1, y + r), k = 1 / Float(hi - lo + 1)
+                    for x in 0..<w { dst[y * w + x] = sum[x] * k }
+                    if y + r + 1 < h { for x in 0..<w { sum[x] += src[(y + r + 1) * w + x] } }
+                    if y - r >= 0 { for x in 0..<w { sum[x] -= src[(y - r) * w + x] } }
+                }
+            }
+        }
+        return out
+    }
+
+    /// Eyes, lashes and brow hairs out of a face-skin plane (features in its pixels, top-left origin). The eyes
+    /// themselves go by their outlines; around them and over the brows, only what is clearly darker than the skin
+    /// nearby (hairs, lashes, liner) goes, so the skin between and around the hairs is still retouched, and an
+    /// outline a little off costs nothing.
+    static func cutFeatures(_ feats: [([CGPoint], Bool)], from q: inout [Float], guide: [[Float]], width w: Int, height h: Int) {
+        guard !feats.isEmpty else { return }
+        // The eyes, a touch beyond their outlines, soft-edged.
+        if let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(),
+                               bitmapInfo: CGImageAlphaInfo.none.rawValue) {
+            ctx.setFillColor(gray: 1, alpha: 1)
+            ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            ctx.setFillColor(gray: 0, alpha: 1); ctx.setStrokeColor(gray: 0, alpha: 1); ctx.setLineJoin(.round)
+            for (outline, brow) in feats where !brow && outline.count > 2 {
+                // The context counts rows from the bottom.
+                let pts = outline.map { CGPoint(x: $0.x, y: CGFloat(h) - $0.y) }
+                let xs = pts.map(\.x)
+                ctx.setLineWidth(max(1.5, (xs.max()! - xs.min()!) * 0.08))
+                ctx.addLines(between: pts); ctx.closePath()
+                ctx.drawPath(using: .fillStroke)
+            }
+            let holes = ctx.data!.bindMemory(to: UInt8.self, capacity: w * h)
+            var eyes = (0..<(w * h)).map { Float(holes[$0]) / 255 }
+            eyes = boxMean(boxMean(eyes, width: w, height: h, radius: 1), width: w, height: h, radius: 1)
+            for i in 0..<(w * h) { q[i] *= eyes[i] }
+        }
+        func luma(_ i: Int) -> Float { 0.299 * guide[0][i] + 0.587 * guide[1][i] + 0.114 * guide[2][i] }
+        for (outline, brow) in feats where outline.count > 1 {
+            let xs = outline.map(\.x), ys = outline.map(\.y)
+            let fw = max(2, xs.max()! - xs.min()!), fh = ys.max()! - ys.min()!
+            // An ellipse around it: brows reach further up and down (their outline may sit off the hairs), eyes take
+            // in their lashes and liner.
+            let c = CGPoint(x: (xs.max()! + xs.min()!) / 2, y: (ys.max()! + ys.min()!) / 2)
+            let rx = fw * (brow ? 0.62 : 0.68), ry = fh / 2 + fw * (brow ? 0.22 : 0.2)
+            let bx0 = max(0, Int(c.x - rx)), bx1 = min(w - 1, Int(c.x + rx)), by0 = max(0, Int(c.y - ry)), by1 = min(h - 1, Int(c.y + ry))
+            guard bx1 > bx0, by1 > by0 else { continue }
+            func weight(_ x: Int, _ y: Int) -> Float {
+                let dx = (CGFloat(x) - c.x) / rx, dy = (CGFloat(y) - c.y) / ry
+                let d = Float((dx * dx + dy * dy).squareRoot())
+                // Full inside 70% of the way out, none at the ellipse.
+                let t = max(0, min(1, (1 - d) / 0.3))
+                return t * t * (3 - 2 * t)
+            }
+            // The skin's lightness there: the lighter part of what is still skin (hairs are the darker part).
+            var skin: [Float] = []
+            for y in by0...by1 { for x in bx0...bx1 where weight(x, y) > 0 && q[y * w + x] > 0.5 { skin.append(luma(y * w + x)) } }
+            guard skin.count >= 8 else { continue }
+            skin.sort()
+            let ref = max(0.05, skin[Int(Float(skin.count - 1) * 0.7)])
+            for y in by0...by1 {
+                for x in bx0...bx1 {
+                    let wgt = weight(x, y)
+                    guard wgt > 0 else { continue }
+                    let i = y * w + x
+                    // How much darker than the skin: under 18% is shading (or dark circles, which want retouching);
+                    // past 38%, hair.
+                    let t = max(0, min(1, ((ref - luma(i)) / ref - 0.18) / 0.2))
+                    q[i] *= 1 - wgt * t * t * (3 - 2 * t)
+                }
+            }
+        }
     }
 
     // MARK: - Without the model
@@ -383,7 +747,8 @@ public final class BodyParts: @unchecked Sendable {
                 // No face to learn from: a broad skin range.
                 near = (c.1 > 8 && c.1 < 45 && c.0 > -40 && c.0 < 5) ? 1 : 0
             }
-            faceSkin[i] = faceArea[i] * max(near, 0.5) * max(inPerson, faceArea[i])
+            // Hair over the face (its colour far from the skin's) is left out; refining fits the edge to it.
+            faceSkin[i] = faceArea[i] * max(near, 0.1) * max(inPerson, faceArea[i])
             let skin = inPerson * near * (1 - faceArea[i]) * (1 - lips[i])
             bodySkin[i] = skin
             clothes[i] = max(0, inPerson - skin - faceArea[i] - lips[i])
