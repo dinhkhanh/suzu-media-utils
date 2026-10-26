@@ -250,6 +250,23 @@ final class TeamSyncTests: XCTestCase {
         XCTAssertEqual(try b.people().map(\.name), ["An Nguyễn"])
     }
 
+    func testANameTravelsWhileFacesAreBusy() throws {
+        try a.sync.create(name: "Gala", folder: shared, project: a.project)
+        try joinAsTeammate()
+        let an = try a.person("An", at: 100)
+        try a.photo("a1.jpg", person: an, vector: vector(1))
+        exchange()
+        // Both Macs' face lanes held up (a backlog of crops over the NAS, the grouping engine busy).
+        let hold = DispatchSemaphore(value: 0)
+        a.sync.faceQueue.async { hold.wait() }
+        b.sync.faceQueue.async { hold.wait() }
+        defer { hold.signal(); hold.signal() }
+        try a.rename(an, "Nguyễn An", at: 200)
+        a.sync.queue.sync { _ = a.sync.logPass() }
+        b.sync.queue.sync { _ = b.sync.logPass() }
+        XCTAssertEqual(try b.people().map(\.name), ["Nguyễn An"])
+    }
+
     func testTheSameNameGivenOnTwoMacsBecomesOnePerson() throws {
         try a.sync.create(name: "Gala", folder: shared, project: a.project)
         try joinAsTeammate()

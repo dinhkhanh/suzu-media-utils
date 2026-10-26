@@ -536,17 +536,16 @@ extension TeamSync {
         for dev in devices where dev.hasDirectoryPath || (try? dev.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
             let device = dev.lastPathComponent
             guard device != deviceId else { continue }
-            let files = ((try? fm.contentsOfDirectory(at: dev, includingPropertiesForKeys: [.fileSizeKey])) ?? [])
+            let files = ((try? fm.contentsOfDirectory(at: dev, includingPropertiesForKeys: nil)) ?? [])
                 .filter { $0.lastPathComponent.hasPrefix("media-") && $0.pathExtension == "jsonl" }
                 .sorted { $0.lastPathComponent < $1.lastPathComponent }
             for f in files {
                 let name = f.lastPathComponent
                 let state = try state(teamId)
                 let cursor = Int(state["fcur:\(device):\(name)"] ?? "0") ?? 0
-                let size = (try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-                guard size > cursor else { continue }
                 let h = try FileHandle(forReadingFrom: f)
                 defer { try? h.close() }
+                guard try Self.size(of: h) > cursor else { continue }
                 try h.seek(toOffset: UInt64(cursor))
                 let data = try h.readToEnd() ?? Data()
                 guard let lastNewline = data.lastIndex(of: 0x0A) else { continue }
