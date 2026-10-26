@@ -86,4 +86,39 @@ final class HealingTests: XCTestCase {
         XCTAssertEqual(stats(a, spot).mean, stats(b, spot).mean, accuracy: 0.01)
         XCTAssertEqual(stats(b, spot).mean, stats(fresh, spot).mean, accuracy: 0.01)
     }
+
+    func testTheSameSourceIsFoundAtEveryResolution() {
+        // A spot by an edge (light skin left, dark right), as the preview sees it at one zoom and the export at
+        // another: both heal it from along the edge nearby (a near tie, up or down, may go either way).
+        func scene(_ k: Int) -> ([SIMD4<Float>], Int, Int) {
+            let w = 400 * k, h = 300 * k
+            var px = [SIMD4<Float>](repeating: .zero, count: w * h)
+            var seed: UInt64 = 3
+            for y in 0..<h {
+                for x in 0..<w {
+                    seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                    let fx = Double(x) / Double(k), fy = Double(y) / Double(k)
+                    var v = fx < 220 + fy * 0.2 ? 0.75 : 0.3
+                    if (fx - 248) * (fx - 248) + (fy - 150) * (fy - 150) < 25 { v -= 0.2 }
+                    v += Double(Int(seed >> 60) - 8) * 0.004
+                    px[y * w + x] = SIMD4(Float(v), Float(v * 0.85), Float(v * 0.75), 1)
+                }
+            }
+            return (px, w, h)
+        }
+        var shifts: [(Double, Double)] = []
+        for k in [1, 3] {
+            let (px, w, h) = scene(k)
+            let r = 0.04 * Double(h)
+            var m = [Float](repeating: 0, count: w * h)
+            let box = MaskBrush.cover([(248 * Double(k), 150 * Double(k))], radius: r, softness: 0.3, width: w, height: h, into: &m)!
+            let s = Healing.findSource(px, w: w, h: h, mask: m, box: box, r: r)!
+            shifts.append((Double(s.0) / Double(w), Double(s.1) / Double(h)))
+        }
+        for (dx, dy) in shifts {
+            // Along the edge (not across it, which would carry the dark side over), and near.
+            XCTAssertGreaterThan(abs(dy) * 300, abs(dx) * 400 * 2)
+            XCTAssertLessThan(hypot(dx * 400, dy * 300), 0.04 * 300 * 4.5)
+        }
+    }
 }

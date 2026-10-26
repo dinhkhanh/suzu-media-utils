@@ -476,6 +476,27 @@ extension EditControls {
     var platformAspect: AspectPreset? { recipe.cropByOrientation == true ? nil : recipe.aspect }
 }
 
+/// A brush's size in pixels, as Photoshop's: the slider moves a pixel at a time at the small end, for moles and
+/// freckles, and faster toward the large end.
+struct BrushSizeSlider: View {
+    @Binding var value: Double
+    static let curve = 3.0
+
+    var position: Binding<Double> {
+        let r = MaskOverlay.sizes
+        return Binding(get: { pow((value - r.lowerBound) / (r.upperBound - r.lowerBound), 1 / Self.curve) },
+                       set: { value = (r.lowerBound + pow($0, Self.curve) * (r.upperBound - r.lowerBound)).rounded() })
+    }
+
+    var body: some View {
+        HStack {
+            Text("Brush size").frame(width: 84, alignment: .leading)
+            Slider(value: position, in: 0...1)
+            Text("\(Int(value.rounded())) px").monospacedDigit().foregroundStyle(.secondary).frame(width: 56, alignment: .trailing)
+        }
+    }
+}
+
 struct PercentSlider: View {
     let label: String
     @Binding var value: Double
@@ -767,8 +788,8 @@ struct RetouchControls: View {
                 }
                 .id(placements)
                 if overlay.healing {
-                    PercentSlider(label: "Brush size", value: $overlay.healSize, range: MaskOverlay.sizes)
-                        .help("The brush's radius, as a share of the photo's short side ([ and ] on the preview): a little bigger than the spot")
+                    BrushSizeSlider(value: $overlay.healSize)
+                        .help("The brush's width in the photo's own pixels ([ and ] on the preview): a little bigger than the spot")
                     PercentSlider(label: "Brush edge", value: $overlay.healSoftness, range: 0...1)
                         .help("0%: a hard edge; higher, the healing fades out further from its middle")
                     if let source = overlay.healSource, source.photo == photo.path {
@@ -881,8 +902,8 @@ struct RetouchControls: View {
                     }
                     .pickerStyle(.segmented).labelsHidden()
                 }
-                PercentSlider(label: "Brush size", value: $overlay.size, range: MaskOverlay.sizes)
-                    .help("The brush's radius, as a share of the photo's short side ([ and ] on the preview)")
+                BrushSizeSlider(value: $overlay.size)
+                    .help("The brush's width in the photo's own pixels ([ and ] on the preview)")
                 PercentSlider(label: "Brush edge", value: $overlay.softness, range: 0...1)
                     .help("0%: a hard edge; higher, the stroke fades out further from its middle")
                 Text("Strokes are this photo's own; the other photos keep their masks as found.")

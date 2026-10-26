@@ -241,16 +241,17 @@ final class MaskOverlay: ObservableObject {
     /// Dragging on the preview paints the shown part's mask of that photo (adds to it, or erases).
     @Published var brushing = false { didSet { if brushing { healing = false } } }
     @Published var erase = false
-    /// The brush's radius, as a share of the photo's short side.
-    @Published var size = MaskOverlay.stored("maskBrush.size", 0.04) { didSet { UserDefaults.standard.set(size, forKey: "maskBrush.size") } }
+    /// The brush's size: its diameter in the photo's own pixels (at full size), as Photoshop's, so a mole on a
+    /// 6000-pixel photo gets a brush its size.
+    @Published var size = MaskOverlay.stored("maskBrush.px", 150) { didSet { UserDefaults.standard.set(size, forKey: "maskBrush.px") } }
     /// The brush's edge: 0 hard, 1 fading out from the centre.
     @Published var softness = MaskOverlay.stored("maskBrush.softness", 0.5) { didSet { UserDefaults.standard.set(softness, forKey: "maskBrush.softness") } }
-    static let sizes: ClosedRange<Double> = 0.005...0.25
+    static let sizes: ClosedRange<Double> = 1...2500
 
     /// Dragging on the preview heals what it covers (the healing brush), on that photo. Needs no masks.
     @Published var healing = false { didSet { if healing { brushing = false } else { healSource = nil } } }
     /// The healing brush's own size and edge (a blemish wants a smaller brush than a mask).
-    @Published var healSize = MaskOverlay.stored("healBrush.size", 0.015) { didSet { UserDefaults.standard.set(healSize, forKey: "healBrush.size") } }
+    @Published var healSize = MaskOverlay.stored("healBrush.px", 40) { didSet { UserDefaults.standard.set(healSize, forKey: "healBrush.px") } }
     @Published var healSoftness = MaskOverlay.stored("healBrush.softness", 0.3) { didSet { UserDefaults.standard.set(healSoftness, forKey: "healBrush.softness") } }
     /// Where the healing brush heals from, picked by hand (⌥-click) on one photo: the spot (normalized, in the photo
     /// as shot), and once the first stroke from it is painted, the shift from the strokes to their source (kept for
@@ -263,11 +264,23 @@ final class MaskOverlay: ObservableObject {
     var brushSize: Double { healing ? healSize : size }
     var brushSoftness: Double { healing ? healSoftness : softness }
 
-    /// [ and ] make the brush smaller or bigger.
+    /// [ and ] make the brush smaller or bigger, in Photoshop's steps: a pixel at a time below 10, then 10, 25, 50
+    /// and 100 as it grows.
     func resize(_ by: Int) {
-        let next = min(Self.sizes.upperBound, max(Self.sizes.lowerBound, brushSize * (by > 0 ? 1.25 : 0.8)))
+        let next = Self.step(brushSize, up: by > 0)
         if healing { healSize = next } else { size = next }
     }
+
+    static func step(_ px: Double, up: Bool) -> Double {
+        // Going down from a step's edge takes the smaller step (100 → 90, not 75).
+        let at = up ? px : px - 0.5
+        let step: Double = at < 10 ? 1 : at < 100 ? 10 : at < 200 ? 25 : at < 300 ? 50 : 100
+        let next = up ? ((px + 0.5) / step).rounded(.down) * step + step : ((px - 0.5) / step).rounded(.up) * step - step
+        return min(sizes.upperBound, max(sizes.lowerBound, next))
+    }
+
+    /// The brush's radius as a share of a photo's short side (how strokes are kept, whatever the photo's size).
+    static func radius(_ px: Double, photo size: CGSize) -> Double { px / 2 / max(1, min(size.width, size.height)) }
 
     /// Finding a photo's masks is slow, so the preview looks for them only in the photos Find Masks was clicked for
     /// (by path); until then the retouch and the masks' tools wait.
@@ -739,12 +752,12 @@ struct EditPreview: View {
         return maskOverlay.brushing && maskOverlay.part != nil && maskOverlay.masks(current?.url) == .ready
     }
 
-    /// The brush's radius on screen: its share of the photo's short side, at the zoom shown (`photo` is where the
+    /// The brush's radius on screen: its pixels of the photo at full size, at the zoom shown (`photo` is where the
     /// output sits in the view; the output is the crop of the levelled photo).
     func brushRadius(_ r: PreviewCache.Rendered, photo: CGRect) -> CGFloat {
         guard r.fullSize.width > 0 else { return 10 }
         let pointsPerPixel = photo.width / ((r.crop?.width ?? 1) * r.fullSize.width)
-        return max(1, CGFloat(maskOverlay.brushSize) * min(r.pixelSize.width, r.pixelSize.height) * pointsPerPixel)
+        return max(1, CGFloat(maskOverlay.brushSize / 2) * pointsPerPixel)
     }
 
     /// The strokes being painted, the brush's outline under the cursor, and where the healing brush heals from when
@@ -876,12 +889,14 @@ struct EditPreview: View {
                 source = s.shift ?? CGVector(dx: s.point.x - points[0].x, dy: s.point.y - points[0].y)
                 maskOverlay.healSource?.shift = source
             }
-            CropPlacements.shared.add(heal: HealStroke(points: points, radius: maskOverlay.healSize, softness: maskOverlay.healSoftness, source: source),
+            CropPlacements.shared.add(heal: HealStroke(points: points, radius: MaskOverlay.radius(maskOverlay.healSize, photo: r.pixelSize),
+                                                       softness: maskOverlay.healSoftness, source: source),
                                       for: url)
             return
         }
         guard let part = maskOverlay.part else { return }
-        CropPlacements.shared.add(MaskStroke(points: points, radius: maskOverlay.size, softness: maskOverlay.softness, erase: stroke.erase),
+        CropPlacements.shared.add(MaskStroke(points: points, radius: MaskOverlay.radius(maskOverlay.size, photo: r.pixelSize), softness: maskOverlay.softness,
+                                             erase: stroke.erase),
                                   to: part, for: url)
     }
 

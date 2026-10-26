@@ -132,30 +132,41 @@ public enum Healing {
 
     // MARK: - The source
 
-    /// The shift (in pixels) to the best source for what `m` covers within `box`, looked for on a coarser grid
-    /// (the brush about 12 cells across): its rim matching the stroke's (texture and tone), its inside clean (no
-    /// spots or lines), and near. nil when none fits in the picture.
+    /// The brush's radius in the cells of the grid the source is looked for on, whatever the picture's size: the
+    /// preview at any zoom and the export (each its own resolution) see the same grid, so they pick the same source.
+    static let searchRadius = 12.0
+
+    /// The shift (in pixels) to the best source for what `m` covers within `box`, looked for on a grid where the
+    /// brush is `searchRadius` cells: its rim matching the stroke's (texture and tone), its inside clean (no spots
+    /// or lines), and near. nil when none fits in the picture.
     static func findSource(_ px: [SIMD4<Float>], w: Int, h: Int, mask m: [Float], box: (Int, Int, Int, Int), r: Double) -> (Int, Int)? {
-        let k = max(1, Int(r / 12)), rc = r / Double(k)
+        // Pixels per cell (below one for a small brush: cells then repeat pixels).
+        let f = r / searchRadius, rc = searchRadius
         let ring = max(2, Int((rc * 0.35).rounded()))
-        let pad = Int(reach(r).rounded(.up)) + (ring + 1) * k
+        let pad = Int((reach(r) + Double(ring + 1) * f).rounded(.up))
         let x0 = max(0, box.0 - pad), y0 = max(0, box.2 - pad)
-        let cw = (min(w - 1, box.1 + pad) - x0 + 1) / k, ch = (min(h - 1, box.3 + pad) - y0 + 1) / k
+        let cw = Int(Double(min(w - 1, box.1 + pad) - x0 + 1) / f), ch = Int(Double(min(h - 1, box.3 + pad) - y0 + 1) / f)
         guard cw > 2, ch > 2 else { return nil }
         let n = cw * ch
-        // Coarse colour, and whether a cell is in the stroke.
+        // The pixels a cell covers, along one side.
+        func span(_ c: Int, _ origin: Int, _ limit: Int) -> Range<Int> {
+            let a = min(limit - 1, origin + Int(Double(c) * f)), b = min(limit, origin + Int(Double(c + 1) * f))
+            return a..<max(a + 1, b)
+        }
+        // Each cell's colour, and whether it is in the stroke.
         var col = [SIMD4<Float>](repeating: .zero, count: n), hole = [Bool](repeating: false, count: n)
-        let norm = 1 / Float(k * k)
         for cy in 0..<ch {
+            let ys = span(cy, y0, h)
             for cx in 0..<cw {
+                let xs = span(cx, x0, w)
                 var sum = SIMD4<Float>.zero, inside = false
-                for y in (y0 + cy * k)..<(y0 + cy * k + k) {
-                    for x in (x0 + cx * k)..<(x0 + cx * k + k) {
+                for y in ys {
+                    for x in xs {
                         sum += px[y * w + x]
                         if m[y * w + x] > 0 { inside = true }
                     }
                 }
-                col[cy * cw + cx] = sum * norm
+                col[cy * cw + cx] = sum / Float(ys.count * xs.count)
                 hole[cy * cw + cx] = inside
             }
         }
@@ -198,7 +209,7 @@ public enum Healing {
             bx0 = min(bx0, i % cw); bx1 = max(bx1, i % cw); by0 = min(by0, i / cw); by1 = max(by1, i / cw)
         }
         guard !holeCells.isEmpty, !rimCells.isEmpty else { return nil }
-        let reachC = Int((reach(r) / Double(k)).rounded())
+        let reachC = Int((reach(r) / f).rounded())
 
         func cost(_ ox: Int, _ oy: Int) -> Float? {
             guard bx0 + ox >= 0, bx1 + ox < cw, by0 + oy >= 0, by1 + oy < ch else { return nil }
@@ -235,7 +246,7 @@ public enum Healing {
                 if let c = cost(found.0 + dx, found.1 + dy), c < found.2 { found = (found.0 + dx, found.1 + dy, c) }
             }
         }
-        return (found.0 * k, found.1 * k)
+        return (Int((Double(found.0) * f).rounded()), Int((Double(found.1) * f).rounded()))
     }
 
     // MARK: - The blend
