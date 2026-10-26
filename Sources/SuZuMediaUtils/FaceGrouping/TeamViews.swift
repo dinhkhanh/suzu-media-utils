@@ -38,7 +38,7 @@ struct TeamBar: View {
                 Button("Show Team Sync Folder in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: team.folder) }
                 // The NAS got a new address or the share a new mount name: same team, new path.
                 Button("Locate Team Sync Folder…") {
-                    Panels.chooseFolder(prompt: "Use This Folder", start: URL(fileURLWithPath: team.folder).deletingLastPathComponent()) {
+                    Panels.chooseFolder(prompt: "Use This Folder", start: URL(fileURLWithPath: team.folder).deletingLastPathComponent(), key: "teamFolder") {
                         model.relocateTeam(team.id!, to: $0)
                     }
                 }
@@ -213,7 +213,7 @@ struct ShareTeamSheet: View {
                             Button("Choose…") {
                                 Panels.choose(folders: true, files: false, prompt: "Use This Folder",
                                               message: "Choose an empty folder on the NAS (or in Dropbox / iCloud Drive) that every Mac of the team can open.",
-                                              start: model.projectSources.first.map { URL(fileURLWithPath: $0.path).deletingLastPathComponent() }) { folder = $0.first }
+                                              start: model.projectSources.first.map { URL(fileURLWithPath: $0.path).deletingLastPathComponent() }, key: "teamFolder") { folder = $0.first }
                             }
                         }
                         Text(folder?.path ?? "An empty folder on the NAS, or in Dropbox / iCloud Drive").foregroundStyle(folder == nil ? .secondary : .primary)
@@ -261,7 +261,7 @@ struct JoinTeamSheet: View {
                 Spacer()
                 Button("Choose…") {
                     Panels.choose(folders: true, files: false, prompt: "Join", message: "Choose the team sync folder your teammate shared.",
-                                  start: model.projectSources.first.map { URL(fileURLWithPath: $0.path).deletingLastPathComponent() }) { urls in
+                                  start: model.projectSources.first.map { URL(fileURLWithPath: $0.path).deletingLastPathComponent() }, key: "teamFolder") { urls in
                         guard let u = urls.first else { return }
                         folder = u
                         info = TeamSync.readInfo(u)

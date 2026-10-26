@@ -144,42 +144,55 @@ public enum EditPipeline {
     }
 
     /// As above with the auto tone's dials already measured (`autoAdjustments`), so a caller can show them.
-    public static func tone(_ image: CIImage, _ recipe: EditRecipe, auto: Adjustments?) -> CIImage {
+    /// `levelled`: the image is already levelled by these degrees from a picture of this size (the editor's preview
+    /// levels before toning), for the strokes painted on the masks to land where they were painted.
+    public static func tone(_ image: CIImage, _ recipe: EditRecipe, auto: Adjustments?, levelled: (degrees: Double, size: CGSize)? = nil) -> CIImage {
         let look = recipe.look.composed(over: auto)
         var out = look.changesPixels ? adjust(image, look) : image
         // The people's parts are found on the photo before toning (so moving a dial doesn't look for them again).
-        if let r = recipe.retouch, r.isActive, let parts = BodyParts.find(in: image) { out = retouch(out, r, parts: parts) }
+        if let r = recipe.retouch, r.isActive, let parts = BodyParts.find(in: image) {
+            out = retouch(out, r, parts: parts, brush: placedBrush(recipe, levelled: levelled))
+        }
         return out
+    }
+
+    /// The recipe's strokes, placed in the picture its masks are found on.
+    public static func placedBrush(_ recipe: EditRecipe, levelled: (degrees: Double, size: CGSize)? = nil) -> [Retouch.Part: [MaskStroke]] {
+        (recipe.brush ?? [:]).mapValues { MaskBrush.place($0, look: recipe.look, levelled: levelled?.degrees, size: levelled?.size ?? .zero) }
     }
 
     // MARK: - Retouch
 
     /// Skin smoothed, brightened and made fairer where face skin (and body skin) is, then each part's own dials
     /// where it is.
-    public static func retouch(_ image: CIImage, _ r: Retouch, parts: BodyParts) -> CIImage {
+    /// `brush`: strokes painted by hand on the parts' masks, placed in this image.
+    public static func retouch(_ image: CIImage, _ r: Retouch, parts: BodyParts, brush: [Retouch.Part: [MaskStroke]] = [:]) -> CIImage {
         let ext = image.extent
         let short = min(ext.width, ext.height)
         var out = image
         if r.retouchesSkin {
-            var skin = parts.mask(.faceSkin, extent: ext)
-            if r.bodyToo {
-                skin = skin.applyingFilter("CIMaximumCompositing", parameters: [kCIInputBackgroundImageKey: parts.mask(.bodySkin, extent: ext)])
-            }
-            skin = shape(skin, PartLook(), short: short, extent: ext)
+            let skin = partMask(.skin, r, parts: parts, extent: ext, brush: brush[.skin] ?? [])
             out = beautify(out, r, short: short).applyingFilter("CIBlendWithMask", parameters: [
                 kCIInputBackgroundImageKey: out, kCIInputMaskImageKey: skin])
         }
         for (part, look) in r.parts.sorted(by: { $0.key.rawValue < $1.key.rawValue }) where look.changesPixels {
-            let mask = shape(parts.mask(part.kind, extent: ext), look, short: short, extent: ext)
+            let mask = partMask(part, r, parts: parts, extent: ext, brush: brush[part] ?? [])
             out = adjust(out, part: look).applyingFilter("CIBlendWithMask", parameters: [
                 kCIInputBackgroundImageKey: out, kCIInputMaskImageKey: mask])
         }
         return out.cropped(to: ext)
     }
 
-    /// A part's mask over a photo of this extent, shaped by its dials: what Show Mask draws.
-    public static func partMask(_ part: Retouch.Part, _ r: Retouch?, parts: BodyParts, extent: CGRect) -> CIImage {
-        shape(parts.mask(part.kind, extent: extent), r?.look(part) ?? PartLook(), short: min(extent.width, extent.height), extent: extent)
+    /// A part's mask over a photo of this extent, shaped by its dials, then the strokes painted on it by hand (placed
+    /// in this image): what the part's dials change, and what Show Mask draws.
+    /// The skin retouch's mask is face skin, with body skin too when `bodyToo`.
+    public static func partMask(_ part: Retouch.Part, _ r: Retouch?, parts: BodyParts, extent: CGRect, brush: [MaskStroke] = []) -> CIImage {
+        var found = parts.mask(part.kind, extent: extent)
+        if part == .skin, r?.bodyToo ?? true {
+            found = found.applyingFilter("CIMaximumCompositing", parameters: [kCIInputBackgroundImageKey: parts.mask(.bodySkin, extent: extent)])
+        }
+        let shaped = shape(found, r?.look(part) ?? PartLook(), short: min(extent.width, extent.height), extent: extent)
+        return MaskBrush.apply(brush, to: shaped, extent: extent)
     }
 
     /// A mask grown or shrunk, then its edge softened, by the part's dials (sized on the photo's short side).
@@ -202,17 +215,18 @@ public enum EditPipeline {
             let k = r.smooth * 0.9
             // out = image − k·fine + k·coarse: the band between the two blurs (blemishes, uneven tone) goes, the finer
             // texture and the broad shading stay. Core Image works in floating point, so the negative layer adds up
-            // exactly; alpha is left out of both layers.
+            // exactly. The layers keep their alpha (Core Image premultiplies by it: at 0 they would add nothing), and
+            // the sum's alpha is set back to one.
             func scaled(_ img: CIImage, _ f: Double) -> CIImage {
                 img.applyingFilter("CIColorMatrix", parameters: ["inputRVector": CIVector(x: f, y: 0, z: 0, w: 0),
                                                                  "inputGVector": CIVector(x: 0, y: f, z: 0, w: 0),
-                                                                 "inputBVector": CIVector(x: 0, y: 0, z: f, w: 0),
-                                                                 "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0)])
+                                                                 "inputBVector": CIVector(x: 0, y: 0, z: f, w: 0)])
             }
             let fine = scaled(base.applyingGaussianBlur(sigma: Double(short) * 0.0012), -k)
             let coarse = scaled(base.applyingGaussianBlur(sigma: Double(short) * 0.01), k)
             out = fine.applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: out])
-            out = coarse.applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: out]).cropped(to: image.extent)
+            out = coarse.applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: out])
+            out = out.settingAlphaOne(in: image.extent).cropped(to: image.extent)
         }
         if r.brighten > 0 { out = out.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: r.brighten * 0.6]) }
         if r.whiten > 0 {
@@ -717,7 +731,7 @@ extension Retouch.Part {
     /// The mask this part is drawn with.
     public var kind: BodyParts.Kind {
         switch self {
-        case .faceSkin: .faceSkin
+        case .faceSkin, .skin: .faceSkin
         case .bodySkin: .bodySkin
         case .lips: .lips
         case .clothes: .clothes

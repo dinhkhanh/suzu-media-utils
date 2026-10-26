@@ -140,7 +140,7 @@ struct EditControls: View {
                 }
             }
             if sections.contains(.retouch) {
-                InspectorSection(title: "Retouch") { RetouchControls(retouch: $recipe.retouch) }
+                InspectorSection(title: "Retouch") { RetouchControls(retouch: $recipe.retouch, photo: photo) }
             }
             if sections.contains(.crop) {
                 InspectorSection(title: "Crop") { AspectChooser(recipe: $recipe) }
@@ -705,9 +705,13 @@ struct FontPicker: View, Equatable {
 /// shape. The parts are found by the app in every photo; Show Mask tints the chosen one red on the preview.
 struct RetouchControls: View {
     @Binding var retouch: Retouch?
+    /// The photo in the preview, whose masks the brush paints; nil where the preview can't be painted on.
+    var photo: URL? = nil
     @State private var part = Retouch.Part.faceSkin
     @ObservedObject private var overlay = MaskOverlay.shared
     @ObservedObject private var model = BodyPartsModel.shared
+    /// Bumped when a photo's own edits change, for the strokes' count.
+    @State private var placements = 0
 
     /// Nothing set is no retouch at all (nothing to find in the photos).
     var r: Binding<Retouch> {
@@ -731,19 +735,14 @@ struct RetouchControls: View {
             AdjustSlider("Whiten skin", value: r.whiten, range: 0...1, help: "Fairer skin: less yellow, a touch rosier and lighter")
             Toggle("Body skin too", isOn: r.bodyToo)
                 .help("Smooth, brighten and whiten arms, legs and shoulders as well as faces")
+            maskTools(.skin)
             Divider().padding(.vertical, 2)
-            HStack {
-                Text("Masks").font(.callout.weight(.medium))
-                Spacer()
-                Toggle("Show mask", isOn: Binding(get: { overlay.part == part }, set: { overlay.part = $0 ? part : nil }))
-                    .toggleStyle(.checkbox)
-                    .help("Tint the chosen part red on the preview, to see what the dials below change")
-            }
+            Text("Masks").font(.callout.weight(.medium))
             Picker("", selection: $part) {
-                ForEach(Retouch.Part.allCases) { Text($0.label).tag($0) }
+                ForEach(Retouch.Part.dialled) { Text($0.label).tag($0) }
             }
             .pickerStyle(.segmented).labelsHidden()
-            .onChange(of: part) { if overlay.part != nil { overlay.part = part } }
+            .onChange(of: part) { if let shown = overlay.part, shown != .skin { overlay.part = part } }
             AdjustSlider("Exposure", value: look.exposure, range: -2...2, unit: " EV")
             AdjustSlider("Contrast", value: look.contrast)
             AdjustSlider("Saturation", value: look.saturation)
@@ -755,8 +754,56 @@ struct RetouchControls: View {
             if r.wrappedValue.look(part) != PartLook() {
                 Button("Reset \(part.label)") { look.wrappedValue = PartLook() }.controlSize(.small)
             }
+            maskTools(part)
         }
         .onDisappear { overlay.part = nil }
+        .onReceive(NotificationCenter.default.publisher(for: CropPlacements.changed)) { _ in placements += 1 }
+    }
+
+    /// A mask's tools: shown tinted red on the preview, and painted by hand on the shown photo (added to where the
+    /// app missed some of it, erased where it took in too much). Each mask keeps its own strokes, the photo's own.
+    func maskTools(_ part: Retouch.Part) -> some View {
+        let name = part == .skin ? "skin retouch" : part.label.lowercased()
+        let strokes = photo.map { CropPlacements.shared.strokes(part, for: $0).count } ?? 0
+        let painting = overlay.brushing && overlay.part == part
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Toggle("Show mask", isOn: Binding(get: { overlay.part == part }, set: { overlay.part = $0 ? part : nil }))
+                    .toggleStyle(.checkbox)
+                    .help("Tint the \(name) mask red on the preview, to see where \(part == .skin ? "the skin retouch goes" : "the dials change the photo")")
+                if photo != nil {
+                    Toggle("Paint", isOn: Binding(get: { painting }, set: { on in
+                        if on { overlay.part = part }
+                        overlay.brushing = on
+                    }))
+                    .toggleStyle(.checkbox)
+                    .help("Drag on the preview to paint the \(name) mask of this photo; ⌥-drag does the opposite, [ and ] change the size")
+                }
+                Spacer()
+                if let photo, strokes > 0 {
+                    Text("\(strokes) stroke\(strokes == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary)
+                    Button("Clear") { CropPlacements.shared.clearStrokes(part, for: photo) }.controlSize(.small)
+                        .help("The \(name) mask of this photo as the app finds it, without the strokes painted on it")
+                }
+            }
+            .id(placements)
+            if painting {
+                HStack {
+                    Text("Brush").frame(width: 84, alignment: .leading)
+                    Picker("", selection: $overlay.erase) {
+                        Label("Add", systemImage: "plus").tag(false)
+                        Label("Erase", systemImage: "minus").tag(true)
+                    }
+                    .pickerStyle(.segmented).labelsHidden()
+                }
+                PercentSlider(label: "Brush size", value: $overlay.size, range: MaskOverlay.sizes)
+                    .help("The brush's radius, as a share of the photo's short side ([ and ] on the preview)")
+                PercentSlider(label: "Brush edge", value: $overlay.softness, range: 0...1)
+                    .help("0%: a hard edge; higher, the stroke fades out further from its middle")
+                Text("Strokes are this photo's own; the other photos keep their masks as found.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     /// Until the body-parts model is downloaded, macOS finds the parts (rougher masks).

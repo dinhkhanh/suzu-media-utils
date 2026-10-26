@@ -188,53 +188,31 @@ struct BatchExportTool: View {
         }
     }
 
-    /// Finds the similar and blurry shots and unticks them; turning the options off ticks them back. The library's
-    /// measurements are used for photos it has processed; the others are read here (faces take ~¼ s each).
+    /// Finds the similar and blurry shots and unticks them; turning the options off ticks them back and stops a check
+    /// under way at once. The library's measurements are used for photos it has processed; the others are read here
+    /// (faces take ~¼ s each), on threads of their own (see ShotCheck), so the preview keeps up with the edits.
     func check() async {
         excluded.subtract(culled.keys)
         culled = [:]
         let similar = skipSimilar && !fromPeople, blurry = skipBlurry
         guard similar || blurry, !items.isEmpty else { checking = nil; return }
-        let items = items, store = ToolWork.faces?.store, workers = ToolWork.parallelism
+        let items = items
         checking = (0, items.count)
-        let known = await Task.detached(priority: .userInitiated) { (try? store.map { try Selection.measures($0, urls: items.map(\.url)) }) ?? [:] }.value
-        guard !Task.isCancelled else { return }
-        var measures: [Int: ShotCuller.Measure] = [:]
-        await withTaskGroup(of: (Int, ShotCuller.Measure).self) { group in
-            var next = 0
-            func add() {
-                guard next < items.count, !Task.isCancelled else { return }
-                let i = next, url = items[i].url, have = known[url]; next += 1
-                group.addTask(priority: .userInitiated) {
-                    // A processed photo without a usable face needs the frame's blur; one from before the idle pass
-                    // needs its feature print. Both come from the thumbnail, which is quick.
-                    var m = have ?? ShotCuller.Measure(url: url)
-                    let needPrint = similar && m.featurePrint == nil, needBlur = blurry && m.faceSharpness == nil && m.blur == nil
-                    if have == nil || needPrint || needBlur {
-                        let fresh = ShotCuller.measure(url, faces: blurry && have == nil)
-                        if have == nil { m = fresh } else {
-                            if needPrint { m.featurePrint = fresh.featurePrint }
-                            if needBlur { m.blur = fresh.blur }
-                            if m.takenAt == nil { m.takenAt = fresh.takenAt }
-                        }
-                    }
-                    return (i, m)
-                }
-            }
-            for _ in 0..<workers { add() }
-            for await (i, m) in group {
-                measures[i] = m
-                checking = (measures.count, items.count)
-                add()
+        var result: [Int: ShotCuller.Reason]?
+        let events = ShotCheck.run(items.map(\.url), similar: similar, blurry: blurry, store: ToolWork.faces?.store,
+                                   workers: max(1, ToolWork.parallelism - 1))
+        for await event in events {
+            switch event {
+            case .progress(let n): checking = (n, items.count)
+            case .done(let r): result = r
             }
         }
-        guard !Task.isCancelled, measures.count == items.count else { checking = nil; return }
-        let shots = items.indices.map { measures[$0]! }
-        let result = await Task.detached(priority: .userInitiated) { ShotCuller.cull(shots, similar: similar, blurry: blurry) }.value
+        // Stopped (an option turned off, the photos changed): the check that replaced this one has the state.
         guard !Task.isCancelled else { return }
+        checking = nil
+        guard let result else { return }
         culled = Dictionary(result.map { (items[$0.key], $0.value) }, uniquingKeysWith: { a, _ in a })
         excluded.formUnion(culled.keys)
-        checking = nil
     }
 
     /// Where a photo goes: its person's folder or the output folder.
@@ -323,6 +301,80 @@ struct BatchExportTool: View {
             ExportHistory.shared.save()
             await MainActor.run { running = false; finished = true; ToolWork.end() }
         }
+    }
+}
+
+/// The check for similar and blurry shots, run on threads of its own at utility priority. Reading a photo (decode,
+/// faces, feature print) blocks its thread, so on the threads Swift's tasks share a large check would leave none for
+/// the preview's renders. Stopping it (the stream's consumer going away) lets go at once: the photos being read
+/// finish in the background, unused, and no more are started.
+final class ShotCheck: @unchecked Sendable {
+    enum Event: Sendable {
+        /// Photos measured so far.
+        case progress(Int)
+        /// The shots to skip, by index.
+        case done([Int: ShotCuller.Reason])
+    }
+
+    private let lock = NSLock()
+    private var stopped = false
+    private var next = 0
+    private var measured = 0
+
+    var isStopped: Bool { lock.withLock { stopped } }
+    func stop() { lock.withLock { stopped = true } }
+
+    static func run(_ urls: [URL], similar: Bool, blurry: Bool, store: LibraryStore?, workers: Int) -> AsyncStream<Event> {
+        // Only the latest count matters; `done` comes last, so it is never dropped.
+        AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let check = ShotCheck()
+            continuation.onTermination = { _ in check.stop() }
+            DispatchQueue.global(qos: .utility).async {
+                if let result = check.work(urls, similar: similar, blurry: blurry, store: store, workers: workers, progress: { continuation.yield(.progress($0)) }) {
+                    continuation.yield(.done(result))
+                }
+                continuation.finish()
+            }
+        }
+    }
+
+    /// nil when stopped.
+    private func work(_ urls: [URL], similar: Bool, blurry: Bool, store: LibraryStore?, workers: Int,
+                      progress: (Int) -> Void) -> [Int: ShotCuller.Reason]? {
+        let known = (try? store.map { try Selection.measures($0, urls: urls) }) ?? [:]
+        guard !isStopped else { return nil }
+        var measures = [ShotCuller.Measure?](repeating: nil, count: urls.count)
+        DispatchQueue.concurrentPerform(iterations: max(1, min(workers, urls.count))) { _ in
+            while true {
+                let i: Int? = lock.withLock {
+                    guard !stopped, next < urls.count else { return nil }
+                    next += 1
+                    return next - 1
+                }
+                guard let i else { return }
+                let m = Self.measure(urls[i], have: known[urls[i]], similar: similar, blurry: blurry)
+                let n = lock.withLock { measures[i] = m; measured += 1; return measured }
+                progress(n)
+            }
+        }
+        guard !isStopped else { return nil }
+        let result = ShotCuller.cull(measures.map { $0! }, similar: similar, blurry: blurry)
+        return isStopped ? nil : result
+    }
+
+    /// The library's measure, completed from the photo where it lacks something; or the photo read here.
+    static func measure(_ url: URL, have: ShotCuller.Measure?, similar: Bool, blurry: Bool) -> ShotCuller.Measure {
+        // A processed photo without a usable face needs the frame's blur; one from before the idle pass needs its
+        // feature print. Both come from the thumbnail, which is quick.
+        var m = have ?? ShotCuller.Measure(url: url)
+        let needPrint = similar && m.featurePrint == nil, needBlur = blurry && m.faceSharpness == nil && m.blur == nil
+        guard have == nil || needPrint || needBlur else { return m }
+        let fresh = ShotCuller.measure(url, faces: blurry && have == nil)
+        guard have != nil else { return fresh }
+        if needPrint { m.featurePrint = fresh.featurePrint }
+        if needBlur { m.blur = fresh.blur }
+        if m.takenAt == nil { m.takenAt = fresh.takenAt }
+        return m
     }
 }
 

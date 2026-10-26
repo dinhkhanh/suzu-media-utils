@@ -403,7 +403,7 @@ struct RuleSheet: View {
                 HStack {
                     Text(folder?.path ?? "No folder chosen").foregroundStyle(folder == nil ? .secondary : .primary).lineLimit(1).truncationMode(.middle)
                     Spacer()
-                    Button("Choose…") { Panels.chooseFolder { folder = $0 } }
+                    Button("Choose…") { Panels.chooseFolder(key: "searchExport") { folder = $0 } }
                 }
                 .padding(.leading, 20)
                 Picker("", selection: $layout) {

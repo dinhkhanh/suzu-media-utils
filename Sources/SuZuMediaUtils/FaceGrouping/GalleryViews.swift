@@ -95,7 +95,7 @@ struct GalleryExportSheet: View {
     }
 
     func choose() {
-        Panels.chooseFolder { folder = $0 }
+        Panels.chooseFolder(key: "gallery") { folder = $0 }
     }
 
     func run() {

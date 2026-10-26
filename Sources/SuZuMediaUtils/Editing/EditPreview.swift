@@ -143,10 +143,13 @@ final class PreviewCache: @unchecked Sendable {
         let auto = r.autoTone ? EditPipeline.autoAdjustments(level, strength: r.autoToneStrength) : nil
         let autoKey = item.url.path
         Task { @MainActor in AutoToneValues.shared.set(auto, for: autoKey) }
-        var toned = EditPipeline.tone(level, r, auto: auto)
-        // Show Mask: the part's mask, shaped by its dials, tinted red over the photo.
+        // The masks are found on the levelled photo here; the strokes painted on them are placed to match.
+        let levelled = angle.map { (degrees: $0, size: oriented.extent.size) }
+        var toned = EditPipeline.tone(level, r, auto: auto, levelled: levelled)
+        // Show Mask: the part's mask, shaped by its dials and painted by hand, tinted red over the photo.
         if let part = showMask, let parts = BodyParts.find(in: level) {
-            let mask = EditPipeline.partMask(part, r.retouch, parts: parts, extent: level.extent)
+            let brush = EditPipeline.placedBrush(r, levelled: levelled)[part] ?? []
+            let mask = EditPipeline.partMask(part, r.retouch, parts: parts, extent: level.extent, brush: brush)
             let red = CIImage(color: CIColor(red: 1, green: 0.1, blue: 0.2, alpha: 0.6)).cropped(to: level.extent)
             toned = red.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: toned, kCIInputMaskImageKey: mask])
         }
@@ -155,6 +158,7 @@ final class PreviewCache: @unchecked Sendable {
         r.autoTone = false
         r.adjustments = nil
         r.retouch = nil
+        r.brush = nil
         var crop: CGRect?, focus: FocusHint?
         let size = level.extent.size
         if let ratio = EditPipeline.cropRatio(r, size: size, focus: FocusHint(primary: nil, zoom: zoom, rect: rect)) {
@@ -225,7 +229,20 @@ enum CropAspect: Hashable {
 @MainActor
 final class MaskOverlay: ObservableObject {
     static let shared = MaskOverlay()
-    @Published var part: Retouch.Part?
+    @Published var part: Retouch.Part? { didSet { if part == nil { brushing = false } } }
+    /// Dragging on the preview paints the shown part's mask of that photo (adds to it, or erases).
+    @Published var brushing = false
+    @Published var erase = false
+    /// The brush's radius, as a share of the photo's short side.
+    @Published var size = MaskOverlay.stored("maskBrush.size", 0.04) { didSet { UserDefaults.standard.set(size, forKey: "maskBrush.size") } }
+    /// The brush's edge: 0 hard, 1 fading out from the centre.
+    @Published var softness = MaskOverlay.stored("maskBrush.softness", 0.5) { didSet { UserDefaults.standard.set(softness, forKey: "maskBrush.softness") } }
+    static let sizes: ClosedRange<Double> = 0.005...0.25
+
+    static func stored(_ key: String, _ fallback: Double) -> Double { UserDefaults.standard.object(forKey: key) as? Double ?? fallback }
+
+    /// [ and ] make the brush smaller or bigger.
+    func resize(_ by: Int) { size = min(Self.sizes.upperBound, max(Self.sizes.lowerBound, size * (by > 0 ? 1.25 : 0.8))) }
 }
 
 struct EditPreview: View {
@@ -291,6 +308,20 @@ struct EditPreview: View {
     /// The crop zoom slider in progress.
     @State private var liveZoom: Double?
 
+    // The mask brush.
+    /// Strokes drawn on screen: the one being painted, and those painted but not yet in a render.
+    @State private var liveStrokes: [LiveStroke] = []
+    /// Where the brush is over the photo, for its outline.
+    @State private var brushAt: CGPoint?
+
+    struct LiveStroke {
+        var points: [CGPoint]
+        var erase: Bool
+        /// Points on screen.
+        var radius: CGFloat
+        var done = false
+    }
+
     enum CropDrag { case move, handle(Handle), rotate(Double), line }
     enum Handle: CaseIterable { case topLeft, top, topRight, left, right, bottomLeft, bottom, bottomRight }
 
@@ -326,8 +357,14 @@ struct EditPreview: View {
             return .handled
         }
         .onKeyPress(.escape) {
+            if brushActive { maskOverlay.brushing = false; return .handled }
             guard cropping else { return .ignored }
             cancelCrop()
+            return .handled
+        }
+        .onKeyPress(characters: .init(charactersIn: "[]")) { press in
+            guard brushActive, !press.modifiers.contains(.command) else { return .ignored }
+            maskOverlay.resize(press.characters == "]" ? 1 : -1)
             return .handled
         }
         .onKeyPress(characters: .init(charactersIn: "cC")) { _ in
@@ -350,7 +387,7 @@ struct EditPreview: View {
         .onAppear { if samples.count > 1 { focused = true } }
         .onChange(of: samples.count) { if index >= samples.count { index = 0 } }
         .onChange(of: samples.count > 1) { if samples.count > 1, ProcessInfo.processInfo.environment["SUZU_TOOL_SAMPLES"] == "grid" { gridMode = true } }
-        .onChange(of: current?.url, initial: true) { shown?.wrappedValue = current?.url; if cropping { cancelCrop() }; setZoom(nil) }
+        .onChange(of: current?.url, initial: true) { shown?.wrappedValue = current?.url; if cropping { cancelCrop() }; setZoom(nil); liveStrokes = [] }
         .task(id: "\(recipe.hashValue)|\(current?.url.path ?? "")|\(showOriginal)|\(placements)|\(renderLongSide)|\(perPhotoCrop)|\(maskOverlay.part?.rawValue ?? "")|\(bodyParts.state == .ready)") { await render() }
         .task(id: "\(current?.url.path ?? "")|\(exports)") {
             guard let url = current?.url else { lastExport = nil; return }
@@ -505,6 +542,7 @@ struct EditPreview: View {
                 .gesture(panOrPlaceGesture(r, in: size).simultaneously(with: viewZoomGesture))
                 .simultaneousGesture(TapGesture(count: 2).onEnded { setZoom(zoom == nil ? 1 : nil) })
                 .simultaneousGesture(SpatialTapGesture().onEnded { v in placeWatermark(at: v.location, photo: CGRect(x: (size.width - w) / 2 + pan.width, y: (size.height - h) / 2 + pan.height, width: w, height: h)) })
+            if brushActive { brushLayer(r, photo: CGRect(x: (size.width - w) / 2 + pan.width, y: (size.height - h) / 2 + pan.height, width: w, height: h)) }
         }
         .frame(width: size.width, height: size.height)
         .onHover { hovering = $0 }
@@ -584,10 +622,105 @@ struct EditPreview: View {
     }
 
     var help: String {
+        if brushActive { return "Drag to paint the mask (⌥-drag does the opposite), [ and ] change the brush size, Space-drag pans, Esc stops painting" }
         var parts = ["Scroll or Space-drag to pan, ⌥-scroll or pinch to zoom, double-click for 100%"]
         if canCrop { parts.append(rendered?.crop == nil ? "C for the crop tool" : "drag the photo to move its crop, C for the crop tool") }
         if clickPlacesWatermark { parts.append("click where the watermark should go") }
         return parts.joined(separator: "; ")
+    }
+
+    // MARK: - Mask brush
+
+    /// Dragging paints the shown part's mask of this photo (the retouch panel's Paint mask).
+    var brushActive: Bool {
+        maskOverlay.brushing && maskOverlay.part != nil && perPhotoCrop && !showOriginal && !cropping && box == nil && current != nil && !showGrid
+    }
+
+    /// The brush's radius on screen: its share of the photo's short side, at the zoom shown (`photo` is where the
+    /// output sits in the view; the output is the crop of the levelled photo).
+    func brushRadius(_ r: PreviewCache.Rendered, photo: CGRect) -> CGFloat {
+        guard r.fullSize.width > 0 else { return 10 }
+        let pointsPerPixel = photo.width / ((r.crop?.width ?? 1) * r.fullSize.width)
+        return max(1, CGFloat(maskOverlay.size) * min(r.pixelSize.width, r.pixelSize.height) * pointsPerPixel)
+    }
+
+    /// The strokes being painted, and the brush's outline under the cursor.
+    func brushLayer(_ r: PreviewCache.Rendered, photo: CGRect) -> some View {
+        let radius = brushRadius(r, photo: photo)
+        return ZStack(alignment: .topLeading) {
+            Color.clear.contentShape(Rectangle())
+                .gesture(brushGesture(r, photo: photo, radius: radius))
+                .onContinuousHover { phase in
+                    if case .active(let p) = phase { brushAt = p } else { brushAt = nil }
+                }
+            ForEach(liveStrokes.indices, id: \.self) { i in
+                let st = liveStrokes[i], colour = st.erase ? Color.black.opacity(0.5) : Color.red.opacity(0.55)
+                if st.points.count == 1 {
+                    Circle().fill(colour).frame(width: st.radius * 2, height: st.radius * 2).position(st.points[0])
+                } else {
+                    Path { $0.addLines(st.points) }
+                        .stroke(colour, style: StrokeStyle(lineWidth: st.radius * 2, lineCap: .round, lineJoin: .round))
+                }
+            }
+            .allowsHitTesting(false)
+            if let p = brushAt, !spaceDown {
+                ZStack {
+                    Circle().stroke(.black.opacity(0.6), lineWidth: 3)
+                    Circle().stroke(.white, lineWidth: 1)
+                    if maskOverlay.softness > 0.05 {
+                        Circle().stroke(.white.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                            .padding(radius * CGFloat(min(1, maskOverlay.softness)))
+                    }
+                }
+                .frame(width: radius * 2, height: radius * 2)
+                .position(p)
+                .allowsHitTesting(false)
+            }
+        }
+    }
+
+    /// Drags paint (⌥ the other way from the panel's + / −); with Space held they pan.
+    func brushGesture(_ r: PreviewCache.Rendered, photo: CGRect, radius: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { v in
+                brushAt = v.location
+                if spaceDown || panStart != nil {
+                    panned = true
+                    if panStart == nil { panStart = pan }
+                    pan = clampedPan(CGSize(width: panStart!.width + v.translation.width, height: panStart!.height + v.translation.height))
+                    return
+                }
+                if let last = liveStrokes.last, !last.done {
+                    // A point every few pixels is plenty.
+                    if hypot(v.location.x - last.points.last!.x, v.location.y - last.points.last!.y) >= max(1, radius * 0.15) {
+                        liveStrokes[liveStrokes.count - 1].points.append(v.location)
+                    }
+                } else {
+                    let erase = maskOverlay.erase != NSEvent.modifierFlags.contains(.option)
+                    liveStrokes.append(LiveStroke(points: [v.location], erase: erase, radius: radius))
+                }
+            }
+            .onEnded { _ in
+                if panStart != nil { panStart = nil; DispatchQueue.main.async { panned = false }; return }
+                guard let i = liveStrokes.indices.last, !liveStrokes[i].done else { return }
+                liveStrokes[i].done = true
+                commit(liveStrokes[i], r, photo: photo)
+            }
+    }
+
+    /// Saves a stroke painted on screen with the photo's own edits, in the photo as shot.
+    func commit(_ stroke: LiveStroke, _ r: PreviewCache.Rendered, photo: CGRect) {
+        guard let url = current?.url, let part = maskOverlay.part, photo.width > 0, photo.height > 0 else { return }
+        let crop = r.crop ?? CGRect(x: 0, y: 0, width: 1, height: 1)
+        let look = CropPlacements.shared.recipe(recipe, for: url).look
+        let points = stroke.points.map { v -> CGPoint in
+            // Screen → the output → the levelled photo → the photo as shot.
+            let o = CGPoint(x: (v.x - photo.minX) / photo.width, y: (v.y - photo.minY) / photo.height)
+            let q = CGPoint(x: crop.minX + o.x * crop.width, y: crop.minY + o.y * crop.height)
+            return MaskBrush.unplace(q, look: look, levelled: r.angle, size: r.pixelSize)
+        }
+        CropPlacements.shared.add(MaskStroke(points: points, radius: maskOverlay.size, softness: maskOverlay.softness, erase: stroke.erase),
+                                  to: part, for: url)
     }
 
     // MARK: - Crop tool
@@ -1097,12 +1230,15 @@ struct EditPreview: View {
         guard !Task.isCancelled else { return }
         rendering = true
         let recipe = recipe, original = showOriginal, long = renderLongSide, withFull = perPhotoCrop, mask = maskOverlay.part
+        // Strokes painted by now are in this render; on screen until it lands.
+        let landed = liveStrokes.prefix { $0.done }.count
         let result = await Task.detached(priority: .userInitiated) {
             PreviewCache.shared.render(item, recipe: recipe, original: original, longSide: long, withFull: withFull, showMask: mask)
         }.value
         guard !Task.isCancelled else { return }
         rendering = false
         if let result { rendered = result }
+        liveStrokes.removeFirst(min(landed, liveStrokes.prefix { $0.done }.count))
         if !cropping { box = nil; liveAngle = liveZoom == nil ? nil : liveAngle }
         pan = clampedPan(pan)
     }

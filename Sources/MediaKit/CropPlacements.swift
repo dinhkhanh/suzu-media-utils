@@ -30,7 +30,9 @@ public final class CropPlacements: @unchecked Sendable {
         public var rect: CGRect?
         /// This photo's own light, colour, detail and orientation, instead of the export's.
         public var adjustments: Adjustments?
-        public var isEmpty: Bool { center == nil && shape == nil && rotation == nil && zoom == nil && rect == nil && adjustments == nil }
+        /// Strokes painted by hand on this photo's masks, each part's own.
+        public var masks: [Retouch.Part: [MaskStroke]]?
+        public var isEmpty: Bool { center == nil && shape == nil && rotation == nil && zoom == nil && rect == nil && adjustments == nil && masks == nil }
         /// Something about the crop was set by hand.
         public var cropEdited: Bool { center != nil || zoom != nil || rect != nil }
     }
@@ -74,6 +76,7 @@ public final class CropPlacements: @unchecked Sendable {
     public func zoom(for url: URL) -> Double? { edit(for: url)?.zoom }
     public func rect(for url: URL) -> CGRect? { edit(for: url)?.rect }
     public func adjustments(for url: URL) -> Adjustments? { edit(for: url)?.adjustments }
+    public func strokes(_ part: Retouch.Part, for url: URL) -> [MaskStroke] { edit(for: url)?.masks?[part] ?? [] }
 
     /// nil goes back to the automatic placement.
     public func set(_ center: CGPoint?, for url: URL) { update(url) { $0.center = center } }
@@ -85,6 +88,14 @@ public final class CropPlacements: @unchecked Sendable {
     public func set(rect: CGRect?, for url: URL) { update(url) { $0.rect = rect; if rect != nil { $0.zoom = nil; $0.center = nil } } }
     /// This photo's own adjustments; nil goes back to the export's.
     public func set(adjustments: Adjustments?, for url: URL) { update(url) { $0.adjustments = adjustments.flatMap { $0.isEmpty ? nil : $0 } } }
+    /// A stroke painted on a part's mask of this photo.
+    public func add(_ stroke: MaskStroke, to part: Retouch.Part, for url: URL) {
+        update(url) { e in var m = e.masks ?? [:]; m[part, default: []].append(stroke); e.masks = m }
+    }
+    /// The part's mask as found again, without the strokes painted on it.
+    public func clearStrokes(_ part: Retouch.Part, for url: URL) {
+        update(url) { e in e.masks?[part] = nil; if e.masks?.isEmpty == true { e.masks = nil } }
+    }
     /// Back to the automatic crop: placement, zoom and any crop drawn by hand (the shape and turn stay).
     public func resetPlacement(for url: URL) { update(url) { $0.center = nil; $0.zoom = nil; $0.rect = nil } }
 
@@ -138,6 +149,7 @@ public final class CropPlacements: @unchecked Sendable {
         }
         if let turn = e.rotation { r.rotation = turn }
         if let a = e.adjustments { r.look = a }
+        r.brush = e.masks
         return r
     }
 }

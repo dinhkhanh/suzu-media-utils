@@ -26,6 +26,9 @@ public struct EditRecipe: Codable, Sendable, Equatable, Hashable {
     /// Skin retouch and the people's parts (face skin, body skin, lips, clothes) found in each photo and adjusted on
     /// their own (see Retouch); nil is none.
     public var retouch: Retouch?
+    /// Strokes painted by hand on the parts' masks of one photo (see MaskStroke): filled in from the photo's own
+    /// edits (CropPlacements) when it is rendered, never set on a recipe shared by several photos.
+    public var brush: [Retouch.Part: [MaskStroke]]?
     /// Long side in pixels after cropping; nil keeps the size.
     public var maxLongSide: Int?
     public var jpegQuality = 0.9
@@ -72,6 +75,9 @@ public struct EditRecipe: Codable, Sendable, Equatable, Hashable {
 public struct Retouch: Codable, Sendable, Equatable, Hashable {
     public enum Part: String, Codable, CodingKeyRepresentable, Sendable, CaseIterable, Identifiable, Hashable {
         case faceSkin, bodySkin, lips, clothes
+        /// Where the skin retouch (smooth, brighten, whiten) goes: face skin, and body skin with `bodyToo`. It has
+        /// no dials of its own, only its mask (shown and painted like the parts').
+        case skin
         public var id: String { rawValue }
         public var label: String {
             switch self {
@@ -79,8 +85,11 @@ public struct Retouch: Codable, Sendable, Equatable, Hashable {
             case .bodySkin: "Body skin"
             case .lips: "Lips"
             case .clothes: "Clothes"
+            case .skin: "Skin retouch"
             }
         }
+        /// The parts with dials of their own.
+        public static let dialled: [Part] = [.faceSkin, .bodySkin, .lips, .clothes]
     }
 
     /// Skin smoothed (blemishes and texture softened, edges kept), 0…1.
@@ -213,10 +222,14 @@ public struct Adjustments: Codable, Sendable, Equatable, Hashable {
     }
     public static let straightCurve = [0.0, 0.25, 0.5, 0.75, 1.0]
     public var hasCurve: Bool { curve.map { $0.count == 5 && $0 != Adjustments.straightCurve } ?? false }
-    /// The curve's points, straight when none is set; setting the straight line clears it.
+    /// The curve's points, straight when none is set; setting the straight line (to within rounding, as a curve
+    /// unwound from itself comes back) clears it.
     public var tone: [Double] {
         get { curve?.count == 5 ? curve! : Adjustments.straightCurve }
-        set { curve = newValue.count == 5 && newValue != Adjustments.straightCurve ? newValue : nil }
+        set {
+            let straight = zip(newValue, Adjustments.straightCurve).allSatisfy { abs($0 - $1) < 1e-9 }
+            curve = newValue.count == 5 && !straight ? newValue : nil
+        }
     }
     public var colours: HSLAdjust {
         get { hsl ?? HSLAdjust() }

@@ -86,7 +86,7 @@ struct VideoExportSheet: View {
     }
 
     func choose() {
-        Panels.chooseFolder { folder = $0 }
+        Panels.chooseFolder(key: "videoExport") { folder = $0 }
     }
 
     func run() {

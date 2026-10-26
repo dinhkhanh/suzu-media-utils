@@ -242,7 +242,7 @@ struct ExportSheet: View {
     }
 
     func choose() {
-        Panels.chooseFolder { base = $0 }
+        Panels.chooseFolder(key: "peopleExport") { base = $0 }
     }
 
     /// Plans in the background after options settle: planning thousands of files must never freeze the dialog.

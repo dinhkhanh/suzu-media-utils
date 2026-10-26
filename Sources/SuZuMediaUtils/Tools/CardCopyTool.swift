@@ -203,7 +203,7 @@ struct DestinationBox: View {
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
             Spacer(minLength: 4)
-            Button(url == nil ? "Choose…" : "Change") { Panels.chooseFolder { url = $0 } }.controlSize(.small)
+            Button(url == nil ? "Choose…" : "Change") { Panels.chooseFolder(key: "cardCopy.destination") { url = $0 } }.controlSize(.small)
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 9).fill(Color.primary.opacity(0.05)))
@@ -423,7 +423,7 @@ struct CardRow: View {
         let own = model.ownDestination(card.id)
         return Menu {
             Button("The Destination Folder") { model.setOwnDestination(card.id, nil) }.disabled(own == nil)
-            Button("Another Folder for This Card…") { Panels.chooseFolder { model.setOwnDestination(card.id, $0) } }
+            Button("Another Folder for This Card…") { Panels.chooseFolder(key: "cardCopy.destination") { model.setOwnDestination(card.id, $0) } }
         } label: {
             Text(own == nil ? "Change…" : "Own folder: \(own!.lastPathComponent)").font(.caption)
         }

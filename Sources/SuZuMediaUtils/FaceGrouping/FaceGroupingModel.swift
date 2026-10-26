@@ -760,7 +760,7 @@ final class FaceGroupingModel: ObservableObject {
     /// The folder was renamed or moved in Finder: point the library at it again, keeping every face and name.
     func locateSource(_ id: Int64) {
         let start = sources.first { $0.id == id }.map { URL(fileURLWithPath: $0.path).deletingLastPathComponent() }
-        Panels.chooseFolder(prompt: "Use This Folder", start: start) { [weak self] url in
+        Panels.chooseFolder(prompt: "Use This Folder", start: start, key: "locateSource") { [weak self] url in
             self?.perform { try $0.relinkSource(id, to: url) }
         }
     }

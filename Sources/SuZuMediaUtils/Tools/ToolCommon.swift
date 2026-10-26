@@ -340,7 +340,7 @@ struct FolderField: View {
             Text(url?.path ?? "Not chosen").foregroundStyle(url == nil ? .secondary : .primary).lineLimit(1).truncationMode(.middle)
             Spacer()
             if let url { CopyPathButton(path: url.path, what: "folder", iconOnly: true) }
-            Button("Choose…") { Panels.chooseFolder { url = $0 } }
+            Button("Choose…") { Panels.chooseFolder(key: "folderField.\(title)") { url = $0 } }
         }
     }
 }
