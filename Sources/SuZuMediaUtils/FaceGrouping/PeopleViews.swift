@@ -29,6 +29,7 @@ struct PeopleGrid: View {
     @State private var suggesting = false
     @State private var exportAll: ExportMode?
     @State private var galleryExport = false
+    @State private var findingByPhoto = false
     /// The person whose face space enlarged (see `Peek`).
     @State private var peek: PeekState<Int64>?
     @State private var pointer = Peek<Int64>()
@@ -102,6 +103,7 @@ struct PeopleGrid: View {
         .sheet(isPresented: $suggesting) { CelebritySheet() }
         .sheet(item: $exportAll) { ExportSheet(scope: .all, mode: $0) }
         .sheet(isPresented: $galleryExport) { GalleryExportSheet() }
+        .sheet(isPresented: $findingByPhoto) { PhotoLookupSheet { path.append(PersonRoute(id: $0)) } }
         .toolbar {
             ToolbarItem {
                 Picker("Show", selection: $filter) {
@@ -120,6 +122,10 @@ struct PeopleGrid: View {
                         Label("List", systemImage: "ellipsis.circle")
                     }
                 }
+            }
+            ToolbarItem {
+                Button { findingByPhoto = true } label: { Label("Find by Photo", systemImage: "person.fill.viewfinder") }
+                    .help("Find people by a photo: drop, paste or choose one, and see who each face in it looks like")
             }
             ToolbarItem {
                 Button { suggesting = true } label: { Label("Suggest Names", systemImage: "sparkles") }

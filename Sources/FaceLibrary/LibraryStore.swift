@@ -440,6 +440,21 @@ public final class LibraryStore: @unchecked Sendable {
             try db.execute(sql: "ALTER TABLE media ADD COLUMN skippedAsEdited BOOLEAN NOT NULL DEFAULT 0")
             try db.execute(sql: "CREATE INDEX media_skippedAsEdited ON media(sourceId) WHERE skippedAsEdited")
         }
+        m.registerMigration("v19-published-faces") { db in
+            /// What the team folder holds for each file this Mac published (see `TeamSync.facePublished`): the
+            /// processing Mac compares it with the file's faces now and publishes again whatever drifted, whatever
+            /// path the change took.
+            try db.create(table: "facePublished") { t in
+                t.column("mediaId", .integer).primaryKey()
+                t.column("sig", .text).notNull()
+                t.column("boxes", .text).notNull()
+                /// Learnt by reading the team folder back (libraries from before this table), not written here.
+                t.column("fromShare", .boolean).notNull().defaults(to: false)
+            }
+            /// When a person was last pinned or unpinned, so the newest choice wins across the team.
+            try db.execute(sql: "ALTER TABLE person ADD COLUMN pinAt DOUBLE")
+            try db.execute(sql: "UPDATE person SET pinAt = pinnedAt WHERE pinnedAt IS NOT NULL")
+        }
         return m
     }
 }

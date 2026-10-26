@@ -45,6 +45,9 @@ public final class Processor: @unchecked Sendable {
         backgroundQueue.qualityOfService = .background
     }
 
+    /// Embeddings for 112x112 aligned crops, through the same Neural Engine batches as the files being processed.
+    public func embed(_ crops: [[UInt8]]) -> [[Float]] { batcher.embed(crops) }
+
     public var queuedCount: Int { lock.withLock { queued.count } }
     public var backgroundCount: Int { lock.withLock { backgroundQueued.count } }
 

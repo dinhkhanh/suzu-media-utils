@@ -39,6 +39,9 @@ groups them by person, keeps up as new files arrive, and files each person's med
   with the first unnamed. Select several (⌘-click, ⇧-click) for a floating bar: Merge into One, This Is…, Open.
   Fix mistakes ("Not this person", "Move to…"); pick any face as a person's picture, or let the best shot be
   chosen automatically (sharp, eyes open, facing the camera).
+- **Find by Photo** (People toolbar): drop a photo, paste one (⌘V) or choose one, and every face in it lists the
+  people it looks most like, the best match marked Likely when it clears the bar the library names faces by; click
+  one to open them. The photo is only looked at, never added.
 - A person's page: their picture, name (click to rename), counts and when they were shot, who they are **often
   with** (click a face chip to see only the photos together), then Photos / Videos / Faces with Best first, Best
   N and Hide bursts as chips; each photo carries its best-shot score, burst count, time and session. Select photos
@@ -69,13 +72,13 @@ and one for landscapes — logo, text or banner watermark, resize — auto tone
   Drive) and holds every project you share with it. File → Share Project with Team… creates the team or adds the
   project to one you are in; teammates pick the same folder once with File → Join a Team…, and the team's projects
   appear on their Mac by themselves. From then on a person named on any Mac is recognised on every Mac (projects,
-  names, merges, session names and auto rules are shared; photos, faces and crops stay where they are), within
-  seconds, with no account or server. Each Mac appends to its own log in the folder and reads the others', so a Mac
-  that was offline catches up, the newest change wins, and the same name given on two Macs becomes one person.
-  Everyone named on a Mac travels (a Known-People folder prepared before the event, people from earlier events). The
-  sidebar shows the team above the project, with its Macs and the last sync; the project menu groups projects by
-  team. Rename Team, Locate Team Sync Folder… (when the NAS address changes), Stop Sharing a project, Leave Team (keeps
-  projects and names).
+  names, merges, pins, people's pictures, session names and auto rules are shared; photos, faces and crops stay
+  where they are), within seconds, with no account or server. Each Mac appends to its own log in the folder and
+  reads the others', so a Mac that was offline catches up, the newest change wins, and the same name given on two
+  Macs becomes one person. Everyone named on a Mac travels (a Known-People folder prepared before the event, people
+  from earlier events). The sidebar shows the team above the project, with its Macs and the last sync; the project
+  menu groups projects by team. Rename Team, Locate Team Sync Folder… (when the NAS address changes), Stop Sharing a
+  project, Leave Team (keeps projects and names).
 - **Three kinds of folders in a team:** *Team Folders* are the sources every Mac works on (the card folders on the
   NAS): added on one Mac, they appear on every Mac of the team. *Edited Folders* are where the Mac in charge of
   editing / selecting puts its results, and travel the same way. *Folders on This Mac* stay on that Mac, as before.
@@ -90,6 +93,8 @@ and one for landscapes — logo, text or banner watermark, resize — auto tone
   processes the files it copies, from the card as each one lands, and sends the faces ungrouped; the processing Mac
   takes them for the files it has waiting instead of reading them back from the share, groups them, and sends the
   file again with the people, which every Mac (the copier included) takes as the truth for the very faces it found.
+  The processing Mac remembers what it sent for each file and keeps checking it against its library, sending again
+  any file that drifted however it happened, so the other Macs never keep stale faces or crops.
   While copiers are sending, the processing Mac gives a fresh file 30 s for their record to arrive before reading it
   itself; otherwise it reads at once as before.
 - **Video moments:** per person, a clip of each appearance (cut without re-encoding), a highlight reel of the best

@@ -5,8 +5,8 @@ import GRDB
 /// Dropbox, iCloud Drive. No account, no server: one Mac creates the team in a folder, the others join by picking
 /// that folder. A team holds any number of projects (one per event); joining brings them all.
 ///
-/// What travels: projects (stable id and name), people (stable id, name, and a summary of their faces so every Mac
-/// recognises them), merges, session names, rules, and the folders the team shares (the sources every Mac works
+/// What travels: projects (stable id and name), people (stable id, name, picture, pin, and a summary of their faces
+/// so every Mac recognises them), merges, session names, rules, and the folders the team shares (the sources every Mac works
 /// on, and the editing Mac's folder; see `SourceShare`). Photos, face boxes and crops stay on the Mac that
 /// processed them.
 ///
@@ -357,7 +357,8 @@ public final class TeamSync: @unchecked Sendable {
 
     /// One change in a device's log.
     struct Op: Codable {
-        /// device, person, merge, session, rule, summary (deferred only)
+        /// device, person, merge, session, rule, summary (deferred only), card, cardFile, face, folder, cover,
+        /// pin (uuid = the person, deleted = unpinned)
         var t: String
         var at: Double
         var uuid: String?
@@ -561,7 +562,8 @@ public final class TeamSync: @unchecked Sendable {
         // People's pictures picked by hand (by the face's file and position, the same on every Mac).
         for r in try store.db.read({ db in
             try Row.fetchAll(db, sql: """
-                SELECT p.uuid, p.coverAt, m.contentKey, (SELECT COUNT(*) FROM face g WHERE g.mediaId = f.mediaId AND g.id < f.id) AS idx
+                SELECT p.uuid, p.coverAt, f.id AS face, m.id AS media, m.path, m.size, m.contentKey,
+                       (SELECT COUNT(*) FROM face g WHERE g.mediaId = f.mediaId AND g.id < f.id) AS idx
                 FROM person p LEFT JOIN face f ON f.id = p.coverFaceId LEFT JOIN media m ON m.id = f.mediaId
                 WHERE p.coverAt IS NOT NULL
                 """)
@@ -569,10 +571,27 @@ public final class TeamSync: @unchecked Sendable {
             let uuid: String = r["uuid"], at: Double = r["coverAt"]
             guard state["pub:cover:\(uuid)"] != "\(at)" else { continue }
             var op = Op(t: "cover", at: at, uuid: uuid)
-            op.key = r["contentKey"]
-            if op.key != nil { op.index = r["idx"] }
+            if (r["face"] as Int64?) != nil {
+                // A picked face of a file without a content key yet: computed now. Sent without one, it read as
+                // "back to automatic" on every other Mac.
+                var key: String? = r["contentKey"]
+                if key == nil, let path: String = r["path"], let size: Int64 = r["size"] {
+                    key = ContentKey.compute(URL(fileURLWithPath: path, isDirectory: false), size: size)
+                    if let key { try store.db.write { db in try db.execute(sql: "UPDATE media SET contentKey = ? WHERE id = ?", arguments: [key, r["media"] as Int64]) } }
+                }
+                guard let key else { continue }  // offline: next pass
+                op.key = key
+                op.index = r["idx"]
+            }
             ops.append(op)
             updates["pub:cover:\(uuid)"] = "\(at)"
+        }
+        // Pins: who is pinned and who was unpinned, newest wins.
+        for r in try store.db.read({ db in try Row.fetchAll(db, sql: "SELECT uuid, pinAt, pinnedAt IS NOT NULL AS pinned FROM person WHERE pinAt IS NOT NULL") }) {
+            let uuid: String = r["uuid"], at: Double = r["pinAt"]
+            guard state["pub:pin:\(uuid)"] != "\(at)" else { continue }
+            ops.append(Op(t: "pin", at: at, uuid: uuid, deleted: !(r["pinned"] as Bool)))
+            updates["pub:pin:\(uuid)"] = "\(at)"
         }
         var wrote = false
         if !ops.isEmpty {
@@ -682,7 +701,7 @@ public final class TeamSync: @unchecked Sendable {
     /// Mac for good (0.8.3 did this to the first team and edited folders). When a newer version first reads a
     /// team, it goes over what it had already read once more, for just the kinds it learnt since. A new kind of
     /// entry is added here with the next version number.
-    static let lateKinds: [(version: Int, kinds: Set<String>)] = [(2, ["folder"])]
+    static let lateKinds: [(version: Int, kinds: Set<String>)] = [(2, ["folder"]), (3, ["pin"])]
     static var readerVersion: Int { lateKinds.map(\.version).max() ?? 1 }
 
     /// Reads what this Mac already read of each teammate's log again, applying only the kinds learnt since
@@ -1133,6 +1152,21 @@ public final class TeamSync: @unchecked Sendable {
                   AND (SELECT COUNT(*) FROM face g WHERE g.mediaId = f.mediaId AND g.id < f.id) = ? LIMIT 1
                 """, arguments: [key, index]) else { return .deferred }
             try db.execute(sql: "UPDATE person SET coverFaceId = ?, coverAt = ? WHERE id = ?", arguments: [faceId, op.at, pid])
+            return .applied(people: [], remote: [])
+
+        case "pin":
+            guard let uuid = op.uuid else { return .ignored }
+            guard let pid = try Self.resolve(uuid, db: db) else { return .deferred }
+            let current = try Double?.fetchOne(db, sql: "SELECT pinAt FROM person WHERE id = ?", arguments: [pid]) ?? nil
+            guard op.at > (current ?? 0) else { return .ignored }
+            if op.deleted == true {
+                try db.execute(sql: "UPDATE person SET pinnedAt = NULL, pinAt = ? WHERE id = ?", arguments: [op.at, pid])
+            } else {
+                try db.execute(sql: "UPDATE person SET pinnedAt = COALESCE(pinnedAt, ?), pinAt = ? WHERE id = ?", arguments: [op.at, op.at, pid])
+            }
+            // Known here now: not sent back as this Mac's own change.
+            let local: String = try String.fetchOne(db, sql: "SELECT uuid FROM person WHERE id = ?", arguments: [pid]) ?? uuid
+            try db.execute(sql: "INSERT OR REPLACE INTO syncState (teamId, key, value) VALUES (?, ?, ?)", arguments: [team.id, "pub:pin:\(local)", "\(op.at)"])
             return .applied(people: [], remote: [])
 
         case "summary":

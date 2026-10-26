@@ -1,3 +1,4 @@
+import CryptoKit
 import FaceCore
 import Foundation
 import GRDB
@@ -15,6 +16,11 @@ import GRDB
 ///
 /// The role lives in `team.json` (`processor`), set from the team menu; with none set every Mac processes its own
 /// files as before.
+///
+/// The processing Mac remembers what it published for each file (`facePublished`: the faces' boxes and people) and
+/// keeps comparing that with the file's faces now, a slice per pass, publishing again whatever drifted: a queue
+/// emptied while the role changed hands, faces dropped or found again, a person's stable id changed. Queues make
+/// changes travel fast; the comparison makes sure none is lost.
 ///
 /// Hybrid: a Mac copying cards processes the files it copies itself (`media.localWork`), from the card while it is
 /// still in, and publishes the faces as they are, ungrouped. The processing Mac takes those records for the files
@@ -59,6 +65,10 @@ extension TeamSync {
     static let faceRepublishInterval: Double = 20
     /// Records of a teammate's applied per transaction (see pullFaces).
     static let faceApplyChunk = 100
+    /// Files compared per pass with what the team folder holds for them (see reconcilePublished).
+    static let faceSweepBatch = 2000
+    /// Bytes of this Mac's own records read back per pass to learn what the team folder holds (once per library).
+    static let faceSeedBytes = 48 << 20
 
     /// One processed file as published.
     struct MediaPayload: Codable {
@@ -85,6 +95,16 @@ extension TeamSync {
         var p: String?
         var a: String
         var r: String?
+    }
+
+    /// What a record says about a file's faces: `boxes` changes when the faces themselves do (the crops go again),
+    /// `sig` also when who they are does. The same for a record read back from the team folder and for the faces
+    /// in the library, so the two can be compared.
+    static func signature(_ faces: [FacePayload]) -> (sig: String, boxes: String) {
+        func hash(_ s: String) -> String { SHA256.hash(data: Data(s.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined() }
+        let boxes = faces.map { "\($0.x),\($0.y),\($0.w),\($0.h),\($0.t ?? -1)" }.joined(separator: ";")
+        let people = faces.map { "\($0.p ?? "")/\($0.a)/\($0.r ?? "")" }.joined(separator: ";")
+        return (hash(boxes + "|" + people), hash(boxes))
     }
 
     // MARK: - The role
@@ -184,8 +204,11 @@ extension TeamSync {
     /// changed since (its own and the ones it took from copying Macs, now grouped). Any other Mac writes, once, the
     /// files it processed itself off a card (`localWork`); its edits travel as `face` changes instead. With no
     /// processing Mac nothing is written and the queues are emptied.
-    func publishFaces(_ team: TeamRecord) throws -> Bool {
-        let teamId = team.id!
+    func publishFaces(_ passTeam: TeamRecord) throws -> Bool {
+        let teamId = passTeam.id!
+        // The role as it is now, not as the pass found it: the role can change hands while a pass is under way, and
+        // a stale "not the processing Mac" used to throw away the whole queue the new processor had just filled.
+        guard let team = try store.db.read({ db in try TeamRecord.fetchOne(db, key: teamId) }) else { return false }
         guard team.processorId != nil else {
             if try teams().allSatisfy({ $0.processorId == nil }) {
                 try store.db.write { db in
@@ -198,6 +221,7 @@ extension TeamSync {
         let now = Date().timeIntervalSince1970
         let ids: [Int64]
         if isProcessor(team) {
+            try reconcilePublished(team)
             let (fresh, changed) = try store.db.read { db -> ([Int64], [Int64]) in
                 (try Int64.fetchAll(db, sql: """
                     SELECT m.id FROM facePublish q JOIN media m ON m.id = q.mediaId JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId
@@ -227,6 +251,9 @@ extension TeamSync {
                     """, arguments: [teamId, Self.facePublishBatch])
             }
             try store.db.write { db in
+                // Only while this Mac still isn't the processing one (checked in the same transaction).
+                let processor = try String?.fetchOne(db, sql: "SELECT processorId FROM team WHERE id = ?", arguments: [teamId]) ?? nil
+                guard let processor, processor != deviceId else { return }
                 let mine = "SELECT m.id FROM media m JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId WHERE p.teamId = \(teamId)"
                 try db.execute(sql: "DELETE FROM faceChange WHERE faceId IN (SELECT id FROM face WHERE mediaId IN (\(mine)))")
                 try db.execute(sql: "DELETE FROM facePublish WHERE mediaId IN (\(mine) AND NOT (m.status = 'done' AND m.importedFrom IS NULL AND m.localWork))")
@@ -240,21 +267,33 @@ extension TeamSync {
         var lines = Data()
         let encoder = JSONEncoder()
         var written: [Int64] = []
+        var signatures: [(mediaId: Int64, sig: String, boxes: String)] = []
         var handled: [Int64] = []
         var copies: [(from: URL, to: URL)] = []
         let started = Date()
+        let list = ids.map(String.init).joined(separator: ",")
+        let publishedBoxes = Dictionary(uniqueKeysWithValues: try store.db.read { db in
+            try Row.fetchAll(db, sql: "SELECT mediaId, boxes FROM facePublished WHERE mediaId IN (\(list))").map { ($0["mediaId"] as Int64, $0["boxes"] as String) }
+        })
         for mid in ids {
             // A backlog is published over several passes: one pass never holds the team's queue (and every other
             // team change behind it) for minutes.
             if !handled.isEmpty, Date().timeIntervalSince(started) > Self.facePublishTimeBox { break }
             handled.append(mid)
             guard let (payload, faceIds) = try payload(for: mid) else { continue }
+            if try store.db.read({ db in try Bool.fetchOne(db, sql: "SELECT \(Self.laterCopy) FROM media m WHERE m.id = ?", arguments: [mid]) }) == true { continue }
             lines += try encoder.encode(payload)
             lines += Data("\n".utf8)
             written.append(mid)
-            // Crops, once: the file's own folder, faces numbered as in the record.
+            let sig = Self.signature(payload.faces)
+            signatures.append((mid, sig.sig, sig.boxes))
+            // Crops: the file's own folder, faces numbered as in the record. Written again when the faces aren't
+            // the ones published last (found again, dropped): a teammate taking the new record must not number
+            // the old pictures onto the new faces.
             let cropDir = dir.appendingPathComponent("crops", isDirectory: true).appendingPathComponent(payload.key, isDirectory: true)
-            if !fm.fileExists(atPath: cropDir.path) {
+            let exists = fm.fileExists(atPath: cropDir.path)
+            if !exists || publishedBoxes[mid] != sig.boxes {
+                if exists { try? fm.removeItem(at: cropDir) }
                 try? fm.createDirectory(at: cropDir, withIntermediateDirectories: true)
                 for (i, fid) in faceIds.enumerated() {
                     copies.append((store.faceCropURL(fid), cropDir.appendingPathComponent("\(i).jpg")))
@@ -276,10 +315,13 @@ extension TeamSync {
             try h.write(contentsOf: lines)
         }
         guard !handled.isEmpty else { return false }
-        let list = handled.map(String.init).joined(separator: ",")
+        let done = handled.map(String.init).joined(separator: ",")
         try store.db.write { db in
-            try db.execute(sql: "DELETE FROM facePublish WHERE mediaId IN (\(list))")
-            try db.execute(sql: "DELETE FROM faceChange WHERE faceId IN (SELECT id FROM face WHERE mediaId IN (\(list)))")
+            try db.execute(sql: "DELETE FROM facePublish WHERE mediaId IN (\(done))")
+            try db.execute(sql: "DELETE FROM faceChange WHERE faceId IN (SELECT id FROM face WHERE mediaId IN (\(done)))")
+            for s in signatures {
+                try db.execute(sql: "INSERT OR REPLACE INTO facePublished (mediaId, sig, boxes, fromShare) VALUES (?, ?, ?, 0)", arguments: [s.mediaId, s.sig, s.boxes])
+            }
         }
         lock.withLock { for mid in written { facesPublishedAt[mid] = now } }
         return !written.isEmpty
@@ -292,6 +334,132 @@ extension TeamSync {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         if let last = files.last, ((try? last.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0) < faceFileLimit { return last }
         return dir.appendingPathComponent(String(format: "media-%04d.jsonl", files.count + 1))
+    }
+
+    /// SQL on `media m`: the same bytes are also an earlier file here (one file in two folders, not marked as a
+    /// copy). Only the first is published: two records for one content key, read in either order, left teammates
+    /// with whichever came last.
+    static let laterCopy = """
+        EXISTS (SELECT 1 FROM media o WHERE o.contentKey = m.contentKey AND +o.id < m.id AND o.duplicateOf IS NULL
+                AND +o.status = 'done' AND o.importedFrom IS NULL AND NOT o.skippedAsEdited)
+        """  // `+`: by content key (the status index made it a scan per file)
+
+    /// Queues the team's files whose faces are no longer what the team folder holds for them: a slice of the
+    /// library per pass, from where the last pass stopped, round and round. A library from before `facePublished`
+    /// first learns what it published by reading its own records back (`seedPublished`), so only the files that
+    /// really drifted go again.
+    func reconcilePublished(_ team: TeamRecord) throws {
+        let teamId = team.id!
+        let state = try state(teamId)
+        guard state["pubseed"] == "done" else { return try seedPublished(team, state: state) }
+        let cursor = Int64(state["pubsweep"] ?? "0") ?? 0
+        // Edited folders' files are left out: they have no faces by design, and no teammate takes faces for them.
+        let (mids, rows, published) = try store.db.read { db -> ([Int64], [Row], [Int64: (sig: String, boxes: String)]) in
+            let mids = try Int64.fetchAll(db, sql: """
+                SELECT m.id FROM media m JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId
+                WHERE p.teamId = ? AND m.status = 'done' AND m.importedFrom IS NULL AND m.duplicateOf IS NULL AND NOT m.skippedAsEdited
+                  AND m.id > ? AND NOT \(Self.laterCopy) ORDER BY m.id LIMIT ?
+                """, arguments: [teamId, cursor, Self.faceSweepBatch])
+            guard let first = mids.first, let last = mids.last else { return ([], [], [:]) }
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT f.mediaId, f.x, f.y, f.w, f.h, f.time, f.assignment, p.uuid AS person, r.uuid AS rejected
+                FROM face f LEFT JOIN person p ON p.id = f.personId LEFT JOIN person r ON r.id = f.rejectedPersonId
+                WHERE f.mediaId BETWEEN ? AND ? ORDER BY f.mediaId, f.id
+                """, arguments: [first, last])
+            let published = Dictionary(uniqueKeysWithValues: try Row.fetchAll(db, sql: "SELECT mediaId, sig, boxes FROM facePublished WHERE mediaId BETWEEN ? AND ?",
+                                                                              arguments: [first, last]).map { ($0["mediaId"] as Int64, (sig: $0["sig"] as String, boxes: $0["boxes"] as String)) })
+            return (mids, rows, published)
+        }
+        guard let last = mids.last else {
+            try setState(teamId, ["pubsweep": "0"])  // round again from the start
+            return
+        }
+        var faces: [Int64: [FacePayload]] = [:]
+        for r in rows {
+            faces[r["mediaId"], default: []].append(FacePayload(x: r["x"], y: r["y"], w: r["w"], h: r["h"], t: r["time"],
+                                                                p: r["person"], a: r["assignment"], r: r["rejected"]))
+        }
+        // A file never published goes too (its teammates' copies wait for it). One whose faces all went without
+        // being processed again doesn't: no path empties a file's faces quietly on purpose, and sending that would
+        // take good faces off every other Mac (a RAW+JPEG pair processed as two files lost the JPEG's, 0.8.13).
+        let none = Self.signature([]).boxes
+        let drifted = mids.filter { m in
+            guard let was = published[m] else { return true }
+            let now = faces[m] ?? []
+            if now.isEmpty && was.boxes != none { return false }
+            return was.sig != Self.signature(now).sig
+        }
+        try store.db.write { db in
+            for mid in drifted { try db.execute(sql: "INSERT OR IGNORE INTO facePublish (mediaId) VALUES (?)", arguments: [mid]) }
+            try db.execute(sql: "INSERT OR REPLACE INTO syncState (teamId, key, value) VALUES (?, 'pubsweep', ?)", arguments: [teamId, String(last)])
+        }
+    }
+
+    /// Reads this Mac's own records back, a slice per pass, and remembers for each file what the team folder holds
+    /// for it (the newest record wins). Only what was there when the reading began: records published since are
+    /// remembered as they are written.
+    func seedPublished(_ team: TeamRecord, state: [String: String]) throws {
+        let teamId = team.id!
+        let dir = Self.facesURL(team.url, device: deviceId)
+        let fm = FileManager.default
+        // The files and their sizes when the reading began, "name:size,…".
+        var targets: [(name: String, size: Int)]
+        if let t = state["pubseed"], !t.isEmpty {
+            targets = t.split(separator: ",").compactMap { e in
+                let parts = e.split(separator: ":")
+                guard parts.count == 2, let n = Int(parts[1]) else { return nil }
+                return (String(parts[0]), n)
+            }
+        } else {
+            let listed = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey])
+            // There but unreadable for now: "nothing published" would send every file again.
+            if listed == nil && fm.fileExists(atPath: dir.path) { return }
+            targets = (listed ?? [])
+                .filter { $0.lastPathComponent.hasPrefix("media-") && $0.pathExtension == "jsonl" }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+                .map { ($0.lastPathComponent, (try? $0.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0) }
+            try setState(teamId, ["pubseed": targets.isEmpty ? "done" : targets.map { "\($0.name):\($0.size)" }.joined(separator: ",")])
+            if targets.isEmpty { return }
+        }
+        var budget = Self.faceSeedBytes
+        let decoder = JSONDecoder()
+        for t in targets {
+            let key = "pubseed:\(t.name)"
+            let cursor = Int(state[key] ?? "0") ?? 0
+            guard cursor < t.size else { continue }
+            guard budget > 0 else { return }
+            guard let h = try? FileHandle(forReadingFrom: dir.appendingPathComponent(t.name)) else { return }  // offline: next pass
+            defer { try? h.close() }
+            try h.seek(toOffset: UInt64(cursor))
+            let data = try h.read(upToCount: min(budget, t.size - cursor)) ?? Data()
+            // Whole lines only; a line longer than the budget is read whole.
+            var end = data.lastIndex(of: 0x0A).map { $0 + 1 } ?? 0
+            var chunk = data[data.startIndex..<end]
+            if end == 0 {
+                try h.seek(toOffset: UInt64(cursor))
+                let rest = try h.read(upToCount: t.size - cursor) ?? Data()
+                end = rest.firstIndex(of: 0x0A).map { $0 + 1 } ?? rest.count
+                chunk = rest[rest.startIndex..<end]
+            }
+            budget -= chunk.count
+            try store.db.write { db in
+                for line in chunk.split(separator: 0x0A) where !line.isEmpty {
+                    guard let payload = try? decoder.decode(MediaPayload.self, from: line) else { continue }
+                    let sig = Self.signature(payload.faces)
+                    for mid in try Int64.fetchAll(db, sql: "SELECT id FROM media WHERE contentKey = ? AND duplicateOf IS NULL AND importedFrom IS NULL",
+                                                  arguments: [payload.key]) {
+                        try db.execute(sql: """
+                            INSERT INTO facePublished (mediaId, sig, boxes, fromShare) VALUES (?, ?, ?, 1)
+                            ON CONFLICT(mediaId) DO UPDATE SET sig = excluded.sig, boxes = excluded.boxes WHERE fromShare
+                            """, arguments: [mid, sig.sig, sig.boxes])
+                    }
+                }
+                try db.execute(sql: "INSERT OR REPLACE INTO syncState (teamId, key, value) VALUES (?, ?, ?)",
+                               arguments: [teamId, key, String(cursor + chunk.count)])
+            }
+            if cursor + chunk.count < t.size { return }
+        }
+        try setState(teamId, ["pubseed": "done"])
     }
 
     /// The record of a file processed here, and its faces' ids in the record's order; nil when the file has no
@@ -396,9 +564,14 @@ extension TeamSync {
                             let length = line.count
                             defer { offset += length + 1 }
                             guard !line.isEmpty, let payload = try? decoder.decode(MediaPayload.self, from: line) else { continue }
+                            // The processing Mac's record stays the one remembered for a file: a copying Mac's
+                            // ungrouped record of it, read after, doesn't take its place.
                             try db.execute(sql: """
-                                INSERT OR REPLACE INTO faceIndex (teamId, contentKey, deviceId, file, offset, length) VALUES (?, ?, ?, ?, ?, ?)
-                                """, arguments: [teamId, payload.key, device, name, offset, length])
+                                INSERT INTO faceIndex (teamId, contentKey, deviceId, file, offset, length) VALUES (?, ?, ?, ?, ?, ?)
+                                ON CONFLICT(teamId, contentKey) DO UPDATE SET deviceId = excluded.deviceId, file = excluded.file,
+                                    offset = excluded.offset, length = excluded.length
+                                WHERE excluded.deviceId IS ? OR faceIndex.deviceId IS NOT ?
+                                """, arguments: [teamId, payload.key, device, name, offset, length, team.processorId, team.processorId])
                             affected.formUnion(try take(payload, from: device, team: team, db: db))
                         }
                         try db.execute(sql: "INSERT OR REPLACE INTO syncState (teamId, key, value) VALUES (?, ?, ?)",
@@ -471,6 +644,8 @@ extension TeamSync {
             let ownWork = status == MediaStatus.done.rawValue && from == nil
             // Processed here: kept, unless this is the processing Mac's grouping of a card's file processed here.
             if ownWork && (!authoritative || processorId == deviceId) { continue }
+            // Already the processing Mac's: a copying Mac's ungrouped record of the file (read later) changes nothing.
+            if from == processorId && !authoritative { continue }
             let existing = try FaceRecord.fetchAll(db, sql: "SELECT * FROM face WHERE mediaId = ? ORDER BY id", arguments: [mid])
             var people: [String: Int64] = [:]
             func person(_ uuid: String?) throws -> Int64? {
@@ -483,7 +658,13 @@ extension TeamSync {
                 people[uuid] = p.id!
                 return p.id!
             }
-            if from == device || authoritative, existing.count == payload.faces.count, !existing.isEmpty {
+            // The faces matched by position only when they are the very same faces: a file found again on the
+            // processing Mac (or by another Mac's detector) can have as many faces in another order, and naming
+            // them by position put people on the wrong faces.
+            let sameFaces = existing.count == payload.faces.count && zip(existing, payload.faces).allSatisfy { f, pf in
+                abs(f.x - pf.x) < 1e-9 && abs(f.y - pf.y) < 1e-9 && abs(f.w - pf.w) < 1e-9 && abs(f.h - pf.h) < 1e-9 && f.time == pf.t
+            }
+            if from == device || authoritative, sameFaces, !existing.isEmpty {
                 // Same faces (the same file, the same detector), maybe different people now.
                 for (f, pf) in zip(existing, payload.faces) {
                     let pid = try person(pf.p), rej = try person(pf.r)
@@ -496,6 +677,10 @@ extension TeamSync {
                 continue
             }
             for f in existing { if let old = f.personId { affected.insert(old) } }
+            // People whose picture is one of these faces keep it: the face at the same place in the new record.
+            let covers = existing.isEmpty ? [] : try Row.fetchAll(db, sql: """
+                SELECT id, coverFaceId FROM person WHERE coverFaceId IN (\(existing.map { String($0.id!) }.joined(separator: ",")))
+                """)
             try db.execute(sql: "DELETE FROM face WHERE mediaId = ?", arguments: [mid])
             var ids: [Int64] = []
             for pf in payload.faces {
@@ -507,6 +692,11 @@ extension TeamSync {
                 try f.insert(db)
                 ids.append(f.id!)
                 if let pid { affected.insert(pid) }
+            }
+            for c in covers {
+                let old: Int64 = c["coverFaceId"]
+                guard let i = existing.firstIndex(where: { $0.id == old }), i < ids.count else { continue }
+                try db.execute(sql: "UPDATE person SET coverFaceId = ? WHERE id = ?", arguments: [ids[i], c["id"] as Int64])
             }
             try db.execute(sql: """
                 UPDATE media SET status = 'done', error = NULL, width = ?, height = ?, duration = ?, takenAt = ?, featurePrint = COALESCE(?, featurePrint),

@@ -70,6 +70,26 @@ final class GroupingTests: XCTestCase {
 
     func personCount() throws -> Int { try store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM person")! } }
 
+    /// A photo brought to find someone (see PhotoLookup): its face ranks the person it shows first and says so, a
+    /// stranger's face ranks somebody first without claiming them.
+    func testAFaceFromOutsideFindsItsPerson() throws {
+        let an = direction(), bo = direction()
+        var ids: [Int64] = []
+        try store.db.write { db in
+            for _ in 0..<2 { var p = PersonRecord(name: ids.isEmpty ? "An" : "Bo"); try p.insert(db); ids.append(p.id!) }
+        }
+        for _ in 0..<5 { try photo(face(an), personId: ids[0]); try photo(face(bo), personId: ids[1]) }
+        engine.start()
+        engine.waitUntilIdle()
+        let found = engine.nearestPeople(to: face(an), limit: 5)
+        XCTAssertEqual(found.map(\.personId), [ids[0], ids[1]])
+        XCTAssertTrue(found[0].likely)
+        XCTAssertFalse(found[1].likely)
+        let stranger = engine.nearestPeople(to: direction(), limit: 1)
+        XCTAssertEqual(stranger.count, 1)
+        XCTAssertFalse(stranger[0].likely)
+    }
+
     /// Faces that only resemble some of a person's earlier shots (a profile, a new hairstyle) join them through
     /// their nearest exemplars, where the mean of every shot would have turned them away.
     func testNewLookJoinsThroughNearestExemplars() throws {

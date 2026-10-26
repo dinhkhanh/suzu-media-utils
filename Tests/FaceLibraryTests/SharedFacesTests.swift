@@ -248,6 +248,150 @@ final class SharedFacesTests: XCTestCase {
         XCTAssertEqual(try faces(b, media: bm2)[0].personId, try b.personId(named: "An"), "and B gets A's grouping of its own faces")
     }
 
+    func records() -> Int {
+        let dir = TeamSync.facesURL(shared, device: a.sync.deviceId)
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        return files.filter { $0.pathExtension == "jsonl" }.reduce(0) { n, f in
+            n + ((try? Data(contentsOf: f)).map { $0.split(separator: 0x0A).count } ?? 0)
+        }
+    }
+
+    /// Faces found again on A: the old ones go, these come, queued for publishing as the processor would.
+    func redetect(_ media: Int64, _ faces: [(x: Double, person: Int64?, crop: String)]) throws {
+        try a.store.db.write { db in
+            try db.execute(sql: "DELETE FROM face WHERE mediaId = ?", arguments: [media])
+            for f in faces {
+                var r = FaceRecord(id: nil, mediaId: media, x: f.x, y: 0.4, w: 0.1, h: 0.1, quality: 0.8, time: nil,
+                                   embedding: Vector.encode(Vector.normalized(vector(Int(f.x * 100)))), track: nil, personId: f.person,
+                                   assignment: f.person == nil ? .none : .auto, rejectedPersonId: nil)
+                try r.insert(db)
+                try Data(f.crop.utf8).write(to: a.store.faceCropURL(r.id!))
+            }
+        }
+    }
+
+    /// The same two people found again in the other order: B must put each name on the right face (it used to
+    /// pair them by position) and show the new crops (the old ones stayed on the share, numbered as before).
+    func testFacesFoundAgainInAnotherOrderKeepTheirPeople() throws {
+        let team = try XCTUnwrap(try a.sync.teams().first)
+        try a.sync.setProcessor(team.id!, thisMac: true)
+        let an = try a.person("An"), bo = try a.person("Bo")
+        let (m, _) = try processed("p1.jpg", person: nil, vector: vector(1))
+        try redetect(m, [(0.1, an, "an"), (0.6, bo, "bo")])
+        let w = try waiting("p1.jpg")
+        exchange()
+        func onB() throws -> [(x: Double, name: String?, crop: String)] {
+            try faces(b, media: w).map { f in
+                let name = try b.store.db.read { db in try String?.fetchOne(db, sql: "SELECT name FROM person WHERE id = ?", arguments: [f.personId]) } ?? nil
+                return (f.x, name, String(decoding: (try? Data(contentsOf: b.store.faceCropURL(f.id!))) ?? Data(), as: UTF8.self))
+            }
+        }
+        XCTAssertEqual(try onB().map(\.name), ["An", "Bo"])
+        try redetect(m, [(0.6, bo, "bo2"), (0.1, an, "an2")])
+        try a.store.db.write { db in try db.execute(sql: "INSERT OR IGNORE INTO facePublish (mediaId) VALUES (?)", arguments: [m]) }
+        exchange()
+        let after = try onB()
+        XCTAssertEqual(after.map(\.x), [0.6, 0.1], "B has the faces as found now")
+        XCTAssertEqual(after.map(\.name), ["Bo", "An"], "each with its own person")
+        XCTAssertEqual(after.map(\.crop), ["bo2", "an2"], "and its own picture")
+    }
+
+    /// Whatever emptied a queue (the role changing hands mid-pass, an edited folder dropping faces), the processing
+    /// Mac notices the file no longer matches what it published and sends it again.
+    func testAFileThatDriftedWithoutBeingQueuedIsPublishedAgain() throws {
+        let team = try XCTUnwrap(try a.sync.teams().first)
+        try a.sync.setProcessor(team.id!, thisMac: true)
+        let an = try a.person("An")
+        let (m, _) = try processed("p1.jpg", person: an, vector: vector(1))
+        try processed("p2.jpg", person: an, vector: vector(2))
+        let w = try waiting("p1.jpg")
+        exchange()
+        XCTAssertEqual(try faces(b, media: w).count, 1)
+        let before = records()
+        // The face moved to Bo on A, and the queues were emptied.
+        let bo = try a.person("Bo")
+        try a.store.db.write { db in
+            try db.execute(sql: "UPDATE face SET personId = ? WHERE mediaId = ?", arguments: [bo, m])
+            try db.execute(sql: "DELETE FROM facePublish")
+            try db.execute(sql: "DELETE FROM faceChange")
+        }
+        exchange()
+        XCTAssertEqual(try faces(b, media: w)[0].personId, try b.personId(named: "Bo"), "B follows anyway")
+        XCTAssertEqual(records(), before + 1, "only the file that drifted went again")
+        // Faces gone without the file being processed again: not sent (it would take good faces off B).
+        try a.store.db.write { db in try db.execute(sql: "DELETE FROM face WHERE mediaId = ?", arguments: [m]) }
+        exchange()
+        XCTAssertEqual(records(), before + 1)
+        XCTAssertEqual(try faces(b, media: w).count, 1)
+        // A library from before: it learns what it published by reading its records back, and sends nothing more.
+        try a.store.db.write { db in
+            try db.execute(sql: "DELETE FROM facePublished")
+            try db.execute(sql: "DELETE FROM syncState WHERE key LIKE 'pubseed%' OR key = 'pubsweep'")
+        }
+        exchange()
+        XCTAssertEqual(records(), before + 1)
+        XCTAssertEqual(try a.store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM facePublished WHERE fromShare") }, 2)
+        XCTAssertEqual(try a.store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM facePublish") }, 0)
+    }
+
+    /// A Mac that took a laptop's ungrouped record after the processing Mac's (logs read in any order) keeps the
+    /// processing Mac's people.
+    func testAnUngroupedRecordReadLaterDoesntUndoTheGrouping() throws {
+        let team = try XCTUnwrap(try a.sync.teams().first)
+        try a.sync.setProcessor(team.id!, thisMac: true)
+        let an = try a.person("An")
+        let (m, _) = try processed("p1.jpg", person: an, vector: vector(1))
+        let w = try waiting("p1.jpg")
+        exchange()
+        // A third Mac's ungrouped record of the same file, in the team folder after A's.
+        let other = TeamSync.facesURL(shared, device: "zz-copier")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        var (payload, _) = try XCTUnwrap(try a.sync.payload(for: m))
+        payload.faces = payload.faces.map { var f = $0; f.p = nil; f.a = "none"; return f }
+        try (try JSONEncoder().encode(payload) + Data("\n".utf8)).write(to: other.appendingPathComponent("media-0001.jsonl"))
+        exchange()
+        XCTAssertEqual(try faces(b, media: w)[0].personId, try b.personId(named: "An"))
+        let teamId = try XCTUnwrap(try b.sync.teams().first?.id)
+        XCTAssertEqual(try b.store.db.read { db in try String.fetchOne(db, sql: "SELECT deviceId FROM faceIndex WHERE teamId = ?", arguments: [teamId]) },
+                       a.sync.deviceId)
+    }
+
+    func testPinsTravelBothWays() throws {
+        let an = try a.person("An")
+        exchange()
+        let bAn = try XCTUnwrap(try b.personId(named: "An"))
+        func pinned(_ mac: TeamSyncTests.Mac, _ pid: Int64) throws -> Bool {
+            try mac.store.db.read { db in try Bool.fetchOne(db, sql: "SELECT pinnedAt IS NOT NULL FROM person WHERE id = ?", arguments: [pid]) } ?? false
+        }
+        try a.store.db.write { db in try PersonGroups.pin([an], true, db: db) }
+        exchange()
+        XCTAssertTrue(try pinned(b, bAn))
+        Thread.sleep(forTimeInterval: 0.01)
+        try b.store.db.write { db in try PersonGroups.pin([bAn], false, db: db) }
+        exchange()
+        XCTAssertFalse(try pinned(a, an), "unpinned on B, unpinned on A")
+        XCTAssertFalse(try pinned(b, bAn))
+    }
+
+    /// A picture picked on a file whose content key wasn't known yet used to travel as "back to automatic".
+    func testAPictureOnAFileWithoutAKeyYetTravels() throws {
+        let team = try XCTUnwrap(try a.sync.teams().first)
+        try a.sync.setProcessor(team.id!, thisMac: true)
+        let an = try a.person("An")
+        try processed("p1.jpg", person: an, vector: vector(1))
+        let (m2, f2) = try processed("p2.jpg", person: an, vector: vector(1))
+        try waiting("p1.jpg"); let w2 = try waiting("p2.jpg")
+        exchange()
+        try a.store.db.write { db in
+            try db.execute(sql: "UPDATE media SET contentKey = NULL WHERE id = ?", arguments: [m2])
+            try db.execute(sql: "UPDATE person SET coverFaceId = ?, coverAt = ? WHERE id = ?", arguments: [f2, 1_700_000_100, an])
+        }
+        exchange()
+        let bAn = try XCTUnwrap(try b.personId(named: "An"))
+        XCTAssertEqual(try b.store.db.read { db in try Int64?.fetchOne(db, sql: "SELECT coverFaceId FROM person WHERE id = ?", arguments: [bAn]) } ?? nil,
+                       try faces(b, media: w2)[0].id)
+    }
+
     func testWithoutAChosenMacEveryoneProcessesAndNothingIsPublished() throws {
         let an = try a.person("An")
         try processed("p1.jpg", person: an, vector: vector(1))

@@ -4,8 +4,8 @@ import GRDB
 /// A list of people: the cast, the sponsors, the VIPs. An event has a thousand faces; the few dozen that matter are
 /// found again by list, and pinned people float to the top of every people grid.
 ///
-/// Lists and pins are the Mac's own (not shared with the team) and apply to the person wherever they appear, like
-/// a name: a sponsor at one event is still listed as one at the next.
+/// Lists are the Mac's own (not shared with the team); pins travel to teammates (`pinAt`, newest wins). Both apply
+/// to the person wherever they appear, like a name: a sponsor at one event is still listed as one at the next.
 public struct PersonGroupRecord: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Hashable, Sendable {
     public static let databaseTableName = "personGroup"
     public var id: Int64?
@@ -64,14 +64,15 @@ public enum PersonGroups {
         }
     }
 
-    /// Pins people (they sort first everywhere) or unpins them.
+    /// Pins people (they sort first everywhere) or unpins them; teammates follow (see TeamSync).
     public static func pin(_ people: [Int64], _ on: Bool, db: Database) throws {
         let list = people.map(String.init).joined(separator: ",")
         guard !list.isEmpty else { return }
+        let now = Date().timeIntervalSince1970
         if on {
-            try db.execute(sql: "UPDATE person SET pinnedAt = ? WHERE id IN (\(list)) AND pinnedAt IS NULL", arguments: [Date().timeIntervalSince1970])
+            try db.execute(sql: "UPDATE person SET pinnedAt = ?, pinAt = ? WHERE id IN (\(list)) AND pinnedAt IS NULL", arguments: [now, now])
         } else {
-            try db.execute(sql: "UPDATE person SET pinnedAt = NULL WHERE id IN (\(list))")
+            try db.execute(sql: "UPDATE person SET pinnedAt = NULL, pinAt = ? WHERE id IN (\(list)) AND pinnedAt IS NOT NULL", arguments: [now])
         }
     }
 
@@ -81,6 +82,10 @@ public enum PersonGroups {
         guard !list.isEmpty else { return }
         try db.execute(sql: "INSERT OR IGNORE INTO personGroupMember (groupId, personId) SELECT DISTINCT groupId, ? FROM personGroupMember WHERE personId IN (\(list))", arguments: [target])
         try db.execute(sql: "DELETE FROM personGroupMember WHERE personId IN (\(list))")
-        try db.execute(sql: "UPDATE person SET pinnedAt = COALESCE(pinnedAt, (SELECT MIN(pinnedAt) FROM person WHERE id IN (\(list)))) WHERE id = ?", arguments: [target])
+        try db.execute(sql: """
+            UPDATE person SET pinnedAt = COALESCE(pinnedAt, (SELECT MIN(pinnedAt) FROM person WHERE id IN (\(list)))),
+                pinAt = NULLIF(MAX(COALESCE(pinAt, 0), COALESCE((SELECT MAX(pinAt) FROM person WHERE id IN (\(list)) AND pinnedAt IS NOT NULL), 0)), 0)
+            WHERE id = ?
+            """, arguments: [target])
     }
 }
