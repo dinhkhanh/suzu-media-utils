@@ -3,13 +3,16 @@ import FaceLibrary
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Find people by a photo: drop one, paste one (⌘V) or choose one; each face in it lists the people it looks most
-/// like, and a click opens that person. The photo is only looked at, never added to the library.
+/// Find by a photo: drop one, paste one (⌘V) or choose one; each face in it lists the people it looks most like (a
+/// click opens that person) and how many photos and videos it is in (Show All lists them). The photo is only looked
+/// at, never added to the library.
 struct PhotoLookupSheet: View {
     @EnvironmentObject var model: FaceGroupingModel
     @Environment(\.dismiss) private var dismiss
     /// Opens a person's page (the sheet closes first).
     let open: (Int64) -> Void
+    /// Opens the files a face is in (the sheet closes first).
+    let showFiles: (FaceFilesRoute) -> Void
     @State private var url: URL?
     @State private var image: NSImage?
     @State private var result: PhotoLookup?
@@ -17,11 +20,13 @@ struct PhotoLookupSheet: View {
     @State private var error: String?
     @State private var face = 0
     @State private var dropping = false
+    /// The files each face (by index) is in, as found so far.
+    @State private var files: [Int: [FaceMatch]] = [:]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Find People by Photo").font(.title2.bold())
+                Text("Find by Photo").font(.title2.bold())
                 Spacer()
                 Button("Paste") { paste() }.keyboardShortcut("v")
                 Button("Choose Photo…") { choose() }
@@ -49,7 +54,8 @@ struct PhotoLookupSheet: View {
                 VStack(spacing: 8) {
                     Image(systemName: "person.fill.viewfinder").font(.system(size: 40)).foregroundStyle(.secondary)
                     Text("Drop a photo here, paste one (⌘V), or choose one").foregroundStyle(.secondary)
-                    Text("Every face in it is matched against the people in the library.").font(.callout).foregroundStyle(.tertiary)
+                    Text("Every face in it is matched against the people in the library, and the photos and videos it is in are found.")
+                        .font(.callout).foregroundStyle(.tertiary)
                 }
             }
     }
@@ -118,6 +124,7 @@ struct PhotoLookupSheet: View {
         if f.matches.isEmpty {
             Text("This face can't be read well enough to match (too small, or turned away).").foregroundStyle(.secondary)
         } else {
+            filesRow(f)
             Text(f.matches[0].likely ? "Looks like \(f.matches[0].name ?? "this person"); also close:" : "Nobody in the library is a sure match. Closest:")
                 .font(.headline)
             if (f.quality ?? 1) < 0.3 {
@@ -130,6 +137,40 @@ struct PhotoLookupSheet: View {
             }
         }
     }
+
+    /// How many photos and videos the face is in, and Show All. Found when the face is picked (a second or so).
+    func filesRow(_ f: PhotoLookup.Face) -> some View {
+        let found = files[f.id]
+        return HStack(spacing: 10) {
+            Image(systemName: "photo.on.rectangle.angled").font(.title3).foregroundStyle(Color.accent)
+            if let found {
+                let videos = found.count { $0.kind == .video }
+                Text(found.isEmpty ? "In no photo or video of \(model.projectName)"
+                                   : "In \(found.count - videos) photos and \(videos) videos of \(model.projectName)")
+            } else {
+                ProgressView().controlSize(.small)
+                Text("Finding the photos and videos with this face…").foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Show All") {
+                dismiss()
+                showFiles(FaceFilesRoute(face: f))
+            }
+            .disabled(found?.isEmpty ?? true)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.accent.opacity(0.08)))
+        .task(id: TaskKey(url: url, face: f.id)) {
+            guard found == nil, let store = model.store, let v = f.vector else { return }
+            let project = model.currentProject, person = f.matches.first.flatMap { $0.likely ? $0.personId : nil }
+            let r = await Task.detached(priority: .userInitiated) {
+                (try? store.files(like: v, person: person, project: project)) ?? []
+            }.value
+            if !Task.isCancelled { files[f.id] = r }
+        }
+    }
+
+    struct TaskKey: Hashable { var url: URL?; var face: Int }
 
     func tile(_ m: PhotoLookup.Match) -> some View {
         Button {
@@ -204,6 +245,7 @@ struct PhotoLookupSheet: View {
         url = u
         image = NSImage(contentsOf: u)
         result = nil
+        files = [:]
         error = image == nil ? "That file isn't a photo this Mac can read." : nil
         face = 0
         guard image != nil else { return }
@@ -217,6 +259,151 @@ struct PhotoLookupSheet: View {
             case .success(let found): result = found
             case .failure(let e): error = e.localizedDescription
             }
+        }
+    }
+}
+
+/// Pushed from Find by Photo to show every file a face is in.
+struct FaceFilesRoute: Hashable {
+    /// The face's embedding (normalized).
+    let vector: [Float]
+    /// The person it is likely to be, with their name: their files come too.
+    let person: Int64?
+    let name: String?
+    /// The face, as PNG.
+    let preview: Data?
+
+    init(face: PhotoLookup.Face) {
+        vector = face.vector ?? []
+        let likely = face.matches.first.flatMap { $0.likely ? $0 : nil }
+        person = likely?.personId
+        name = likely?.name
+        preview = face.preview.flatMap { NSBitmapImageRep(cgImage: $0).representation(using: .png, properties: [:]) }
+    }
+}
+
+/// Every photo and video a face from a photo is in (Find by Photo, Show All): the faces in the library alike enough
+/// to it, grouped with somebody or not, and the files of the person it is likely to be. Best match first, or by
+/// date; open, look closer or export them as from a search.
+struct FaceFilesView: View {
+    @EnvironmentObject var model: FaceGroupingModel
+    let route: FaceFilesRoute
+    @State private var strictness = FaceMatchStrictness.normal
+    @State private var withPerson = true
+    @State private var kind: MediaKind?
+    @State private var byDate = false
+    @State private var hideSimilar = false
+    @State private var matches: [FaceMatch] = []
+    @State private var searching = false
+    @State private var error: String?
+    @State private var exporting = false
+
+    /// What the search depends on (the rest only filters or orders what it found).
+    struct Search: Hashable {
+        var strictness: FaceMatchStrictness
+        var person: Int64?
+        var project: Int64?
+    }
+
+    var shown: [FaceMatch] {
+        var out = matches.filter { kind == nil || $0.kind == kind }
+        if hideSimilar {
+            // A burst keeps its best match.
+            var seen = Set<Int64>()
+            out = out.filter { m in m.burstId.map { seen.insert($0).inserted } ?? true }
+        }
+        if byDate { out.sort { ($0.takenAt ?? .distantPast, $0.path) < ($1.takenAt ?? .distantPast, $1.path) } }
+        return out
+    }
+
+    var body: some View {
+        let shown = self.shown
+        VStack(spacing: 0) {
+            filters
+            Divider()
+            if searching && matches.isEmpty {
+                ProgressView("Looking through every face in the library…").frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                MediaResultsGrid(
+                    hits: shown.map { m in
+                        MediaHit(id: m.id, path: m.path, kind: m.kind, faceId: m.faceId, time: m.time, score: Double(m.similarity),
+                                 takenAt: m.takenAt, burstId: m.burstId)
+                    },
+                    empty: error ?? "No photos or videos with this face",
+                    badges: Dictionary(uniqueKeysWithValues: shown.map { m in
+                        (m.id, m.throughPerson ? "Grouped" : "\(Int((m.similarity * 100).rounded()))%")
+                    }))
+                .id(Search(strictness: strictness, person: withPerson ? route.person : nil, project: model.currentProject))
+            }
+        }
+        .navigationTitle(route.name.map { "Files with \($0)" } ?? "Files with This Face")
+        .navigationSubtitle(subtitle(shown))
+        .toolbar {
+            ToolbarItem {
+                Button { exporting = true } label: { Label("Export…", systemImage: "square.and.arrow.up") }.disabled(shown.isEmpty)
+            }
+        }
+        .sheet(isPresented: $exporting) {
+            ExportSheet(scope: .media(shown.map(\.id), title: route.name ?? "Find by Photo"), mode: .copy, initialName: route.name ?? "Find by Photo")
+        }
+        .task(id: Search(strictness: strictness, person: withPerson ? route.person : nil, project: model.currentProject)) { await search() }
+    }
+
+    func subtitle(_ shown: [FaceMatch]) -> String {
+        let videos = shown.count { $0.kind == .video }
+        return "\(shown.count - videos) photos · \(videos) videos · \(model.projectName)"
+    }
+
+    var filters: some View {
+        FlowLayout(spacing: 10, lineSpacing: 8) {
+            Group {
+                if let data = route.preview, let img = NSImage(data: data) {
+                    Image(nsImage: img).resizable()
+                } else {
+                    Image(systemName: "person.crop.square").resizable().padding(6).foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 36, height: 36)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            Picker("", selection: $strictness) {
+                Text("Strict").tag(FaceMatchStrictness.strict)
+                Text("Normal").tag(FaceMatchStrictness.normal)
+                Text("Loose").tag(FaceMatchStrictness.loose)
+            }
+            .pickerStyle(.segmented).fixedSize()
+            .help("How alike a face must be: Strict lets in fewer of somebody else's, Loose misses fewer of theirs")
+            if let name = route.name {
+                Toggle("Everything grouped as \(name)", isOn: $withPerson).toggleStyle(.checkbox).fixedSize()
+                    .help("Also the files the library put \(name) in, though the face there isn't alike enough on its own (a profile, a face half hidden)")
+            }
+            Picker("", selection: $kind) {
+                Text("Photos & videos").tag(MediaKind?.none)
+                Text("Photos").tag(MediaKind?.some(.photo))
+                Text("Videos").tag(MediaKind?.some(.video))
+            }
+            .fixedSize()
+            Picker("", selection: $byDate) {
+                Text("Best match first").tag(false)
+                Text("By date").tag(true)
+            }
+            .fixedSize()
+            Toggle("Hide similar shots", isOn: $hideSimilar).toggleStyle(.checkbox).fixedSize()
+            if searching { ProgressView().controlSize(.small) }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    func search() async {
+        guard let store = model.store, !route.vector.isEmpty else { return }
+        let v = route.vector, st = strictness, person = withPerson ? route.person : nil, project = model.currentProject
+        searching = true
+        let r = await Task.detached(priority: .userInitiated) { Result { try store.files(like: v, strictness: st, person: person, project: project) } }.value
+        guard !Task.isCancelled else { return }
+        searching = false
+        switch r {
+        case .success(let found): matches = found; error = nil
+        case .failure(let e): matches = []; error = e.localizedDescription
         }
     }
 }

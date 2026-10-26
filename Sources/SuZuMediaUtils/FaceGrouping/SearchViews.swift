@@ -4,6 +4,75 @@ import MediaKit
 import SwiftUI
 import UserNotifications
 
+/// Files found (by a search, an album, a face looked for) as a grid: a click selects (⌘ and ⇧ for more), a
+/// double-click opens with the default app, space takes a closer look, a right-click opens, shows or copies them.
+struct MediaResultsGrid: View {
+    let hits: [MediaHit]
+    var empty = "No matching files"
+    /// A word on a file's tile (how alike its face is to the one looked for).
+    var badges: [Int64: String] = [:]
+    @State private var shown = 600
+    /// Files selected in the grid (⌘-click for several), for Open.
+    @State private var selected: Set<Int64> = []
+    /// The file space opened (see `Peek`).
+    @State private var peek: PeekState<Int64>?
+    @State private var pointer = Peek<Int64>()
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        ScrollView {
+            if hits.isEmpty {
+                ContentUnavailableView(empty, systemImage: "magnifyingglass").padding(.top, 60)
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 8)], spacing: 8) {
+                ForEach(hits.prefix(shown)) { h in
+                    MediaThumbnail(item: PersonMedia(id: h.id, path: h.path, kind: h.kind, faceId: h.faceId ?? 0, time: h.time,
+                                                     score: h.score, takenAt: h.takenAt, burstId: h.burstId), side: 170)
+                        .overlay(alignment: .topTrailing) {
+                            if let b = badges[h.id] {
+                                Text(b).font(.caption2.weight(.semibold).monospacedDigit())
+                                    .padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(.black.opacity(0.6), in: Capsule()).foregroundStyle(.white).padding(6)
+                            }
+                        }
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(selected.contains(h.id) ? Color.accent : .clear, lineWidth: 3))
+                        .onClick({ pointer.clicked = h.id; selected.click(h.id, in: hits.map(\.id)) },
+                                 double: { NSWorkspace.shared.open(URL(fileURLWithPath: h.path, isDirectory: false)) })
+                        .onHover { pointer.hover(h.id, $0) }
+                        .peekPopover(h.id, open: $peek, keys: key) { id in
+                            if let h = hits.first(where: { $0.id == id }) {
+                                MediaPeek(url: URL(fileURLWithPath: h.path, isDirectory: false), mediaId: h.id,
+                                          time: h.kind == .video ? h.time : nil, faceId: h.faceId)
+                            }
+                        }
+                        .contextMenu {
+                            // The selection when this file is in it, else just this file.
+                            let open = selected.contains(h.id) ? hits.filter { selected.contains($0.id) } : [h]
+                            let urls = open.map { URL(fileURLWithPath: $0.path, isDirectory: false) }
+                            Button(open.count > 1 ? "Open \(open.count) Files" : "Open") {
+                                openWindow.edit(open.map(\.path), faces: Dictionary(open.compactMap { h in h.faceId.map { (h.path, $0) } }, uniquingKeysWith: { a, _ in a }))
+                            }
+                            Button("Open With Default App") { urls.forEach { NSWorkspace.shared.open($0) } }
+                            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(urls) }
+                            Button("Copy File Path") { Clipboard.copyPaths(urls) }
+                        }
+                }
+            }
+            .padding(16)
+            if hits.count > shown {
+                Button("Show \(min(600, hits.count - shown)) More") { shown += 600 }.padding(.bottom, 20)
+            }
+        }
+        .onWindowKeys(key)
+    }
+
+    /// Space: a closer look at the file under the mouse (else the one clicked last, else the first selected); see
+    /// `Peek`.
+    func key(_ e: NSEvent) -> Bool {
+        pointer.key(e, open: &peek, selection: selected, order: hits.prefix(shown).map(\.id))
+    }
+}
+
 /// Search with filters; a saved search is a smart album that updates itself as files arrive.
 struct SearchView: View {
     @EnvironmentObject var model: FaceGroupingModel
@@ -16,14 +85,7 @@ struct SearchView: View {
     @State private var saving = false
     @State private var albumName = ""
     @State private var exporting = false
-    @State private var shown = 600
     @State private var generation = 0
-    /// Files selected in the grid (⌘-click for several), for Open.
-    @State private var selected: Set<Int64> = []
-    /// The file space opened (see `Peek`).
-    @State private var peek: PeekState<Int64>?
-    @State private var pointer = Peek<Int64>()
-    @Environment(\.openWindow) private var openWindow
 
     var album: SmartAlbum? { albumId.flatMap { id in model.albums.first { $0.id == id } } }
     var named: [PersonSummary] { model.people.filter { $0.name != nil } }
@@ -34,46 +96,11 @@ struct SearchView: View {
             if album == nil { SessionBar(divider: true) }
             filters
             Divider()
-            ScrollView {
-                if hits.isEmpty {
-                    ContentUnavailableView("No matching files", systemImage: "magnifyingglass").padding(.top, 60)
-                }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 8)], spacing: 8) {
-                    ForEach(hits.prefix(shown)) { h in
-                        MediaThumbnail(item: PersonMedia(id: h.id, path: h.path, kind: h.kind, faceId: h.faceId ?? 0, time: h.time,
-                                                         score: h.score, takenAt: h.takenAt, burstId: h.burstId), side: 170)
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(selected.contains(h.id) ? Color.accent : .clear, lineWidth: 3))
-                            .onClick({ pointer.clicked = h.id; selected.click(h.id, in: hits.map(\.id)) },
-                                     double: { NSWorkspace.shared.open(URL(fileURLWithPath: h.path, isDirectory: false)) })
-                            .onHover { pointer.hover(h.id, $0) }
-                            .peekPopover(h.id, open: $peek, keys: key) { id in
-                                if let h = hits.first(where: { $0.id == id }) {
-                                    MediaPeek(url: URL(fileURLWithPath: h.path, isDirectory: false), mediaId: h.id,
-                                              time: h.kind == .video ? h.time : nil, faceId: h.faceId)
-                                }
-                            }
-                            .contextMenu {
-                                // The selection when this file is in it, else just this file.
-                                let open = selected.contains(h.id) ? hits.filter { selected.contains($0.id) } : [h]
-                                let urls = open.map { URL(fileURLWithPath: $0.path, isDirectory: false) }
-                                Button(open.count > 1 ? "Open \(open.count) Files" : "Open") {
-                                    openWindow.edit(open.map(\.path), faces: Dictionary(open.compactMap { h in h.faceId.map { (h.path, $0) } }, uniquingKeysWith: { a, _ in a }))
-                                }
-                                Button("Open With Default App") { urls.forEach { NSWorkspace.shared.open($0) } }
-                                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(urls) }
-                                Button("Copy File Path") { Clipboard.copyPaths(urls) }
-                            }
-                    }
-                }
-                .padding(16)
-                if hits.count > shown {
-                    Button("Show \(min(600, hits.count - shown)) More") { shown += 600 }.padding(.bottom, 20)
-                }
-            }
+            // New filters: a new grid (back to the top, nothing selected).
+            MediaResultsGrid(hits: hits).id(currentQuery.hashValue)
         }
         .navigationTitle(album?.name ?? "Search")
         .navigationSubtitle("\(hits.count) files")
-        .onWindowKeys(key)
         .toolbar {
             ToolbarItem {
                 Button(album == nil ? "Save as Smart Album…" : "Update Album") {
@@ -100,7 +127,6 @@ struct SearchView: View {
         .task(id: currentQuery.hashValue) {
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
-            shown = 600
             search()
         }
         .task {
@@ -110,12 +136,6 @@ struct SearchView: View {
             }
         }
         .task { await benchFilters() }
-    }
-
-    /// Space: a closer look at the file under the mouse (else the one clicked last, else the first selected); see
-    /// `Peek`.
-    func key(_ e: NSEvent) -> Bool {
-        pointer.key(e, open: &peek, selection: selected, order: hits.prefix(shown).map(\.id))
     }
 
     /// SUZU_BENCH_SEARCH=1 (testing): flips through filter combinations like a user would; any value logs results.

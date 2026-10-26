@@ -90,6 +90,51 @@ final class GroupingTests: XCTestCase {
         XCTAssertFalse(stranger[0].likely)
     }
 
+    /// A face from outside finds every file it is in: grouped with its person or not, a video once (at its best
+    /// frame); a shot too far from it (a profile) only through the person, and nobody else's.
+    func testAFaceFromOutsideFindsItsFiles() throws {
+        let an = direction(), bo = direction(), profile = look(an, direction(), amount: 3)
+        let anId = try store.db.write { db in var p = PersonRecord(name: "An"); try p.insert(db); return p.id! }
+        let grouped = try (0..<4).map { _ in try photo(face(an), personId: anId) }
+        let ungrouped = try (0..<3).map { _ in try photo(face(an)) }
+        let side = try photo(face(profile), personId: anId)
+        let other = try photo(face(bo))
+        // A video: three frames of An (the middle one closest), one of Bo.
+        let video = try store.db.write { db -> Int64 in
+            var m = MediaRecord(sourceId: 1, path: root.appendingPathComponent("v.mov").path, kind: .video, size: 1, mtime: 0, contentKey: "kv")
+            m.status = .done
+            try m.insert(db)
+            for (t, v) in [(1.0, face(an, jitter: 1.2)), (2.0, face(an, jitter: 0.3)), (3.0, face(an, jitter: 1.2)), (4.0, face(bo))] {
+                var f = FaceRecord(id: nil, mediaId: m.id!, x: 0.4, y: 0.4, w: 0.1, h: 0.1, quality: 0.8, time: t, embedding: Vector.encode(v),
+                                   track: nil, personId: nil, assignment: .none, rejectedPersonId: nil)
+                try f.insert(db)
+            }
+            return m.id!
+        }
+        func media(_ faceIds: [Int64]) throws -> Set<Int64> {
+            try store.db.read { db in Set(try Int64.fetchAll(db, sql: "SELECT mediaId FROM face WHERE id IN (\(faceIds.map(String.init).joined(separator: ",")))")) }
+        }
+        let query = face(an)
+        let found = try store.files(like: query, project: nil)
+        XCTAssertEqual(Set(found.map(\.id)), try media(grouped + ungrouped).union([video]))
+        XCTAssertTrue(found.allSatisfy { !$0.throughPerson })
+        let v = try XCTUnwrap(found.first { $0.id == video })
+        XCTAssertEqual(v.kind, .video)
+        XCTAssertEqual(v.faces, 3)
+        XCTAssertEqual(v.time, 2.0)
+        // With the person: their profile shot too, marked as found through them, and last.
+        let withAn = try store.files(like: query, person: anId, project: nil)
+        let profileFile = try XCTUnwrap(try media([side]).first)
+        XCTAssertEqual(withAn.count, found.count + 1)
+        XCTAssertEqual(withAn.last?.id, profileFile)
+        XCTAssertEqual(withAn.last?.throughPerson, true)
+        XCTAssertFalse(withAn.map(\.id).contains(try media([other]).first!))
+        // Best match first.
+        XCTAssertEqual(found.map(\.similarity), found.map(\.similarity).sorted(by: >))
+        // Another project's files are not looked at.
+        XCTAssertTrue(try store.files(like: query, project: 999).isEmpty)
+    }
+
     /// Faces that only resemble some of a person's earlier shots (a profile, a new hairstyle) join them through
     /// their nearest exemplars, where the mean of every shot would have turned them away.
     func testNewLookJoinsThroughNearestExemplars() throws {

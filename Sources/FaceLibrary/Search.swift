@@ -55,6 +55,12 @@ public struct MediaHit: Identifiable, Hashable, Sendable {
     public var score: Double
     public var takenAt: Date?
     public var burstId: Int64?
+
+    public init(id: Int64, path: String, kind: MediaKind, faceId: Int64? = nil, time: Double? = nil, score: Double,
+                takenAt: Date? = nil, burstId: Int64? = nil) {
+        self.id = id; self.path = path; self.kind = kind; self.faceId = faceId; self.time = time; self.score = score
+        self.takenAt = takenAt; self.burstId = burstId
+    }
 }
 
 extension MediaQuery {

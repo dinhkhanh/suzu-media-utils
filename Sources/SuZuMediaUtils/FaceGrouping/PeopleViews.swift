@@ -103,7 +103,9 @@ struct PeopleGrid: View {
         .sheet(isPresented: $suggesting) { CelebritySheet() }
         .sheet(item: $exportAll) { ExportSheet(scope: .all, mode: $0) }
         .sheet(isPresented: $galleryExport) { GalleryExportSheet() }
-        .sheet(isPresented: $findingByPhoto) { PhotoLookupSheet { path.append(PersonRoute(id: $0)) } }
+        .sheet(isPresented: $findingByPhoto) {
+            PhotoLookupSheet(open: { path.append(PersonRoute(id: $0)) }, showFiles: { path.append($0) })
+        }
         .toolbar {
             ToolbarItem {
                 Picker("Show", selection: $filter) {
@@ -125,7 +127,7 @@ struct PeopleGrid: View {
             }
             ToolbarItem {
                 Button { findingByPhoto = true } label: { Label("Find by Photo", systemImage: "person.fill.viewfinder") }
-                    .help("Find people by a photo: drop, paste or choose one, and see who each face in it looks like")
+                    .help("Find by a photo: drop, paste or choose one, and see who each face in it looks like and every photo and video it is in")
             }
             ToolbarItem {
                 Button { suggesting = true } label: { Label("Suggest Names", systemImage: "sparkles") }

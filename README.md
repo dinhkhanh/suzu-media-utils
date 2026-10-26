@@ -41,7 +41,11 @@ groups them by person, keeps up as new files arrive, and files each person's med
   chosen automatically (sharp, eyes open, facing the camera).
 - **Find by Photo** (People toolbar): drop a photo, paste one (⌘V) or choose one, and every face in it lists the
   people it looks most like, the best match marked Likely when it clears the bar the library names faces by; click
-  one to open them. The photo is only looked at, never added.
+  one to open them. Each face also says how many photos and videos of the project it is in; **Show All** lists
+  them, from every face in the library alike enough to it, grouped with somebody or not (a video once, at its
+  best frame), with the Likely person's files too: Strict / Normal / Loose, photos or videos, best match first or
+  by date, hide similar shots; open, look closer (space) or export them as from a search. The photo is only looked
+  at, never added.
 - A person's page: their picture, name (click to rename), counts and when they were shot, who they are **often
   with** (click a face chip to see only the photos together), then Photos / Videos / Faces with Best first, Best
   N and Hide bursts as chips; each photo carries its best-shot score, burst count, time and session. Select photos
