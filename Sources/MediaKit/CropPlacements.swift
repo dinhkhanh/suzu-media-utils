@@ -92,6 +92,15 @@ public final class CropPlacements: @unchecked Sendable {
     public func add(_ stroke: MaskStroke, to part: Retouch.Part, for url: URL) {
         update(url) { e in var m = e.masks ?? [:]; m[part, default: []].append(stroke); e.masks = m }
     }
+    /// The last stroke painted on a part's mask of this photo taken away.
+    public func removeLastStroke(_ part: Retouch.Part, for url: URL) {
+        update(url) { e in
+            guard var list = e.masks?[part], !list.isEmpty else { return }
+            list.removeLast()
+            e.masks?[part] = list.isEmpty ? nil : list
+            if e.masks?.isEmpty == true { e.masks = nil }
+        }
+    }
     /// The part's mask as found again, without the strokes painted on it.
     public func clearStrokes(_ part: Retouch.Part, for url: URL) {
         update(url) { e in e.masks?[part] = nil; if e.masks?.isEmpty == true { e.masks = nil } }

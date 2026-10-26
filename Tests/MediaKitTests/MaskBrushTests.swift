@@ -61,6 +61,21 @@ final class MaskBrushTests: XCTestCase {
         XCTAssertGreaterThan(grey(50, 50), 240)
         XCTAssertLessThan(grey(150, 50), 10)
     }
+
+    func testAStrokeNearTheTopLandsNearTheTop() {
+        // Points are top-left origin; Core Image counts rows from the bottom.
+        let ext = CGRect(x: 0, y: 0, width: 200, height: 100)
+        let empty = CIImage(color: .black).cropped(to: ext)
+        let out = MaskBrush.apply([MaskStroke(points: [CGPoint(x: 0.5, y: 0.2)], radius: 0.1, softness: 0, erase: false)], to: empty, extent: ext)
+        var px = [UInt8](repeating: 0, count: 4)
+        let ctx = CIContext()
+        func grey(_ x: CGFloat, _ y: CGFloat) -> UInt8 {
+            ctx.render(out, toBitmap: &px, rowBytes: 4, bounds: CGRect(x: x, y: y, width: 1, height: 1), format: .RGBA8, colorSpace: nil)
+            return px[0]
+        }
+        XCTAssertGreaterThan(grey(100, 80), 240, "painted 20% from the top")
+        XCTAssertLessThan(grey(100, 20), 10, "nothing 20% from the bottom")
+    }
 }
 
 final class SmoothSkinTests: XCTestCase {

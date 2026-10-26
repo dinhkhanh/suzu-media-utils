@@ -104,13 +104,17 @@ final class PreviewCache: @unchecked Sendable {
         var angle: Double?
         /// The turn straightening would make on its own (degrees counter-clockwise).
         var autoAngle: Double?
+        /// The people's parts (the masks): found (true), nobody found (false), not looked for (nil).
+        var masks: Bool? = nil
     }
 
     /// The photo through the recipe (or untouched), plus the size the exported file will have. The photo's own crop
     /// (edited by hand) wins over the recipe's, as in the export. `longSide`: the screen pixels the preview gets, so
     /// the result (and its watermark) is drawn at the screen's resolution; `withFull` also renders the whole photo
-    /// for the crop tool.
-    func render(_ item: ToolItem, recipe: EditRecipe, original: Bool, longSide: Int, withFull: Bool, showMask: Retouch.Part? = nil) -> Rendered? {
+    /// for the crop tool. `findMasks`: the people's parts are looked for (slow: only when asked, Find Masks); without
+    /// them the photo shows no retouch and no mask.
+    func render(_ item: ToolItem, recipe: EditRecipe, original: Bool, longSide: Int, withFull: Bool, showMask: Retouch.Part? = nil,
+                findMasks: Bool = false) -> Rendered? {
         guard let e = entry(item.url) else { return nil }
         let recipe = CropPlacements.shared.recipe(recipe, for: item.url)
         let edit = CropPlacements.shared.edit(for: item.url)
@@ -145,9 +149,10 @@ final class PreviewCache: @unchecked Sendable {
         Task { @MainActor in AutoToneValues.shared.set(auto, for: autoKey) }
         // The masks are found on the levelled photo here; the strokes painted on them are placed to match.
         let levelled = angle.map { (degrees: $0, size: oriented.extent.size) }
-        var toned = EditPipeline.tone(level, r, auto: auto, levelled: levelled)
+        let parts = findMasks ? BodyParts.find(in: level) : nil
+        var toned = EditPipeline.tone(level, r, auto: auto, levelled: levelled, findParts: { _ in parts })
         // Show Mask: the part's mask, shaped by its dials and painted by hand, tinted red over the photo.
-        if let part = showMask, let parts = BodyParts.find(in: level) {
+        if let part = showMask, let parts {
             let brush = EditPipeline.placedBrush(r, levelled: levelled)[part] ?? []
             let mask = EditPipeline.partMask(part, r.retouch, parts: parts, extent: level.extent, brush: brush)
             let red = CIImage(color: CIColor(red: 1, green: 0.1, blue: 0.2, alpha: 0.6)).cropped(to: level.extent)
@@ -190,7 +195,8 @@ final class PreviewCache: @unchecked Sendable {
         let k = angle.map { EditPipeline.rotatedScale(pixelSize, degrees: $0) } ?? 1
         let fullSize = CGSize(width: (pixelSize.width * k).rounded(.down), height: (pixelSize.height * k).rounded(.down))
         return Rendered(image: NSImage(cgImage: cg, size: .zero), outputSize: Self.outputSize(pixelSize, recipe: recipe, angle: angle, zoom: zoom ?? 1, rect: rect),
-                        warning: warning, crop: crop, full: full, fullSize: fullSize, pixelSize: pixelSize, angle: angle, autoAngle: autoAngle)
+                        warning: warning, crop: crop, full: full, fullSize: fullSize, pixelSize: pixelSize, angle: angle, autoAngle: autoAngle,
+                        masks: findMasks ? parts != nil : nil)
     }
 
     static func outputSize(_ size: CGSize, recipe: EditRecipe, angle: Double? = nil, zoom: Double = 1, rect: CGRect? = nil) -> CGSize {
@@ -243,6 +249,29 @@ final class MaskOverlay: ObservableObject {
 
     /// [ and ] make the brush smaller or bigger.
     func resize(_ by: Int) { size = min(Self.sizes.upperBound, max(Self.sizes.lowerBound, size * (by > 0 ? 1.25 : 0.8))) }
+
+    /// Finding a photo's masks is slow, so the preview looks for them only in the photos Find Masks was clicked for
+    /// (by path); until then the retouch and the masks' tools wait.
+    @Published private(set) var asked: Set<String> = []
+    /// What looking came to: true found, false nobody found. Absent while looking.
+    @Published private(set) var found: [String: Bool] = [:]
+
+    enum Masks { case notFound, finding, ready, nobody }
+
+    func masks(_ photo: URL?) -> Masks {
+        guard let path = photo?.path, asked.contains(path) else { return .notFound }
+        return found[path].map { $0 ? .ready : .nobody } ?? .finding
+    }
+
+    func find(_ photo: URL) {
+        found[photo.path] = nil
+        asked.insert(photo.path)
+    }
+
+    func landed(_ photo: URL, found ok: Bool) {
+        guard asked.contains(photo.path), found[photo.path] != ok else { return }
+        found[photo.path] = ok
+    }
 }
 
 struct EditPreview: View {
@@ -388,7 +417,7 @@ struct EditPreview: View {
         .onChange(of: samples.count) { if index >= samples.count { index = 0 } }
         .onChange(of: samples.count > 1) { if samples.count > 1, ProcessInfo.processInfo.environment["SUZU_TOOL_SAMPLES"] == "grid" { gridMode = true } }
         .onChange(of: current?.url, initial: true) { shown?.wrappedValue = current?.url; if cropping { cancelCrop() }; setZoom(nil); liveStrokes = [] }
-        .task(id: "\(recipe.hashValue)|\(current?.url.path ?? "")|\(showOriginal)|\(placements)|\(renderLongSide)|\(perPhotoCrop)|\(maskOverlay.part?.rawValue ?? "")|\(bodyParts.state == .ready)") { await render() }
+        .task(id: "\(recipe.hashValue)|\(current?.url.path ?? "")|\(showOriginal)|\(placements)|\(renderLongSide)|\(perPhotoCrop)|\(maskOverlay.part?.rawValue ?? "")|\(bodyParts.state == .ready)|\(findsMasks)") { await render() }
         .task(id: "\(current?.url.path ?? "")|\(exports)") {
             guard let url = current?.url else { lastExport = nil; return }
             lastExport = await Task.detached { ExportHistory.shared.exports(of: url).first }.value
@@ -634,6 +663,7 @@ struct EditPreview: View {
     /// Dragging paints the shown part's mask of this photo (the retouch panel's Paint mask).
     var brushActive: Bool {
         maskOverlay.brushing && maskOverlay.part != nil && perPhotoCrop && !showOriginal && !cropping && box == nil && current != nil && !showGrid
+            && maskOverlay.masks(current?.url) == .ready
     }
 
     /// The brush's radius on screen: its share of the photo's short side, at the zoom shown (`photo` is where the
@@ -1223,21 +1253,26 @@ struct EditPreview: View {
         .environment(\.colorScheme, .dark)
     }
 
+    /// The shown photo's masks were asked for (Find Masks).
+    var findsMasks: Bool { maskOverlay.masks(current?.url) != .notFound }
+
     func render() async {
         guard let item = current else { rendered = nil; return }
         // Let sliders settle; a newer change cancels this one.
         try? await Task.sleep(for: .milliseconds(80))
         guard !Task.isCancelled else { return }
         rendering = true
-        let recipe = recipe, original = showOriginal, long = renderLongSide, withFull = perPhotoCrop, mask = maskOverlay.part
+        let recipe = recipe, original = showOriginal, long = renderLongSide, withFull = perPhotoCrop, finds = findsMasks
+        let mask = finds ? maskOverlay.part : nil
         // Strokes painted by now are in this render; on screen until it lands.
         let landed = liveStrokes.prefix { $0.done }.count
         let result = await Task.detached(priority: .userInitiated) {
-            PreviewCache.shared.render(item, recipe: recipe, original: original, longSide: long, withFull: withFull, showMask: mask)
+            PreviewCache.shared.render(item, recipe: recipe, original: original, longSide: long, withFull: withFull, showMask: mask, findMasks: finds)
         }.value
         guard !Task.isCancelled else { return }
         rendering = false
         if let result { rendered = result }
+        if let ok = result?.masks { maskOverlay.landed(item.url, found: ok) }
         liveStrokes.removeFirst(min(landed, liveStrokes.prefix { $0.done }.count))
         if !cropping { box = nil; liveAngle = liveZoom == nil ? nil : liveAngle }
         pan = clampedPan(pan)

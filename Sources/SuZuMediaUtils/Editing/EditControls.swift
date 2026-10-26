@@ -35,6 +35,8 @@ struct EditControls: View {
     var sections: EditSections = .all
     /// The photo shown in the preview, for "This photo only".
     var photo: URL? = nil
+    /// The photo in the preview, for finding its masks (Retouch) where the controls don't edit it alone; else `photo`.
+    var masksPhoto: URL? = nil
     var photoCount = 1
     /// Edits the shown photo's own look instead of the export's.
     @State private var thisPhoto = false
@@ -140,7 +142,7 @@ struct EditControls: View {
                 }
             }
             if sections.contains(.retouch) {
-                InspectorSection(title: "Retouch") { RetouchControls(retouch: $recipe.retouch, photo: photo) }
+                InspectorSection(title: "Retouch") { RetouchControls(retouch: $recipe.retouch, photo: photo, masksPhoto: masksPhoto ?? photo) }
             }
             if sections.contains(.crop) {
                 InspectorSection(title: "Crop") { AspectChooser(recipe: $recipe) }
@@ -702,11 +704,15 @@ struct FontPicker: View, Equatable {
 }
 
 /// Skin retouch, then the people's parts (face skin, body skin, lips, clothes), each with its own dials and mask
-/// shape. The parts are found by the app in every photo; Show Mask tints the chosen one red on the preview.
+/// shape. Finding a photo's parts is slow, so the preview finds them only when asked (Find Masks), photo by photo;
+/// until then every control here waits. Exports find them in every photo. Show Mask tints the chosen one red on
+/// the preview.
 struct RetouchControls: View {
     @Binding var retouch: Retouch?
     /// The photo in the preview, whose masks the brush paints; nil where the preview can't be painted on.
     var photo: URL? = nil
+    /// The photo in the preview, whose masks Find Masks finds.
+    var masksPhoto: URL? = nil
     @State private var part = Retouch.Part.faceSkin
     @ObservedObject private var overlay = MaskOverlay.shared
     @ObservedObject private var model = BodyPartsModel.shared
@@ -730,6 +736,39 @@ struct RetouchControls: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             modelRow
+            findRow
+            controls.disabled(overlay.masks(masksPhoto) != .ready)
+        }
+        .onDisappear { overlay.part = nil }
+        .onChange(of: masksPhoto) { if overlay.masks(masksPhoto) != .ready { overlay.part = nil } }
+        .onReceive(NotificationCenter.default.publisher(for: CropPlacements.changed)) { _ in placements += 1 }
+    }
+
+    /// Find Masks for the shown photo, and how it went.
+    @ViewBuilder var findRow: some View {
+        let state = overlay.masks(masksPhoto)
+        if state != .ready {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Button(state == .nobody ? "Find Masks Again" : "Find Masks") { if let masksPhoto { overlay.find(masksPhoto) } }
+                        .disabled(masksPhoto == nil || state == .finding)
+                        .help("Find the people's face skin, body skin, lips and clothes in this photo, for the retouch and the masks' tools")
+                    if state == .finding {
+                        ProgressView().controlSize(.small)
+                        Text("Finding…").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Text(state == .nobody ? "No people found in this photo."
+                     : retouch?.isActive == true ? "The preview shows the retouch once this photo's masks are found; exports retouch every photo."
+                     : "Find this photo's masks to retouch skin and change its people's parts.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Divider().padding(.vertical, 2)
+        }
+    }
+
+    var controls: some View {
+        VStack(alignment: .leading, spacing: 8) {
             AdjustSlider("Smooth skin", value: r.smooth, range: 0...1, help: "Evens out blemishes and blotches; pores, eyes and edges stay sharp")
             AdjustSlider("Brighten skin", value: r.brighten, range: 0...1)
             AdjustSlider("Whiten skin", value: r.whiten, range: 0...1, help: "Fairer skin: less yellow, a touch rosier and lighter")
@@ -756,8 +795,6 @@ struct RetouchControls: View {
             }
             maskTools(part)
         }
-        .onDisappear { overlay.part = nil }
-        .onReceive(NotificationCenter.default.publisher(for: CropPlacements.changed)) { _ in placements += 1 }
     }
 
     /// A mask's tools: shown tinted red on the preview, and painted by hand on the shown photo (added to where the
@@ -782,6 +819,9 @@ struct RetouchControls: View {
                 Spacer()
                 if let photo, strokes > 0 {
                     Text("\(strokes) stroke\(strokes == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary)
+                    Button { CropPlacements.shared.removeLastStroke(part, for: photo) } label: { Image(systemName: "arrow.uturn.backward") }
+                        .controlSize(.small)
+                        .help("Take away the last stroke painted on the \(name) mask of this photo (⌘Z too)")
                     Button("Clear") { CropPlacements.shared.clearStrokes(part, for: photo) }.controlSize(.small)
                         .help("The \(name) mask of this photo as the app finds it, without the strokes painted on it")
                 }
@@ -1078,14 +1118,15 @@ struct EditOptionsView: View {
     var sections: EditSections = .all
     /// Remembers this screen's choices between uses.
     var remember: String?
+    @State private var shown: URL?
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            EditPreview(recipe: $recipe, samples: samples)
+            EditPreview(recipe: $recipe, samples: samples, shown: $shown)
                 .frame(minWidth: 360, maxWidth: .infinity)
             Divider()
             ScrollView {
-                EditControls(recipe: $recipe, sections: sections).padding(14)
+                EditControls(recipe: $recipe, sections: sections, masksPhoto: shown).padding(14)
             }
             .frame(width: 290)
         }

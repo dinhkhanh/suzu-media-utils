@@ -146,11 +146,14 @@ public enum EditPipeline {
     /// As above with the auto tone's dials already measured (`autoAdjustments`), so a caller can show them.
     /// `levelled`: the image is already levelled by these degrees from a picture of this size (the editor's preview
     /// levels before toning), for the strokes painted on the masks to land where they were painted.
-    public static func tone(_ image: CIImage, _ recipe: EditRecipe, auto: Adjustments?, levelled: (degrees: Double, size: CGSize)? = nil) -> CIImage {
+    /// `findParts`: how the people's parts are found (the editor's preview only has them for the photos it was asked
+    /// to find them in).
+    public static func tone(_ image: CIImage, _ recipe: EditRecipe, auto: Adjustments?, levelled: (degrees: Double, size: CGSize)? = nil,
+                            findParts: (CIImage) -> BodyParts? = { BodyParts.find(in: $0) }) -> CIImage {
         let look = recipe.look.composed(over: auto)
         var out = look.changesPixels ? adjust(image, look) : image
         // The people's parts are found on the photo before toning (so moving a dial doesn't look for them again).
-        if let r = recipe.retouch, r.isActive, let parts = BodyParts.find(in: image) {
+        if let r = recipe.retouch, r.isActive, let parts = findParts(image) {
             out = retouch(out, r, parts: parts, brush: placedBrush(recipe, levelled: levelled))
         }
         return out

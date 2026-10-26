@@ -502,14 +502,16 @@ final class EditHistory: ObservableObject {
         let before = lastEdits
         lastEdits = now
         if restoring != nil { return }
-        step(kind: "edits", before: State(recipe: recipe, edits: before))
+        // A stroke painted on a mask (or taken away) is a step of its own, however quickly the next one follows.
+        let strokes = { (e: [String: CropPlacements.Edit?]) in e.values.reduce(0) { $0 + ($1?.masks?.values.reduce(0) { $0 + $1.count } ?? 0) } }
+        step(kind: strokes(now) != strokes(before) ? "stroke" : "edits", before: State(recipe: recipe, edits: before))
     }
 
     /// Registers one undo step unless it continues the last one (the same kind of change, a moment ago).
     private func step(kind: String, before: State) {
         let now = Date()
         defer { lastTime = now; lastKind = kind }
-        if kind == lastKind, now.timeIntervalSince(lastTime) < 0.8, undoManager?.isUndoRegistrationEnabled == true { return }
+        if kind == lastKind, kind != "stroke", now.timeIntervalSince(lastTime) < 0.8, undoManager?.isUndoRegistrationEnabled == true { return }
         register(before)
     }
 

@@ -116,11 +116,9 @@ public enum MaskBrush {
         let (keep, added) = paint(strokes, width: w, height: h)
         func image(_ v: [Float]?) -> CIImage? {
             guard let v else { return nil }
-            var bytes = v.map { UInt8((min(1, max(0, $0)) * 255).rounded()) }
-            // Core Image is bottom-left origin: the rows go in from the bottom.
-            var flipped = [UInt8](repeating: 0, count: bytes.count)
-            for y in 0..<h { flipped.replaceSubrange((h - 1 - y) * w..<(h - y) * w, with: bytes[y * w..<(y + 1) * w]) }
-            bytes = flipped
+            let bytes = v.map { UInt8((min(1, max(0, $0)) * 255).rounded()) }
+            // Rows from the top, as a bitmap's: Core Image puts the first row at the top itself (flipping them here
+            // too painted every stroke upside down).
             return CIImage(bitmapData: Data(bytes), bytesPerRow: w, size: CGSize(width: w, height: h), format: .L8, colorSpace: nil)
         }
         let out = (image(keep), image(added))
