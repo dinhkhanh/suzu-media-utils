@@ -29,6 +29,8 @@ public struct EditRecipe: Codable, Sendable, Equatable, Hashable {
     /// Strokes painted by hand on the parts' masks of one photo (see MaskStroke): filled in from the photo's own
     /// edits (CropPlacements) when it is rendered, never set on a recipe shared by several photos.
     public var brush: [Retouch.Part: [MaskStroke]]?
+    /// Strokes of the healing brush on one photo (see HealStroke), filled in as `brush` is.
+    public var heal: [HealStroke]?
     /// Long side in pixels after cropping; nil keeps the size.
     public var maxLongSide: Int?
     public var jpegQuality = 0.9
@@ -44,7 +46,7 @@ public struct EditRecipe: Codable, Sendable, Equatable, Hashable {
 
     public var isPassthrough: Bool {
         !autoTone && !crops && watermark == nil && maxLongSide == nil && straighten != true && rotation == nil && look.isEmpty
-            && !(retouch?.isActive ?? false)
+            && !(retouch?.isActive ?? false) && (heal ?? []).isEmpty
     }
 
     /// The adjustments, empty when none.

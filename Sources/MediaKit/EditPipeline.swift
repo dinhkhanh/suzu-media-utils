@@ -99,12 +99,13 @@ public enum EditPipeline {
     }
 
     /// The recipe applied to an image in memory (also used for video frames and previews): turned the right way up,
-    /// toned, levelled, cropped, resized, watermarked.
+    /// healed, toned, levelled, cropped, resized, watermarked.
     ///
     /// `previewLongSide`: for previews, the cropped photo is scaled to exactly this long side (up or down) before the
     /// watermark goes on, so the watermark is drawn at the screen's resolution however far the preview is zoomed.
     public static func apply(_ recipe: EditRecipe, to input: CIImage, focus: FocusHint?, previewLongSide: Int? = nil) throws -> CIImage {
-        var (image, focus) = orient(input, recipe.look, focus: focus)
+        // Healed first, on the photo as shot (where the strokes are kept).
+        var (image, focus) = orient(Healing.apply(recipe.heal ?? [], to: input), recipe.look, focus: focus)
         image = tone(image, recipe)
         if let degrees = rotation(recipe, image) { (image, focus) = rotate(image, degrees: degrees, focus: focus) }
         let size = image.extent.size

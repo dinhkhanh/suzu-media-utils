@@ -703,10 +703,10 @@ struct FontPicker: View, Equatable {
     }
 }
 
-/// Skin retouch, then the people's parts (face skin, body skin, lips, clothes), each with its own dials and mask
-/// shape. Finding a photo's parts is slow, so the preview finds them only when asked (Find Masks), photo by photo;
-/// until then every control here waits. Exports find them in every photo. Show Mask tints the chosen one red on
-/// the preview.
+/// The healing brush, skin retouch, then the people's parts (face skin, body skin, lips, clothes), each with its
+/// own dials and mask shape. Finding a photo's parts is slow, so the preview finds them only when asked (Find
+/// Masks), photo by photo; until then every control but the healing brush waits. Exports find them in every photo.
+/// Show Mask tints the chosen one red on the preview.
 struct RetouchControls: View {
     @Binding var retouch: Retouch?
     /// The photo in the preview, whose masks the brush paints; nil where the preview can't be painted on.
@@ -736,12 +736,57 @@ struct RetouchControls: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             modelRow
+            healTools
             findRow
             controls.disabled(overlay.masks(masksPhoto) != .ready)
         }
-        .onDisappear { overlay.part = nil }
+        .onDisappear { overlay.part = nil; overlay.healing = false }
         .onChange(of: masksPhoto) { if overlay.masks(masksPhoto) != .ready { overlay.part = nil } }
         .onReceive(NotificationCenter.default.publisher(for: CropPlacements.changed)) { _ in placements += 1 }
+    }
+
+    /// The healing brush, on the shown photo: blemishes, moles, freckles and lines painted over are filled from clean
+    /// skin nearby (or from a spot ⌥-clicked), its texture kept and its tone matched. Needs no masks.
+    @ViewBuilder var healTools: some View {
+        if let photo {
+            let strokes = CropPlacements.shared.healStrokes(for: photo).count
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Toggle("Healing brush", isOn: $overlay.healing)
+                        .toggleStyle(.checkbox)
+                        .help("Drag over blemishes, moles, freckles or lines on the preview to heal them from clean skin nearby")
+                    Spacer()
+                    if strokes > 0 {
+                        Text("\(strokes) stroke\(strokes == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary)
+                        Button { CropPlacements.shared.removeLastHeal(for: photo) } label: { Image(systemName: "arrow.uturn.backward") }
+                            .controlSize(.small)
+                            .help("Take away the last healing stroke on this photo (⌘Z too)")
+                        Button("Clear") { CropPlacements.shared.clearHeals(for: photo) }.controlSize(.small)
+                            .help("Take away every healing stroke on this photo")
+                    }
+                }
+                .id(placements)
+                if overlay.healing {
+                    PercentSlider(label: "Brush size", value: $overlay.healSize, range: MaskOverlay.sizes)
+                        .help("The brush's radius, as a share of the photo's short side ([ and ] on the preview): a little bigger than the spot")
+                    PercentSlider(label: "Brush edge", value: $overlay.healSoftness, range: 0...1)
+                        .help("0%: a hard edge; higher, the healing fades out further from its middle")
+                    if let source = overlay.healSource, source.photo == photo.path {
+                        HStack {
+                            Text(source.shift == nil ? "Heals from the spot picked." : "Heals from the spot picked, kept alongside the brush.")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Auto") { overlay.healSource = nil }.controlSize(.small)
+                                .help("Back to the brush finding clean skin nearby for every stroke")
+                        }
+                    } else {
+                        Text("The brush finds clean skin nearby itself; ⌥-click the preview to heal from a spot of your own. Z-click zooms in, ⌥Z-click out.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            Divider().padding(.vertical, 2)
+        }
     }
 
     /// Find Masks for the shown photo, and how it went.
@@ -814,7 +859,7 @@ struct RetouchControls: View {
                         overlay.brushing = on
                     }))
                     .toggleStyle(.checkbox)
-                    .help("Drag on the preview to paint the \(name) mask of this photo; ⌥-drag does the opposite, [ and ] change the size")
+                    .help("Drag on the preview to paint the \(name) mask of this photo; ⌥-drag does the opposite, [ and ] change the size, Z-click zooms in, ⌥Z-click out")
                 }
                 Spacer()
                 if let photo, strokes > 0 {

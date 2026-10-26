@@ -32,7 +32,11 @@ public final class CropPlacements: @unchecked Sendable {
         public var adjustments: Adjustments?
         /// Strokes painted by hand on this photo's masks, each part's own.
         public var masks: [Retouch.Part: [MaskStroke]]?
-        public var isEmpty: Bool { center == nil && shape == nil && rotation == nil && zoom == nil && rect == nil && adjustments == nil && masks == nil }
+        /// Strokes of the healing brush on this photo, in the order painted.
+        public var heal: [HealStroke]?
+        public var isEmpty: Bool {
+            center == nil && shape == nil && rotation == nil && zoom == nil && rect == nil && adjustments == nil && masks == nil && heal == nil
+        }
         /// Something about the crop was set by hand.
         public var cropEdited: Bool { center != nil || zoom != nil || rect != nil }
     }
@@ -77,6 +81,7 @@ public final class CropPlacements: @unchecked Sendable {
     public func rect(for url: URL) -> CGRect? { edit(for: url)?.rect }
     public func adjustments(for url: URL) -> Adjustments? { edit(for: url)?.adjustments }
     public func strokes(_ part: Retouch.Part, for url: URL) -> [MaskStroke] { edit(for: url)?.masks?[part] ?? [] }
+    public func healStrokes(for url: URL) -> [HealStroke] { edit(for: url)?.heal ?? [] }
 
     /// nil goes back to the automatic placement.
     public func set(_ center: CGPoint?, for url: URL) { update(url) { $0.center = center } }
@@ -105,6 +110,18 @@ public final class CropPlacements: @unchecked Sendable {
     public func clearStrokes(_ part: Retouch.Part, for url: URL) {
         update(url) { e in e.masks?[part] = nil; if e.masks?.isEmpty == true { e.masks = nil } }
     }
+    /// A stroke of the healing brush on this photo.
+    public func add(heal stroke: HealStroke, for url: URL) { update(url) { $0.heal = ($0.heal ?? []) + [stroke] } }
+    /// The last stroke of the healing brush on this photo taken away.
+    public func removeLastHeal(for url: URL) {
+        update(url) { e in
+            guard var list = e.heal, !list.isEmpty else { return }
+            list.removeLast()
+            e.heal = list.isEmpty ? nil : list
+        }
+    }
+    /// Every stroke of the healing brush on this photo taken away.
+    public func clearHeals(for url: URL) { update(url) { $0.heal = nil } }
     /// Back to the automatic crop: placement, zoom and any crop drawn by hand (the shape and turn stay).
     public func resetPlacement(for url: URL) { update(url) { $0.center = nil; $0.zoom = nil; $0.rect = nil } }
 
@@ -159,6 +176,7 @@ public final class CropPlacements: @unchecked Sendable {
         if let turn = e.rotation { r.rotation = turn }
         if let a = e.adjustments { r.look = a }
         r.brush = e.masks
+        r.heal = e.heal
         return r
     }
 }

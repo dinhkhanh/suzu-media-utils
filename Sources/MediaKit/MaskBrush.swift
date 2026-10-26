@@ -32,14 +32,17 @@ public enum MaskBrush {
     public static func place(_ strokes: [MaskStroke], look: Adjustments, levelled degrees: Double? = nil, size: CGSize = .zero) -> [MaskStroke] {
         strokes.map { s in
             var s = s
-            s.points = s.points.map { p in
-                let o = turned(p, look)
-                guard let degrees, abs(degrees) >= 0.01, size.width > 0, size.height > 0 else { return o }
-                return level(o, degrees: degrees, size: size)
-            }
+            s.points = s.points.map { place($0, look: look, levelled: degrees, size: size) }
             if let degrees, abs(degrees) >= 0.01, size.width > 0 { s.radius /= EditPipeline.rotatedScale(size, degrees: degrees) }
             return s
         }
+    }
+
+    /// A point of the photo as shot, placed so.
+    public static func place(_ p: CGPoint, look: Adjustments, levelled degrees: Double? = nil, size: CGSize = .zero) -> CGPoint {
+        let o = turned(p, look)
+        guard let degrees, abs(degrees) >= 0.01, size.width > 0, size.height > 0 else { return o }
+        return level(o, degrees: degrees, size: size)
     }
 
     /// Back from that picture to the photo as shot: for strokes painted on the preview.
@@ -137,12 +140,38 @@ public enum MaskBrush {
         let short = Double(min(w, h))
         var cover = [Float](repeating: 0, count: w * h)
         for stroke in strokes where !stroke.points.isEmpty {
-            // One stroke's cover: the brush's dab at every point along it, the strongest where they overlap.
-            let r = max(0.5, stroke.radius * short)
-            let inner = r * (1 - min(1, max(0, stroke.softness)))
             let pts = stroke.points.map { (Double($0.x) * Double(w), Double($0.y) * Double(h)) }
-            var x0 = w, x1 = -1, y0 = h, y1 = -1
-            let segments = pts.count == 1 ? [(pts[0], pts[0])] : Array(zip(pts, pts.dropFirst()))
+            guard let (x0, x1, y0, y1) = Self.cover(pts, radius: max(0.5, stroke.radius * short), softness: stroke.softness,
+                                                    width: w, height: h, into: &cover) else { continue }
+            for y in y0...y1 {
+                for x in x0...x1 {
+                    let i = y * w + x, c = cover[i]
+                    guard c > 0 else { continue }
+                    cover[i] = 0
+                    if stroke.erase {
+                        if keep == nil { keep = [Float](repeating: 1, count: w * h) }
+                        keep![i] *= 1 - c
+                        if added != nil { added![i] *= 1 - c }
+                    } else {
+                        if added == nil { added = [Float](repeating: 0, count: w * h) }
+                        added![i] = max(added![i], c)
+                    }
+                }
+            }
+        }
+        return (keep, added)
+    }
+
+    /// One stroke's cover on a `w` × `h` grid (top-left origin), `points` in its pixels: the brush's dab at every
+    /// point along it, the strongest where they overlap, written into `cover` where it is stronger. Returns the
+    /// columns and rows it reaches (nil: none).
+    static func cover(_ pts: [(Double, Double)], radius r: Double, softness: Double, width w: Int, height h: Int,
+                      into cover: inout [Float]) -> (Int, Int, Int, Int)? {
+        guard !pts.isEmpty else { return nil }
+        let inner = r * (1 - min(1, max(0, softness)))
+        var x0 = w, x1 = -1, y0 = h, y1 = -1
+        let segments = pts.count == 1 ? [(pts[0], pts[0])] : Array(zip(pts, pts.dropFirst()))
+        cover.withUnsafeMutableBufferPointer { c in
             for (a, b) in segments {
                 let lx = max(0, Int((min(a.0, b.0) - r).rounded(.down))), hx = min(w - 1, Int((max(a.0, b.0) + r).rounded(.up)))
                 let ly = max(0, Int((min(a.1, b.1) - r).rounded(.down))), hy = min(h - 1, Int((max(a.1, b.1) + r).rounded(.up)))
@@ -164,27 +193,11 @@ public enum MaskBrush {
                             v = u * u * (3 - 2 * u)
                         }
                         let i = y * w + x
-                        if Float(v) > cover[i] { cover[i] = Float(v) }
-                    }
-                }
-            }
-            guard x0 <= x1, y0 <= y1 else { continue }
-            for y in y0...y1 {
-                for x in x0...x1 {
-                    let i = y * w + x, c = cover[i]
-                    guard c > 0 else { continue }
-                    cover[i] = 0
-                    if stroke.erase {
-                        if keep == nil { keep = [Float](repeating: 1, count: w * h) }
-                        keep![i] *= 1 - c
-                        if added != nil { added![i] *= 1 - c }
-                    } else {
-                        if added == nil { added = [Float](repeating: 0, count: w * h) }
-                        added![i] = max(added![i], c)
+                        if Float(v) > c[i] { c[i] = Float(v) }
                     }
                 }
             }
         }
-        return (keep, added)
+        return x0 <= x1 && y0 <= y1 ? (x0, x1, y0, y1) : nil
     }
 }

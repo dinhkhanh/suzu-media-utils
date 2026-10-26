@@ -502,8 +502,10 @@ final class EditHistory: ObservableObject {
         let before = lastEdits
         lastEdits = now
         if restoring != nil { return }
-        // A stroke painted on a mask (or taken away) is a step of its own, however quickly the next one follows.
-        let strokes = { (e: [String: CropPlacements.Edit?]) in e.values.reduce(0) { $0 + ($1?.masks?.values.reduce(0) { $0 + $1.count } ?? 0) } }
+        // A stroke painted on a mask or healed (or taken away) is a step of its own, however quickly the next one follows.
+        let strokes = { (e: [String: CropPlacements.Edit?]) in
+            e.values.reduce(0) { $0 + ($1?.masks?.values.reduce(0) { $0 + $1.count } ?? 0) + ($1?.heal?.count ?? 0) }
+        }
         step(kind: strokes(now) != strokes(before) ? "stroke" : "edits", before: State(recipe: recipe, edits: before))
     }
 
