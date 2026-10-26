@@ -15,12 +15,24 @@ import GRDB
 /// newest wins. A Mac that was offline catches up from where it left off. Each Mac also overwrites its own
 /// `summaries/<id>.json` with the mean embedding of every person's faces it has seen.
 ///
+/// Two lanes: the logs (names, merges, pins, lists, rules, folders…) go every couple of seconds and at once after a
+/// change here, on their own queue; faces (records, crops, summaries) on another, so a backlog of faces over the NAS
+/// never holds a name or a pin back.
+///
 /// The format is the contract; the folder is one transport. Another (iCloud, a server) would move the same files.
 public final class TeamSync: @unchecked Sendable {
     public let store: LibraryStore
     let engine: GroupingEngine
+    /// The logs: short passes.
     let queue = DispatchQueue(label: "teamsync", qos: .utility)
+    /// Faces and summaries: passes that can take long (crops and content keys over the NAS, the grouping engine).
+    let faceQueue = DispatchQueue(label: "teamsync.faces", qos: .utility)
     var timer: DispatchSourceTimer?
+    var faceTimer: DispatchSourceTimer?
+    /// A log pass is queued and hasn't started yet (pushSoon doesn't queue another).
+    var logPassQueued = false
+    /// Per team: what went wrong in the last face pass, shown with the team's status.
+    var faceErrors: [Int64: String] = [:]
     let lock = NSLock()
     var statuses: [Int64: TeamStatus] = [:]
     var summariesWritten: [Int64: Date] = [:]
@@ -45,7 +57,9 @@ public final class TeamSync: @unchecked Sendable {
     var takenToGroup: [Int64] = []
     public let deviceId: String
     public var deviceName: String
-    public static let passInterval: Double = 5
+    /// Log passes (names, pins, lists…): a teammate's change shows here within about this, plus the share's delay.
+    public static let passInterval: Double = 2
+    public static let facePassInterval: Double = 5
     public static let summaryInterval: Double = 60
     public static let summaryCheckInterval: Double = 15
     public static let model = "ArcFaceR50"
@@ -257,40 +271,60 @@ public final class TeamSync: @unchecked Sendable {
     public func start() {
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now() + 2, repeating: Self.passInterval)
-        t.setEventHandler { [weak self] in self?.pass() }
+        t.setEventHandler { [weak self] in self?.logPass() }
         t.resume()
         timer = t
+        let f = DispatchSource.makeTimerSource(queue: faceQueue)
+        f.schedule(deadline: .now() + 3, repeating: Self.facePassInterval)
+        f.setEventHandler { [weak self] in self?.facePass() }
+        f.resume()
+        faceTimer = f
     }
 
-    public func stop() { timer?.cancel(); timer = nil }
+    public func stop() {
+        timer?.cancel(); timer = nil
+        faceTimer?.cancel(); faceTimer = nil
+    }
 
-    /// Something changed (a name, a merge, a rule): publish on the next pass without waiting for the summary interval.
-    public func pushSoon() { lock.withLock { wanted = true } }
+    /// Something changed (a name, a merge, a rule): a log pass now, and summaries on the next face pass without
+    /// waiting for the summary interval.
+    public func pushSoon() {
+        let queueOne = lock.withLock { () -> Bool in
+            wanted = true
+            defer { logPassQueued = true }
+            return !logPassQueued
+        }
+        if queueOne { queue.async { [weak self] in self?.logPass() } }
+    }
 
     public func syncSoon() {
         pushSoon()
-        queue.async { [weak self] in self?.pass() }
+        faceQueue.async { [weak self] in self?.facePass() }
     }
 
-    /// A pass as soon as the queue is free, then `completion` (off the main thread). Nothing waits on the pass:
-    /// under load one can take many seconds (crops and content keys over the NAS).
+    /// A log pass as soon as its queue is free, then `completion` (off the main thread). Nothing waits on the pass.
     public func syncSoon(then completion: @escaping @Sendable () -> Void) {
         pushSoon()
         queue.async { [weak self] in
-            self?.pass()
+            self?.logPass()
             completion()
         }
     }
 
-    /// One pass over every team now (tests). Returns whether anything was read or written.
+    /// One pass over every team now, logs then faces (tests). Returns whether anything was read or written.
     @discardableResult
-    public func syncNow() -> Bool { queue.sync { pass() } }
+    public func syncNow() -> Bool {
+        let logs = queue.sync { logPass() }
+        let faces = faceQueue.sync { facePass() }
+        return logs || faces
+    }
 
+    /// The teams' logs: what this Mac changed goes out, what teammates changed comes in.
     @discardableResult
-    func pass() -> Bool {
+    func logPass() -> Bool {
+        lock.withLock { logPassQueued = false }
         guard let teams = try? teams(), !teams.isEmpty else { return false }
         var changed = false
-        let forced = lock.withLock { let w = wanted; wanted = false; return w }
         for team in teams {
             var status = lock.withLock { statuses[team.id!] } ?? TeamStatus(teamId: team.id!)
             let folder = team.url
@@ -302,11 +336,8 @@ public final class TeamSync: @unchecked Sendable {
             }
             status.reachable = true
             status.error = nil
-            // Reachable is known now: say so before the pass's work (publishing a backlog of faces can take a
-            // while), so the team shows its Macs and "syncing…" instead of "Connecting…" until the pass ends.
             if status.devices.isEmpty { status.devices = devices(team) }
             lock.withLock { statuses[team.id!] = status }
-            onChange?()
             do {
                 // A teammate renamed the team, or chose the Mac that processes faces.
                 var team = team
@@ -322,16 +353,47 @@ public final class TeamSync: @unchecked Sendable {
                         changed = true
                     }
                 }
-                if try push(team, forced: forced) { changed = true }
+                if try push(team) { changed = true }
                 if try pull(team) { changed = true }
                 status.devices = devices(team)
                 status.lastSync = Date()
+                status.error = lock.withLock { faceErrors[team.id!] }
             } catch {
                 status.error = error.localizedDescription
             }
             lock.withLock { statuses[team.id!] = status }
         }
         onChange?()
+        return changed
+    }
+
+    /// The teams' faces: summaries and face records out, teammates' summaries and face records in.
+    @discardableResult
+    func facePass() -> Bool {
+        guard let teams = try? teams(), !teams.isEmpty else { return false }
+        var changed = false
+        let forced = lock.withLock { let w = wanted; wanted = false; return w }
+        for team in teams where FileManager.default.fileExists(atPath: Self.infoURL(team.url).path) {
+            var error: String?
+            do {
+                if try publishSummaries(team, people: try relevantPeople(team), state: try state(team.id!), forced: forced) { changed = true }
+                if try publishFaces(team) { changed = true }
+                if try pullSummaries(team) { changed = true }
+                if try pullFaces(team) { changed = true }
+            } catch let e {
+                error = e.localizedDescription
+            }
+            let shown = lock.withLock { () -> Bool in
+                let was = faceErrors[team.id!]
+                faceErrors[team.id!] = error
+                guard was != error, var s = statuses[team.id!], s.reachable else { return false }
+                s.error = error
+                statuses[team.id!] = s
+                return true
+            }
+            if shown { changed = true }
+        }
+        if changed { onChange?() }
         return changed
     }
 
@@ -453,7 +515,7 @@ public final class TeamSync: @unchecked Sendable {
         }
     }
 
-    func push(_ team: TeamRecord, forced: Bool) throws -> Bool {
+    func push(_ team: TeamRecord) throws -> Bool {
         let teamId = team.id!
         var state = try state(teamId)
         var ops: [Op] = []
@@ -622,8 +684,6 @@ public final class TeamSync: @unchecked Sendable {
         if !edited.isEmpty {
             try store.db.write { db in try db.execute(sql: "DELETE FROM faceEditPublish WHERE faceId IN (\(edited.map(String.init).joined(separator: ",")))") }
         }
-        if try publishSummaries(team, people: people, state: state, forced: forced) { wrote = true }
-        if try publishFaces(team) { wrote = true }
         return wrote
     }
 
@@ -774,15 +834,14 @@ public final class TeamSync: @unchecked Sendable {
                                arguments: [teamId, "reader", String(Self.readerVersion)])
             }
         }
-        let logs = (try? fm.contentsOfDirectory(at: Self.devicesURL(team.url), includingPropertiesForKeys: [.fileSizeKey])) ?? []
+        let logs = (try? fm.contentsOfDirectory(at: Self.devicesURL(team.url), includingPropertiesForKeys: nil)) ?? []
         for f in logs where f.pathExtension == "jsonl" {
             let id = f.deletingPathExtension().lastPathComponent
             guard id != deviceId else { continue }
             let cursor = Int(state["cursor:\(id)"] ?? "0") ?? 0
-            let size = (try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-            guard size > cursor else { continue }
             let h = try FileHandle(forReadingFrom: f)
             defer { try? h.close() }
+            guard try Self.size(of: h) > cursor else { continue }
             try h.seek(toOffset: UInt64(cursor))
             let data = try h.readToEnd() ?? Data()
             // Only whole lines: a teammate's Mac may be in the middle of appending one.
@@ -823,7 +882,45 @@ public final class TeamSync: @unchecked Sendable {
             }
             changed = true
         }
-        // Summaries: whole files, re-read when they change.
+        // Changes that waited for a person to become known.
+        let deferred = try store.db.read { db in try Row.fetchAll(db, sql: "SELECT id, op FROM syncDeferred WHERE teamId = ? ORDER BY id", arguments: [teamId]) }
+        if !deferred.isEmpty {
+            try store.db.write { db in
+                for r in deferred {
+                    guard let op = try? JSONDecoder().decode(Op.self, from: Data((r["op"] as String).utf8)) else {
+                        try db.execute(sql: "DELETE FROM syncDeferred WHERE id = ?", arguments: [r["id"] as Int64]); continue
+                    }
+                    switch try apply(op, team: team, device: op.device ?? "", db: db) {
+                    case .applied(let people, let remote):
+                        affected.formUnion(people); remoteChanged.formUnion(remote); changed = true
+                        try db.execute(sql: "DELETE FROM syncDeferred WHERE id = ?", arguments: [r["id"] as Int64])
+                    case .ignored:
+                        try db.execute(sql: "DELETE FROM syncDeferred WHERE id = ?", arguments: [r["id"] as Int64])
+                    case .deferred: break
+                    }
+                }
+            }
+        }
+        if !affected.isEmpty { engine.peopleChanged(affected) }
+        if !remoteChanged.isEmpty { engine.remoteChanged(remoteChanged) }
+        if lock.withLock({ let c = sourcesChanged; sourcesChanged = false; return c }) { onSourcesChanged?() }
+        return changed
+    }
+
+    /// The size of a teammate's file as the share has it now. Not from a folder listing: macOS can keep an SMB
+    /// share's listing for many seconds, and a teammate's change sat unseen behind the old size.
+    static func size(of h: FileHandle) throws -> Int {
+        let end = try h.seekToEnd()
+        return Int(end)
+    }
+
+    /// Teammates' summaries of the people they have faces of: whole files, re-read when they change.
+    func pullSummaries(_ team: TeamRecord) throws -> Bool {
+        let teamId = team.id!
+        var changed = false
+        var remoteChanged: Set<Int64> = []
+        let fm = FileManager.default
+        let state = try state(teamId)
         let sums = (try? fm.contentsOfDirectory(at: Self.summariesURL(team.url), includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])) ?? []
         for f in sums where f.pathExtension == "json" {
             let id = f.deletingPathExtension().lastPathComponent
@@ -853,29 +950,7 @@ public final class TeamSync: @unchecked Sendable {
             }
             changed = true
         }
-        // Changes that waited for a person to become known.
-        let deferred = try store.db.read { db in try Row.fetchAll(db, sql: "SELECT id, op FROM syncDeferred WHERE teamId = ? ORDER BY id", arguments: [teamId]) }
-        if !deferred.isEmpty {
-            try store.db.write { db in
-                for r in deferred {
-                    guard let op = try? JSONDecoder().decode(Op.self, from: Data((r["op"] as String).utf8)) else {
-                        try db.execute(sql: "DELETE FROM syncDeferred WHERE id = ?", arguments: [r["id"] as Int64]); continue
-                    }
-                    switch try apply(op, team: team, device: op.device ?? "", db: db) {
-                    case .applied(let people, let remote):
-                        affected.formUnion(people); remoteChanged.formUnion(remote); changed = true
-                        try db.execute(sql: "DELETE FROM syncDeferred WHERE id = ?", arguments: [r["id"] as Int64])
-                    case .ignored:
-                        try db.execute(sql: "DELETE FROM syncDeferred WHERE id = ?", arguments: [r["id"] as Int64])
-                    case .deferred: break
-                    }
-                }
-            }
-        }
-        if !affected.isEmpty { engine.peopleChanged(affected) }
         if !remoteChanged.isEmpty { engine.remoteChanged(remoteChanged) }
-        if lock.withLock({ let c = sourcesChanged; sourcesChanged = false; return c }) { onSourcesChanged?() }
-        if try pullFaces(team) { changed = true }
         return changed
     }
 

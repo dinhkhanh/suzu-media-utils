@@ -317,7 +317,9 @@ and after every feature below; same 92 people.
   group into them. The published centroid is computed from local faces only (`localSummary`).
 - Scope: a person travels to a team when they have faces in the team's project (or a rule of it names them). People
   named elsewhere stay private to the Mac until they appear in the event. Leaving a team keeps names, drops summaries.
-- Passes every 5 s; a user change (`pushSoon`) publishes on the next pass. Status (reachable, Macs, last sync) is
+- Two lanes (2026-10-26): log passes every 2 s and at once on a user change (`pushSoon`); face passes (summaries,
+  face records, crops) every 5 s on their own queue, so a backlog of faces never holds a name or a pin back.
+  Teammates' logs are sized from the open file, not the folder listing (macOS caches SMB listings). Status (reachable, Macs, last sync) is
   shown under the project switcher. 9 tests (`TeamSyncTests`) run two libraries against one folder.
 - Known limits, for later: rule target folders are shared as paths (works when every Mac mounts the same share at
   the same path; otherwise the rule waits and the list says so); two Macs ingesting the same card both export (plain
