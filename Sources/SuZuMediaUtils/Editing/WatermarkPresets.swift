@@ -1,4 +1,6 @@
+import FaceLibrary
 import Foundation
+import GRDB
 import MediaKit
 import SwiftUI
 
@@ -8,12 +10,18 @@ struct WatermarkPreset: Codable, Identifiable, Hashable {
     var spec: WatermarkSpec
 }
 
-/// Saved watermarks (logos, text credits) to pick from in any editing screen. Each screen keeps its own copy of the
-/// watermark it uses, so editing a preset never silently changes another screen or a delivery rule.
+/// Saved watermarks (logos, banners, text credits) to pick from in any editing screen. Each screen keeps its own
+/// copy of the watermark it uses, so editing a preset never silently changes another screen or a delivery rule.
+///
+/// They live in the library (SavedWatermarks) once it is open, so they reach every Mac of the user's teams with
+/// their logo files; the settings keep a copy for the moment before the library opens.
 @MainActor
 final class WatermarkPresets: ObservableObject {
     static let shared = WatermarkPresets()
     @Published private(set) var presets: [WatermarkPreset] = []
+    private var store: LibraryStore?
+    private var push: (@Sendable () -> Void)?
+    private var observer: AnyDatabaseCancellable?
 
     init() {
         let d = UserDefaults.standard
@@ -24,6 +32,30 @@ final class WatermarkPresets: ObservableObject {
         }
     }
 
+    /// From now on the presets are the library's: this Mac's earlier ones go into it (as old, so a teammate's
+    /// change to the same preset wins), and the list follows the library, teammates' changes included.
+    func attach(_ store: LibraryStore, push: @escaping @Sendable () -> Void) {
+        self.store = store
+        self.push = push
+        let mine = presets
+        try? store.db.write { db in
+            for p in mine where try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM watermarkPreset WHERE id = ?", arguments: [p.id]) == 0 {
+                try SavedWatermarks.save(SavedWatermark(id: p.id, name: p.name, spec: p.spec), db: db, at: 1)
+            }
+        }
+        if !mine.isEmpty { push() }
+        observer = ValueObservation.tracking { db in try SavedWatermarks.all(db) }
+            .start(in: store.db, scheduling: .async(onQueue: .main), onError: { _ in }) { [weak self] saved in
+                MainActor.assumeIsolated { self?.show(saved.map { WatermarkPreset(id: $0.id, name: $0.name, spec: $0.spec) }) }
+            }
+    }
+
+    private func show(_ list: [WatermarkPreset]) {
+        guard list != presets else { return }
+        presets = list
+        cache()
+    }
+
     func preset(_ id: String?) -> WatermarkPreset? { presets.first { $0.id == id } }
 
     /// Adds the preset, or replaces the one with the same id. Returns it as saved (its spec knows its preset).
@@ -32,16 +64,24 @@ final class WatermarkPresets: ObservableObject {
         var p = preset
         p.spec.presetId = p.id
         if let i = presets.firstIndex(where: { $0.id == p.id }) { presets[i] = p } else { presets.append(p) }
-        save()
+        cache()
+        if let store {
+            try? store.db.write { db in try SavedWatermarks.save(SavedWatermark(id: p.id, name: p.name, spec: p.spec), db: db) }
+            push?()
+        }
         return p
     }
 
     func delete(_ id: String) {
         presets.removeAll { $0.id == id }
-        save()
+        cache()
+        if let store {
+            try? store.db.write { db in try SavedWatermarks.delete(id, db: db) }
+            push?()
+        }
     }
 
-    private func save() {
+    private func cache() {
         UserDefaults.standard.set(try? JSONEncoder().encode(presets), forKey: "watermarkPresets")
     }
 }

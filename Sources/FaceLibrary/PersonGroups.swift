@@ -4,8 +4,9 @@ import GRDB
 /// A list of people: the cast, the sponsors, the VIPs. An event has a thousand faces; the few dozen that matter are
 /// found again by list, and pinned people float to the top of every people grid.
 ///
-/// Lists are the Mac's own (not shared with the team); pins travel to teammates (`pinAt`, newest wins). Both apply
-/// to the person wherever they appear, like a name: a sponsor at one event is still listed as one at the next.
+/// Lists and pins travel to teammates (TeamSync: `list`, `listMember`, `pin`; the newest change wins, and what was
+/// taken away stays away). Both apply to the person wherever they appear, like a name: a sponsor at one event is
+/// still listed as one at the next.
 public struct PersonGroupRecord: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Hashable, Sendable {
     public static let databaseTableName = "personGroup"
     public var id: Int64?
@@ -13,11 +14,17 @@ public struct PersonGroupRecord: Codable, FetchableRecord, MutablePersistableRec
     /// Position in the sidebar; new lists go last.
     public var sortOrder: Int
     public var createdAt: Date
+    /// The same list on every Mac of a team.
+    public var uuid: String
+    /// When the list was made or last renamed, seconds since 1970.
+    public var updatedAt: Double
 
-    public init(name: String, sortOrder: Int) {
+    public init(name: String, sortOrder: Int, uuid: String = SyncIds.new(), updatedAt: Double = Date().timeIntervalSince1970) {
         self.name = name
         self.sortOrder = sortOrder
         createdAt = Date()
+        self.uuid = uuid
+        self.updatedAt = updatedAt
     }
     public mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
 }
@@ -46,20 +53,33 @@ public enum PersonGroups {
     public static func rename(_ id: Int64, to rawName: String, db: Database) throws {
         let name = PersonNames.clean(rawName)
         guard !name.isEmpty else { return }
-        try db.execute(sql: "UPDATE personGroup SET name = ? WHERE id = ?", arguments: [name, id])
+        try db.execute(sql: "UPDATE personGroup SET name = ?, updatedAt = ? WHERE id = ?", arguments: [name, Date().timeIntervalSince1970, id])
     }
 
     public static func delete(_ id: Int64, db: Database) throws {
+        try db.execute(sql: "INSERT OR REPLACE INTO personGroupGone (uuid, at) SELECT uuid, ? FROM personGroup WHERE id = ?",
+                       arguments: [Date().timeIntervalSince1970, id])
         try db.execute(sql: "DELETE FROM personGroup WHERE id = ?", arguments: [id])
     }
 
     /// Puts people on a list, or takes them off it.
     public static func set(_ group: Int64, people: [Int64], member: Bool, db: Database) throws {
+        let now = Date().timeIntervalSince1970
         for p in people {
             if member {
-                try db.execute(sql: "INSERT OR IGNORE INTO personGroupMember (groupId, personId) VALUES (?, ?)", arguments: [group, p])
+                try db.execute(sql: "INSERT OR IGNORE INTO personGroupMember (groupId, personId, at) VALUES (?, ?, ?)", arguments: [group, p, now])
+                guard db.changesCount > 0 else { continue }
+                try db.execute(sql: """
+                    DELETE FROM personGroupMemberGone WHERE groupUuid = (SELECT uuid FROM personGroup WHERE id = ?)
+                      AND personUuid = (SELECT uuid FROM person WHERE id = ?)
+                    """, arguments: [group, p])
             } else {
                 try db.execute(sql: "DELETE FROM personGroupMember WHERE groupId = ? AND personId = ?", arguments: [group, p])
+                guard db.changesCount > 0 else { continue }
+                try db.execute(sql: """
+                    INSERT OR REPLACE INTO personGroupMemberGone (groupUuid, personUuid, at)
+                    SELECT g.uuid, p.uuid, ? FROM personGroup g, person p WHERE g.id = ? AND p.id = ?
+                    """, arguments: [now, group, p])
             }
         }
     }
@@ -80,7 +100,8 @@ public enum PersonGroups {
     static func merge(_ others: [Int64], into target: Int64, db: Database) throws {
         let list = others.map(String.init).joined(separator: ",")
         guard !list.isEmpty else { return }
-        try db.execute(sql: "INSERT OR IGNORE INTO personGroupMember (groupId, personId) SELECT DISTINCT groupId, ? FROM personGroupMember WHERE personId IN (\(list))", arguments: [target])
+        try db.execute(sql: "INSERT OR IGNORE INTO personGroupMember (groupId, personId, at) SELECT DISTINCT groupId, ?, ? FROM personGroupMember WHERE personId IN (\(list))",
+                       arguments: [target, Date().timeIntervalSince1970])
         try db.execute(sql: "DELETE FROM personGroupMember WHERE personId IN (\(list))")
         try db.execute(sql: """
             UPDATE person SET pinnedAt = COALESCE(pinnedAt, (SELECT MIN(pinnedAt) FROM person WHERE id IN (\(list)))),

@@ -455,6 +455,55 @@ public final class LibraryStore: @unchecked Sendable {
             try db.execute(sql: "ALTER TABLE person ADD COLUMN pinAt DOUBLE")
             try db.execute(sql: "UPDATE person SET pinAt = pinnedAt WHERE pinnedAt IS NOT NULL")
         }
+        m.registerMigration("v20-orphaned-copies") { db in
+            /// A copy that loses its original with no face of its own (the original's folder removed, a file
+            /// deleted) is read again, whichever way that happened: done with no faces, it would stay faceless.
+            try db.execute(sql: """
+                CREATE TRIGGER mediaOrphaned AFTER UPDATE OF duplicateOf ON media
+                WHEN OLD.duplicateOf IS NOT NULL AND NEW.duplicateOf IS NULL AND NEW.status = 'done' AND NOT NEW.skippedAsEdited
+                  AND NOT EXISTS (SELECT 1 FROM face WHERE mediaId = NEW.id)
+                BEGIN UPDATE media SET status = 'pending' WHERE id = NEW.id; END
+                """)
+            try RawPairs.repair(db)
+        }
+        m.registerMigration("v21-saved-watermarks") { db in
+            /// Saved watermarks (see SavedWatermarks), in the library so they travel to teammates; until now they
+            /// were the app's own settings. A deleted one stays as a tombstone.
+            try db.create(table: "watermarkPreset") { t in
+                t.column("id", .text).primaryKey()
+                t.column("name", .text).notNull()
+                t.column("spec", .text).notNull()
+                t.column("updatedAt", .double).notNull()
+                t.column("createdAt", .double).notNull()
+                t.column("deleted", .boolean).notNull().defaults(to: false)
+            }
+        }
+        m.registerMigration("v22-shared-lists") { db in
+            /// Lists of people travel to teammates (see PersonGroups): a stable id, when each list was named and each
+            /// person put on it, and what was taken away (a deleted list, a person taken off), so an older copy
+            /// elsewhere doesn't bring it back. Lists two Macs made apart under one name become one (`personGroupAlias`).
+            try db.execute(sql: "ALTER TABLE personGroup ADD COLUMN uuid TEXT")
+            try db.execute(sql: "ALTER TABLE personGroup ADD COLUMN updatedAt DOUBLE NOT NULL DEFAULT 1")
+            for id in try Int64.fetchAll(db, sql: "SELECT id FROM personGroup") {
+                try db.execute(sql: "UPDATE personGroup SET uuid = ? WHERE id = ?", arguments: [SyncIds.new(), id])
+            }
+            try db.execute(sql: "CREATE UNIQUE INDEX personGroup_uuid ON personGroup(uuid)")
+            try db.execute(sql: "ALTER TABLE personGroupMember ADD COLUMN at DOUBLE NOT NULL DEFAULT 1")
+            try db.create(table: "personGroupGone") { t in
+                t.column("uuid", .text).primaryKey()
+                t.column("at", .double).notNull()
+            }
+            try db.create(table: "personGroupMemberGone") { t in
+                t.column("groupUuid", .text).notNull()
+                t.column("personUuid", .text).notNull()
+                t.column("at", .double).notNull()
+                t.primaryKey(["groupUuid", "personUuid"])
+            }
+            try db.create(table: "personGroupAlias") { t in
+                t.column("fromUuid", .text).primaryKey()
+                t.column("intoUuid", .text).notNull()
+            }
+        }
         return m
     }
 }

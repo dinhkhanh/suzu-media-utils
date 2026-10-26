@@ -286,13 +286,19 @@ public final class SourceMonitor: @unchecked Sendable {
             // A camera shooting RAW+JPEG: the RAW file is its JPEG's companion (shown with the JPEG's faces, never
             // processed or exported on its own), like a byte-identical copy. JPEGs go in first so a RAW finds its
             // JPEG whichever order the files were listed in; a RAW whose JPEG arrives later is paired then, as long
-            // as it hasn't been processed on its own meanwhile.
+            // as it hasn't been processed on its own meanwhile. A JPEG that is itself a copy of a file elsewhere
+            // pairs its RAW with that original, which holds the faces (the RAW used to be processed on its own then,
+            // and the photo's faces counted twice).
             var jpegByPair: [String: Int64] = [:]
             var rawByPair: [String: Known] = [:]
-            for (path, k) in known where k.duplicateOf == nil {
+            for (path, k) in known {
                 let url = URL(fileURLWithPath: path, isDirectory: false)
                 guard !MediaAnalyzer.isVideo(url) else { continue }
-                if ImageLoader.isRaw(url) { rawByPair[ImageLoader.pairKey(path)] = k } else { jpegByPair[ImageLoader.pairKey(path)] = k.id }
+                if ImageLoader.isRaw(url) {
+                    if k.duplicateOf == nil { rawByPair[ImageLoader.pairKey(path)] = k }
+                } else {
+                    jpegByPair[ImageLoader.pairKey(path)] = k.duplicateOf ?? k.id
+                }
             }
             let ordered = remaining.filter { !ImageLoader.isRaw(URL(fileURLWithPath: $0.0)) } + remaining.filter { ImageLoader.isRaw(URL(fileURLWithPath: $0.0)) }
             var start = 0
@@ -311,7 +317,8 @@ public final class SourceMonitor: @unchecked Sendable {
                         m.contentKey = key
                         m.duplicateOf = original
                         m.status = .done
-                    } else if m.kind == .photo, !ImageLoader.isRaw(url), let raw = rawByPair[ImageLoader.pairKey(path)], raw.status == MediaStatus.pending.rawValue {
+                    }
+                    if m.kind == .photo, !ImageLoader.isRaw(url), let raw = rawByPair[ImageLoader.pairKey(path)], raw.status == MediaStatus.pending.rawValue {
                         pairRaws.append((raw, path))
                     }
                     rows.append(m)
@@ -320,8 +327,8 @@ public final class SourceMonitor: @unchecked Sendable {
                 try store.db.write { db in
                     for var m in rows { try m.insert(db, onConflict: .ignore) }
                     // New JPEGs by pair key (ids known now), then the batch's RAWs and the waiting RAWs find theirs.
-                    for m in rows where m.kind == .photo && m.duplicateOf == nil && !ImageLoader.isRaw(m.url) {
-                        if let id = try Int64.fetchOne(db, sql: "SELECT id FROM media WHERE path = ?", arguments: [m.path]) {
+                    for m in rows where m.kind == .photo && !ImageLoader.isRaw(m.url) {
+                        if let id = try Int64.fetchOne(db, sql: "SELECT COALESCE(duplicateOf, id) FROM media WHERE path = ?", arguments: [m.path]) {
                             jpegByPair[ImageLoader.pairKey(m.path)] = id
                         }
                     }
@@ -332,7 +339,7 @@ public final class SourceMonitor: @unchecked Sendable {
                         paired += 1
                     }
                     for (raw, jpegPath) in pairRaws {
-                        guard let jpegId = try Int64.fetchOne(db, sql: "SELECT id FROM media WHERE path = ?", arguments: [jpegPath]) else { continue }
+                        guard let jpegId = try Int64.fetchOne(db, sql: "SELECT COALESCE(duplicateOf, id) FROM media WHERE path = ?", arguments: [jpegPath]) else { continue }
                         try db.execute(sql: "UPDATE media SET duplicateOf = ?, status = 'done' WHERE id = ? AND status = 'pending' AND duplicateOf IS NULL",
                                        arguments: [jpegId, raw.id])
                     }
@@ -399,15 +406,7 @@ public final class SourceMonitor: @unchecked Sendable {
     /// Deletes a media whose file is gone. If a byte-identical copy still exists, that copy inherits the faces.
     /// Returns the people who lost faces.
     static func remove(mediaId: Int64, db: Database) throws -> Set<Int64> {
-        let copies = try MediaRecord.fetchAll(db, sql: "SELECT * FROM media WHERE duplicateOf = ?", arguments: [mediaId])
-        if let heir = copies.first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
-            try db.execute(sql: "UPDATE face SET mediaId = ? WHERE mediaId = ?", arguments: [heir.id, mediaId])
-            try db.execute(sql: """
-                UPDATE media SET duplicateOf = NULL, status = old.status, error = old.error, width = old.width,
-                    height = old.height, duration = old.duration
-                FROM (SELECT * FROM media WHERE id = ?) AS old WHERE media.id = ?
-                """, arguments: [mediaId, heir.id])
-            try db.execute(sql: "UPDATE media SET duplicateOf = ? WHERE duplicateOf = ?", arguments: [heir.id, mediaId])
+        if try handOver(mediaId, db: db) {
             try db.execute(sql: "DELETE FROM media WHERE id = ?", arguments: [mediaId])
             return []
         }
@@ -415,5 +414,24 @@ public final class SourceMonitor: @unchecked Sendable {
         try PersonMemory.remember("face.mediaId = ?", [mediaId], db: db)
         try db.execute(sql: "DELETE FROM media WHERE id = ?", arguments: [mediaId])
         return people
+    }
+
+    /// A file about to leave the library gives its faces and its analysis to a copy of it that is still on disk
+    /// (outside `excludingSource`, a folder leaving too), which becomes the original; its other copies (and a
+    /// paired RAW) follow it. Returns whether there was such a copy.
+    static func handOver(_ mediaId: Int64, excludingSource: Int64? = nil, db: Database) throws -> Bool {
+        let copies = try MediaRecord.fetchAll(db, sql: "SELECT * FROM media WHERE duplicateOf = ? AND sourceId IS NOT ? ORDER BY id",
+                                              arguments: [mediaId, excludingSource])
+        // A RAW paired with this JPEG is a companion, not a copy: it never stands for the photo.
+        guard let heir = copies.first(where: { !ImageLoader.isRaw($0.url) && FileManager.default.fileExists(atPath: $0.path) }) else { return false }
+        try db.execute(sql: "UPDATE face SET mediaId = ? WHERE mediaId = ?", arguments: [heir.id, mediaId])
+        try db.execute(sql: """
+            UPDATE media SET duplicateOf = NULL, status = old.status, error = old.error, width = old.width, height = old.height,
+                duration = old.duration, takenAt = old.takenAt, featurePrint = old.featurePrint, burstId = old.burstId,
+                analysisVersion = old.analysisVersion, importedFrom = old.importedFrom
+            FROM (SELECT * FROM media WHERE id = ?) AS old WHERE media.id = ?
+            """, arguments: [mediaId, heir.id])
+        try db.execute(sql: "UPDATE media SET duplicateOf = ? WHERE duplicateOf = ?", arguments: [heir.id, mediaId])
+        return true
     }
 }

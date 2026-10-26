@@ -72,13 +72,13 @@ and one for landscapes — logo, text or banner watermark, resize — auto tone
   Drive) and holds every project you share with it. File → Share Project with Team… creates the team or adds the
   project to one you are in; teammates pick the same folder once with File → Join a Team…, and the team's projects
   appear on their Mac by themselves. From then on a person named on any Mac is recognised on every Mac (projects,
-  names, merges, pins, people's pictures, session names and auto rules are shared; photos, faces and crops stay
-  where they are), within seconds, with no account or server. Each Mac appends to its own log in the folder and
-  reads the others', so a Mac that was offline catches up, the newest change wins, and the same name given on two
-  Macs becomes one person. Everyone named on a Mac travels (a Known-People folder prepared before the event, people
-  from earlier events). The sidebar shows the team above the project, with its Macs and the last sync; the project
-  menu groups projects by team. Rename Team, Locate Team Sync Folder… (when the NAS address changes), Stop Sharing a
-  project, Leave Team (keeps projects and names).
+  names, merges, pins, lists, people's pictures, saved watermarks with their logos, session names and auto rules
+  are shared; photos, faces and crops stay where they are), within seconds, with no account or server. Each Mac appends
+  to its own log in the folder and reads the others', so a Mac that was offline catches up, the newest change wins,
+  and the same name given on two Macs becomes one person. Everyone named on a Mac travels (a Known-People folder
+  prepared before the event, people from earlier events). The sidebar shows the team above the project, with its
+  Macs and the last sync; the project menu groups projects by team. Rename Team, Locate Team Sync Folder… (when the
+  NAS address changes), Stop Sharing a project, Leave Team (keeps projects and names).
 - **Three kinds of folders in a team:** *Team Folders* are the sources every Mac works on (the card folders on the
   NAS): added on one Mac, they appear on every Mac of the team. *Edited Folders* are where the Mac in charge of
   editing / selecting puts its results, and travel the same way. *Folders on This Mac* stay on that Mac, as before.

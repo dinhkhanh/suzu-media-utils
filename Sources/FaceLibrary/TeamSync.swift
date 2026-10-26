@@ -358,7 +358,8 @@ public final class TeamSync: @unchecked Sendable {
     /// One change in a device's log.
     struct Op: Codable {
         /// device, person, merge, session, rule, summary (deferred only), card, cardFile, face, folder, cover,
-        /// pin (uuid = the person, deleted = unpinned)
+        /// pin (uuid = the person, deleted = unpinned), watermark (uuid = the saved watermark, name, deleted),
+        /// list (uuid, name, deleted), listMember (uuid = the list, into = the person, deleted = taken off)
         var t: String
         var at: Double
         var uuid: String?
@@ -387,6 +388,8 @@ public final class TeamSync: @unchecked Sendable {
         /// folder: a photo & video folder shared with the team (uuid = the folder's stable id, project = its
         /// project, deleted = taken out of the team).
         var folder: FolderPayload?
+        /// watermark: the saved watermark and its files in the team folder.
+        var watermark: WatermarkPayload?
     }
 
     struct FolderPayload: Codable {
@@ -593,6 +596,14 @@ public final class TeamSync: @unchecked Sendable {
             ops.append(Op(t: "pin", at: at, uuid: uuid, deleted: !(r["pinned"] as Bool)))
             updates["pub:pin:\(uuid)"] = "\(at)"
         }
+        // Saved watermarks, with their logo and banner files.
+        let (wmOps, wmUpdates) = try watermarkOps(team, state: state)
+        ops += wmOps
+        updates.merge(wmUpdates) { _, b in b }
+        // Lists of people and who is on them.
+        let (listOps, listUpdates) = try listOps(state: state)
+        ops += listOps
+        updates.merge(listUpdates) { _, b in b }
         var wrote = false
         if !ops.isEmpty {
             try append(ops, to: Self.devicesURL(team.url).appendingPathComponent("\(deviceId).jsonl"))
@@ -701,7 +712,7 @@ public final class TeamSync: @unchecked Sendable {
     /// Mac for good (0.8.3 did this to the first team and edited folders). When a newer version first reads a
     /// team, it goes over what it had already read once more, for just the kinds it learnt since. A new kind of
     /// entry is added here with the next version number.
-    static let lateKinds: [(version: Int, kinds: Set<String>)] = [(2, ["folder"]), (3, ["pin"])]
+    static let lateKinds: [(version: Int, kinds: Set<String>)] = [(2, ["folder"]), (3, ["pin"]), (4, ["watermark", "list", "listMember"])]
     static var readerVersion: Int { lateKinds.map(\.version).max() ?? 1 }
 
     /// Reads what this Mac already read of each teammate's log again, applying only the kinds learnt since
@@ -1153,6 +1164,15 @@ public final class TeamSync: @unchecked Sendable {
                 """, arguments: [key, index]) else { return .deferred }
             try db.execute(sql: "UPDATE person SET coverFaceId = ?, coverAt = ? WHERE id = ?", arguments: [faceId, op.at, pid])
             return .applied(people: [], remote: [])
+
+        case "watermark":
+            return try applyWatermarkOp(op, team: team, db: db)
+
+        case "list":
+            return try applyListOp(op, team: team, db: db)
+
+        case "listMember":
+            return try applyListMemberOp(op, team: team, db: db)
 
         case "pin":
             guard let uuid = op.uuid else { return .ignored }

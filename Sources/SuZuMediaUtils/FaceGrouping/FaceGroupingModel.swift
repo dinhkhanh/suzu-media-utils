@@ -225,6 +225,7 @@ final class FaceGroupingModel: ObservableObject {
     private func attach(_ service: LibraryService) {
         self.service = service
         Thumbnails.shared.store = service.store
+        WatermarkPresets.shared.attach(service.store) { [teamSync = service.teamSync] in teamSync.pushSoon() }
         service.onDelivered = { [weak self] report in
             Notifier.post(report)
             Task { @MainActor in self?.logDelivery(report) }

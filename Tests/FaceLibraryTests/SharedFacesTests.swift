@@ -1,5 +1,6 @@
 import FaceCore
 import GRDB
+import MediaKit
 import XCTest
 @testable import FaceLibrary
 
@@ -390,6 +391,82 @@ final class SharedFacesTests: XCTestCase {
         let bAn = try XCTUnwrap(try b.personId(named: "An"))
         XCTAssertEqual(try b.store.db.read { db in try Int64?.fetchOne(db, sql: "SELECT coverFaceId FROM person WHERE id = ?", arguments: [bAn]) } ?? nil,
                        try faces(b, media: w2)[0].id)
+    }
+
+    func testSavedWatermarksTravelWithTheirLogos() throws {
+        let logo = tmp.appendingPathComponent("A/logo.png")
+        try Data("png bytes".utf8).write(to: logo)
+        var spec = WatermarkSpec(logoPath: logo.path)
+        spec.portraitLogoPath = ""
+        let w = SavedWatermark(name: "SuZu", spec: spec)
+        try a.store.db.write { db in try SavedWatermarks.save(w, db: db) }
+        exchange()
+        var onB = try b.store.db.read { db in try SavedWatermarks.all(db) }
+        XCTAssertEqual(onB.map(\.name), ["SuZu"])
+        XCTAssertNotEqual(onB[0].spec.logoPath, logo.path, "B's own copy of the logo")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: onB[0].spec.logoPath)), Data("png bytes".utf8))
+        XCTAssertEqual(onB[0].spec.position, spec.position)
+
+        // Renamed on B: A follows, and the logo isn't copied again under another name.
+        Thread.sleep(forTimeInterval: 0.01)
+        try b.store.db.write { db in try SavedWatermarks.save(SavedWatermark(id: w.id, name: "SuZu Media", spec: onB[0].spec), db: db) }
+        exchange()
+        let onA = try a.store.db.read { db in try SavedWatermarks.all(db) }
+        XCTAssertEqual(onA.map(\.name), ["SuZu Media"])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: TeamSync.assetsURL(shared).path).count, 1)
+
+        // Deleted on A: gone on B, and an old copy doesn't bring it back.
+        Thread.sleep(forTimeInterval: 0.01)
+        try a.store.db.write { db in try SavedWatermarks.delete(w.id, db: db) }
+        exchange()
+        onB = try b.store.db.read { db in try SavedWatermarks.all(db) }
+        XCTAssertTrue(onB.isEmpty)
+    }
+
+    func testListsTravelWithWhoIsOnThem() throws {
+        let an = try a.person("An"), bo = try a.person("Bo")
+        exchange()
+        let bAn = try XCTUnwrap(try b.personId(named: "An")), bBo = try XCTUnwrap(try b.personId(named: "Bo"))
+        func lists(_ mac: TeamSyncTests.Mac) throws -> [String: Set<String>] {
+            try mac.store.db.read { db in
+                var out: [String: Set<String>] = [:]
+                for g in try Row.fetchAll(db, sql: "SELECT id, name FROM personGroup") {
+                    out[g["name"]] = Set(try String.fetchAll(db, sql: """
+                        SELECT p.name FROM personGroupMember m JOIN person p ON p.id = m.personId WHERE m.groupId = ?
+                        """, arguments: [g["id"] as Int64]))
+                }
+                return out
+            }
+        }
+        // Made on A with An on it.
+        let vip = try a.store.db.write { db -> Int64 in
+            let id = try PersonGroups.create("VIP", db: db)
+            try PersonGroups.set(id, people: [an], member: true, db: db)
+            return id
+        }
+        exchange()
+        XCTAssertEqual(try lists(b), ["VIP": ["An"]])
+        // Bo added on B, An taken off on B: A follows.
+        Thread.sleep(forTimeInterval: 0.01)
+        try b.store.db.write { db in
+            let id = try XCTUnwrap(try PersonGroups.find("VIP", db: db))
+            try PersonGroups.set(id, people: [bBo], member: true, db: db)
+            try PersonGroups.set(id, people: [bAn], member: false, db: db)
+        }
+        exchange()
+        XCTAssertEqual(try lists(a), ["VIP": ["Bo"]])
+        // "Cast" made on both Macs apart: one list everywhere, with everyone put on either.
+        try a.store.db.write { db in try PersonGroups.set(try PersonGroups.create("Cast", db: db), people: [bo], member: true, db: db) }
+        try b.store.db.write { db in try PersonGroups.set(try PersonGroups.create("Cast", db: db), people: [bAn], member: true, db: db) }
+        exchange()
+        XCTAssertEqual(try lists(a), ["VIP": ["Bo"], "Cast": ["An", "Bo"]])
+        XCTAssertEqual(try lists(b), ["VIP": ["Bo"], "Cast": ["An", "Bo"]])
+        // Deleted on A: gone on B, for good.
+        Thread.sleep(forTimeInterval: 0.01)
+        try a.store.db.write { db in try PersonGroups.delete(vip, db: db) }
+        exchange(); exchange()
+        XCTAssertEqual(try lists(b), ["Cast": ["An", "Bo"]])
+        XCTAssertEqual(try lists(a), ["Cast": ["An", "Bo"]])
     }
 
     func testWithoutAChosenMacEveryoneProcessesAndNothingIsPublished() throws {

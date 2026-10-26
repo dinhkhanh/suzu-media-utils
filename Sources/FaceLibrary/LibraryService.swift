@@ -383,6 +383,7 @@ public final class LibraryService: @unchecked Sendable {
         let affected = try Self.deleteSourceContents(id, store: store)
         engine.peopleChanged(affected)
         deleteEmptyPeople()
+        processor.enqueuePending()  // copies that lost their original without a face to take over
         if shared { teamSync.pushSoon() }
     }
 
@@ -394,6 +395,9 @@ public final class LibraryService: @unchecked Sendable {
             let n = try store.db.write { db -> Int in
                 let ids = try Int64.fetchAll(db, sql: "SELECT id FROM media WHERE sourceId = ? LIMIT 500", arguments: [id])
                 guard !ids.isEmpty else { return 0 }
+                // An original with a copy in another folder: the copy carries on with its faces (it used to be left
+                // done and faceless, and its RAW was then processed on its own).
+                for mid in ids { _ = try SourceMonitor.handOver(mid, excludingSource: id, db: db) }
                 let list = ids.map(String.init).joined(separator: ",")
                 affected.formUnion(try Int64.fetchAll(db, sql: "SELECT DISTINCT personId FROM face WHERE mediaId IN (\(list)) AND personId IS NOT NULL"))
                 try PersonMemory.remember("face.mediaId IN (\(list))", db: db)
@@ -642,6 +646,7 @@ public final class LibraryService: @unchecked Sendable {
 
     public func pin(_ people: [Int64], _ on: Bool) throws {
         try store.db.write { db in try PersonGroups.pin(people, on, db: db) }
+        teamSync.pushSoon()
     }
 
     /// Makes a list (or finds the one of that name) and puts `people` on it.
@@ -650,20 +655,24 @@ public final class LibraryService: @unchecked Sendable {
         try store.db.write { db in
             let id = try PersonGroups.create(name, db: db)
             try PersonGroups.set(id, people: people, member: true, db: db)
+            teamSync.pushSoon()
             return id
         }
     }
 
     public func renameGroup(_ id: Int64, to name: String) throws {
         try store.db.write { db in try PersonGroups.rename(id, to: name, db: db) }
+        teamSync.pushSoon()
     }
 
     public func deleteGroup(_ id: Int64) throws {
         try store.db.write { db in try PersonGroups.delete(id, db: db) }
+        teamSync.pushSoon()
     }
 
     public func setGroup(_ id: Int64, people: [Int64], member: Bool) throws {
         try store.db.write { db in try PersonGroups.set(id, people: people, member: member, db: db) }
+        teamSync.pushSoon()
     }
 
     /// Unnamed people with no faces left are clutter; named ones are kept so their name is not lost.

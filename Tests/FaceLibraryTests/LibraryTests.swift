@@ -826,3 +826,110 @@ extension LibraryTests {
         XCTAssertEqual(round, q)
     }
 }
+
+/// Copies and RAW companions keep the photo's faces when its original leaves (0.8.15 and before left a copy done
+/// and faceless when the original's folder was removed, and its RAW then stood for the photo).
+extension LibraryTests {
+    /// A second folder of the same kind and project as `root`, with the same bytes as `root/rel` at `rel`.
+    func otherFolder(copying rel: String, raw: String? = nil) throws -> (source: Int64, copy: URL, raw: URL?) {
+        let dir = URL(fileURLWithPath: canonicalPath(tmp), isDirectory: true).appendingPathComponent("Other", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var s = SourceRecord(path: dir.path)
+        try store.db.write { db in try s.insert(db) }
+        let copy = dir.appendingPathComponent((rel as NSString).lastPathComponent)
+        try FileManager.default.copyItem(at: root.appendingPathComponent(rel), to: copy)
+        var rawURL: URL?
+        if let raw {
+            rawURL = dir.appendingPathComponent(raw)
+            try Data(repeating: 9, count: 9000).write(to: rawURL!)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -3600)], ofItemAtPath: rawURL!.path)
+        }
+        return (s.id!, copy, rawURL)
+    }
+
+    func record(_ url: URL) throws -> MediaRecord { try media().first { $0.path == url.path }! }
+
+    func testRemovingAFolderHandsTheFacesToACopyElsewhere() throws {
+        try makeFile("a.jpg", seed: 3)
+        monitor().scan()
+        let original = try media()[0]
+        let an = try newPerson("An")
+        let face = try addFace(mediaId: original.id!, personId: an)
+        try store.db.write { db in try db.execute(sql: "UPDATE media SET takenAt = 1700000000 WHERE id = ?", arguments: [original.id]) }
+        let other = try otherFolder(copying: "a.jpg", raw: "a.arw")
+        let s = try store.db.read { db in try SourceRecord.fetchOne(db, key: other.source)! }
+        SourceMonitor(source: s, store: store) { _, _ in }.scan()
+        XCTAssertEqual(try record(other.copy).duplicateOf, original.id, "a copy")
+        XCTAssertEqual(try record(other.raw!).duplicateOf, original.id, "the copy's RAW goes with the photo's original, not on its own")
+
+        try LibraryServiceStub(store: store).removeSource(sourceId)
+        let copy = try record(other.copy)
+        XCTAssertNil(copy.duplicateOf)
+        XCTAssertEqual(copy.status, .done)
+        XCTAssertEqual(copy.takenAt, 1_700_000_000)
+        XCTAssertEqual(try store.db.read { db in try Int64.fetchAll(db, sql: "SELECT id FROM face WHERE mediaId = ?", arguments: [copy.id]) }, [face],
+                       "the same face, with its person")
+        XCTAssertEqual(try record(other.raw!).duplicateOf, copy.id, "the RAW follows")
+    }
+
+    func testACopyLeftWithoutItsOriginalIsReadAgain() throws {
+        try makeFile("a.jpg", seed: 3)
+        monitor().scan()
+        let original = try media()[0]
+        _ = try addFace(mediaId: original.id!, personId: try newPerson("An"))
+        let other = try otherFolder(copying: "a.jpg")
+        let s = try store.db.read { db in try SourceRecord.fetchOne(db, key: other.source)! }
+        SourceMonitor(source: s, store: store) { _, _ in }.scan()
+        // Any way the original goes without handing over (here: a plain delete).
+        try store.db.write { db in try db.execute(sql: "DELETE FROM media WHERE id = ?", arguments: [original.id]) }
+        let copy = try record(other.copy)
+        XCTAssertNil(copy.duplicateOf)
+        XCTAssertEqual(copy.status, .pending, "not done and faceless for good")
+    }
+
+    func testRawPairsThatBecameTwoPhotosAreMadeOneAgain() throws {
+        let an = try newPerson("An"), bo = try newPerson("Bo")
+        func photo(_ rel: String, seed: UInt8, takenAt: Double?) throws -> Int64 {
+            try makeFile(rel, seed: seed)
+            var m = MediaRecord(sourceId: sourceId, path: root.appendingPathComponent(rel).path, kind: .photo, size: 4096, mtime: 0, contentKey: rel)
+            m.status = .done; m.takenAt = takenAt
+            try store.db.write { db in try m.insert(db) }
+            return m.id!
+        }
+        func faces(_ m: Int64) throws -> [FaceRecord] {
+            try store.db.read { db in try FaceRecord.fetchAll(db, sql: "SELECT * FROM face WHERE mediaId = ? ORDER BY id", arguments: [m]) }
+        }
+        // 1. The JPEG left faceless (a copy whose original went), the RAW processed on its own.
+        let j1 = try photo("p/KHI00191.JPG", seed: 1, takenAt: nil), r1 = try photo("p/KHI00191.ARW", seed: 2, takenAt: 1_700_000_000)
+        let rf1 = try addFace(mediaId: r1, personId: an)
+        try store.db.write { db in try db.execute(sql: "UPDATE media SET takenAt = NULL WHERE id = ?", arguments: [j1]) }
+        try store.db.write { db in try db.execute(sql: "UPDATE person SET coverFaceId = ? WHERE id = ?", arguments: [rf1, an]) }
+        // 2. Both processed (before pairing existed): every face twice. The RAW's face was named by hand.
+        let j2 = try photo("p/IMG_0002.jpg", seed: 3, takenAt: 1), r2 = try photo("p/IMG_0002.CR2", seed: 4, takenAt: 1)
+        let jf2 = try addFace(mediaId: j2, personId: nil)
+        let rf2 = try addFace(mediaId: r2, personId: bo)
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE face SET assignment = 'user' WHERE id = ?", arguments: [rf2])
+            try db.execute(sql: "UPDATE person SET coverFaceId = ? WHERE id = ?", arguments: [rf2, bo])
+        }
+        // 3. A copy that lost its original, alone: read again.
+        let lone = try photo("p/lonely.jpg", seed: 5, takenAt: nil)
+
+        try store.db.write { db in try RawPairs.repair(db) }
+
+        XCTAssertEqual(try faces(j1).map(\.id), [rf1], "the RAW's face is the JPEG's now")
+        XCTAssertEqual(try record(root.appendingPathComponent("p/KHI00191.JPG")).takenAt, 1_700_000_000)
+        XCTAssertEqual(try record(root.appendingPathComponent("p/KHI00191.ARW")).duplicateOf, j1)
+        XCTAssertEqual(try record(root.appendingPathComponent("p/KHI00191.JPG")).status, .done)
+        XCTAssertEqual(try faces(j2).map(\.id), [jf2], "the JPEG's own face stays")
+        XCTAssertEqual(try faces(j2)[0].personId, bo, "with the name given on the RAW")
+        XCTAssertEqual(try faces(j2)[0].assignment, .user)
+        XCTAssertEqual(try faces(r2).count, 0, "counted once")
+        XCTAssertEqual(try record(root.appendingPathComponent("p/IMG_0002.CR2")).duplicateOf, j2)
+        XCTAssertEqual(try store.db.read { db in try Int64?.fetchOne(db, sql: "SELECT coverFaceId FROM person WHERE id = ?", arguments: [bo]) }, jf2,
+                       "the picture picked on the RAW is the JPEG's face")
+        XCTAssertEqual(try store.db.read { db in try Int64?.fetchOne(db, sql: "SELECT coverFaceId FROM person WHERE id = ?", arguments: [an]) }, rf1)
+        XCTAssertEqual(try record(root.appendingPathComponent("p/lonely.jpg")).status, .pending)
+        _ = lone
+    }
+}
