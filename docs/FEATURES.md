@@ -148,6 +148,8 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Tính năng | Mô tả ngắn |
 |---|---|
 | Mở để chỉnh & xuất | Chuột phải → Open trên ảnh ở mọi màn hình (People, khuôn mặt, khuôn mặt chưa gán, tìm kiếm, smart album) mở cửa sổ "Edit & Export" với đúng ảnh đó; ⌘-click chọn nhiều ảnh rồi Open để mở tất cả. Video mở bằng ứng dụng mặc định. |
+| Retouch: da và vùng người | Trong Edit & Export: làm mịn da (giữ lỗ chân lông, mắt, lông mày sắc nét), làm sáng da, làm trắng da (bớt vàng, hồng hơn, sáng hơn), có thể áp cho cả da thân (tay, chân, vai). Mask tự nhận trên từng ảnh: da mặt, da thân, môi, quần áo (mô hình Sapiens của Meta, tải một lần bằng nút Download Model trong mục Retouch và giữ qua các bản cập nhật; chưa tải thì dùng Apple Vision, mask thô hơn); mỗi mask có thanh chỉnh riêng (phơi sáng, tương phản, bão hoà, nhiệt độ màu, tint, đổi màu), độ mềm viền và nới/thu mask; "Show mask" tô đỏ mask đang chọn trên ảnh xem trước. |
+| Whites / Blacks | Hai thanh chỉnh mới trong Light: đẩy vùng sáng nhất tới trắng (hoặc giữ lại), vùng tối nhất tới đen (hoặc nâng lên), gần như không đụng vùng giữa. |
 | Edit & Export | Cân màu, cắt khung, watermark, đổi kích thước cho file/thư mục hoặc ảnh của những người đã chọn. Không bao giờ ghi đè: tên đã có thì thêm " (2)". |
 | Chọn ảnh để xuất | Tích/bỏ tích từng ảnh trên dải ảnh hoặc lưới (⇧-click chọn dải, Chọn tất cả / Bỏ chọn tất cả). |
 | Điều hướng bằng bàn phím | Phím ← → (và ↑ ↓ trên lưới, theo hàng) chuyển ảnh trong dải ảnh/lưới; Home/End về đầu/cuối; Space tích hoặc bỏ tích ảnh đang xem; Return mở ảnh trên lưới ra xem lớn. Bấm vào ảnh xem trước hoặc dải ảnh để lấy tiêu điểm bàn phím. |

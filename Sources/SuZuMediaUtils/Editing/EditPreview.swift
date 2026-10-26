@@ -110,7 +110,7 @@ final class PreviewCache: @unchecked Sendable {
     /// (edited by hand) wins over the recipe's, as in the export. `longSide`: the screen pixels the preview gets, so
     /// the result (and its watermark) is drawn at the screen's resolution; `withFull` also renders the whole photo
     /// for the crop tool.
-    func render(_ item: ToolItem, recipe: EditRecipe, original: Bool, longSide: Int, withFull: Bool) -> Rendered? {
+    func render(_ item: ToolItem, recipe: EditRecipe, original: Bool, longSide: Int, withFull: Bool, showMask: Retouch.Part? = nil) -> Rendered? {
         guard let e = entry(item.url) else { return nil }
         let recipe = CropPlacements.shared.recipe(recipe, for: item.url)
         let edit = CropPlacements.shared.edit(for: item.url)
@@ -143,11 +143,18 @@ final class PreviewCache: @unchecked Sendable {
         let auto = r.autoTone ? EditPipeline.autoAdjustments(level, strength: r.autoToneStrength) : nil
         let autoKey = item.url.path
         Task { @MainActor in AutoToneValues.shared.set(auto, for: autoKey) }
-        let toned = EditPipeline.tone(level, r, auto: auto)
+        var toned = EditPipeline.tone(level, r, auto: auto)
+        // Show Mask: the part's mask, shaped by its dials, tinted red over the photo.
+        if let part = showMask, let parts = BodyParts.find(in: level) {
+            let mask = EditPipeline.partMask(part, r.retouch, parts: parts, extent: level.extent)
+            let red = CIImage(color: CIColor(red: 1, green: 0.1, blue: 0.2, alpha: 0.6)).cropped(to: level.extent)
+            toned = red.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: toned, kCIInputMaskImageKey: mask])
+        }
         r.straighten = nil
         r.rotation = nil
         r.autoTone = false
         r.adjustments = nil
+        r.retouch = nil
         var crop: CGRect?, focus: FocusHint?
         let size = level.extent.size
         if let ratio = EditPipeline.cropRatio(r, size: size, focus: FocusHint(primary: nil, zoom: zoom, rect: rect)) {
@@ -214,7 +221,17 @@ enum CropAspect: Hashable {
 /// The big preview of an edit: the selected photo as it will be exported, a film strip to pick another photo, a
 /// before/after switch, and the usual editor navigation and tools — zoom (⌘+ ⌘− ⌘0 fit ⌘1 100%, ⌥-scroll, pinch),
 /// pan (scroll, Space-drag), a crop tool with handles (C), a level slider and a straighten line.
+/// Which part's mask the preview shows (the retouch panel's Show Mask), tinted red; nil is none.
+@MainActor
+final class MaskOverlay: ObservableObject {
+    static let shared = MaskOverlay()
+    @Published var part: Retouch.Part?
+}
+
 struct EditPreview: View {
+    @ObservedObject private var maskOverlay = MaskOverlay.shared
+    /// Drawn again with the body-parts model once it's downloaded.
+    @ObservedObject private var bodyParts = BodyPartsModel.shared
     @Binding var recipe: EditRecipe
     let samples: [ToolItem]
     var filmstrip = true
@@ -334,7 +351,7 @@ struct EditPreview: View {
         .onChange(of: samples.count) { if index >= samples.count { index = 0 } }
         .onChange(of: samples.count > 1) { if samples.count > 1, ProcessInfo.processInfo.environment["SUZU_TOOL_SAMPLES"] == "grid" { gridMode = true } }
         .onChange(of: current?.url, initial: true) { shown?.wrappedValue = current?.url; if cropping { cancelCrop() }; setZoom(nil) }
-        .task(id: "\(recipe.hashValue)|\(current?.url.path ?? "")|\(showOriginal)|\(placements)|\(renderLongSide)|\(perPhotoCrop)") { await render() }
+        .task(id: "\(recipe.hashValue)|\(current?.url.path ?? "")|\(showOriginal)|\(placements)|\(renderLongSide)|\(perPhotoCrop)|\(maskOverlay.part?.rawValue ?? "")|\(bodyParts.state == .ready)") { await render() }
         .task(id: "\(current?.url.path ?? "")|\(exports)") {
             guard let url = current?.url else { lastExport = nil; return }
             lastExport = await Task.detached { ExportHistory.shared.exports(of: url).first }.value
@@ -1079,8 +1096,10 @@ struct EditPreview: View {
         try? await Task.sleep(for: .milliseconds(80))
         guard !Task.isCancelled else { return }
         rendering = true
-        let recipe = recipe, original = showOriginal, long = renderLongSide, withFull = perPhotoCrop
-        let result = await Task.detached(priority: .userInitiated) { PreviewCache.shared.render(item, recipe: recipe, original: original, longSide: long, withFull: withFull) }.value
+        let recipe = recipe, original = showOriginal, long = renderLongSide, withFull = perPhotoCrop, mask = maskOverlay.part
+        let result = await Task.detached(priority: .userInitiated) {
+            PreviewCache.shared.render(item, recipe: recipe, original: original, longSide: long, withFull: withFull, showMask: mask)
+        }.value
         guard !Task.isCancelled else { return }
         rendering = false
         if let result { rendered = result }

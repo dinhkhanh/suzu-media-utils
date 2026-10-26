@@ -23,6 +23,9 @@ public struct EditRecipe: Codable, Sendable, Equatable, Hashable {
     public var watermark: WatermarkSpec?
     /// Light, colour, detail and orientation (see Adjustments); nil is none.
     public var adjustments: Adjustments?
+    /// Skin retouch and the people's parts (face skin, body skin, lips, clothes) found in each photo and adjusted on
+    /// their own (see Retouch); nil is none.
+    public var retouch: Retouch?
     /// Long side in pixels after cropping; nil keeps the size.
     public var maxLongSide: Int?
     public var jpegQuality = 0.9
@@ -38,6 +41,7 @@ public struct EditRecipe: Codable, Sendable, Equatable, Hashable {
 
     public var isPassthrough: Bool {
         !autoTone && !crops && watermark == nil && maxLongSide == nil && straighten != true && rotation == nil && look.isEmpty
+            && !(retouch?.isActive ?? false)
     }
 
     /// The adjustments, empty when none.
@@ -62,6 +66,87 @@ public struct EditRecipe: Codable, Sendable, Equatable, Hashable {
     }
 }
 
+/// What the people in a photo get on their own: skin made smoother, brighter and fairer, and each part found in the
+/// photo (face skin, body skin, lips, clothes) with dials of its own. The parts are found again in every photo, so
+/// one setting suits a whole batch.
+public struct Retouch: Codable, Sendable, Equatable, Hashable {
+    public enum Part: String, Codable, CodingKeyRepresentable, Sendable, CaseIterable, Identifiable, Hashable {
+        case faceSkin, bodySkin, lips, clothes
+        public var id: String { rawValue }
+        public var label: String {
+            switch self {
+            case .faceSkin: "Face skin"
+            case .bodySkin: "Body skin"
+            case .lips: "Lips"
+            case .clothes: "Clothes"
+            }
+        }
+    }
+
+    /// Skin smoothed (blemishes and texture softened, edges kept), 0…1.
+    public var smooth = 0.0
+    /// Skin made brighter, 0…1.
+    public var brighten = 0.0
+    /// Skin made fairer: less yellow and less saturated, a touch lighter, 0…1.
+    public var whiten = 0.0
+    /// The skin retouch on body skin too (arms, legs, neck), not only faces.
+    public var bodyToo = true
+    /// Each part's own dials; a part not here is left alone.
+    public var parts: [Part: PartLook] = [:]
+
+    public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        smooth = try c.decodeIfPresent(Double.self, forKey: .smooth) ?? 0
+        brighten = try c.decodeIfPresent(Double.self, forKey: .brighten) ?? 0
+        whiten = try c.decodeIfPresent(Double.self, forKey: .whiten) ?? 0
+        bodyToo = try c.decodeIfPresent(Bool.self, forKey: .bodyToo) ?? true
+        parts = try c.decodeIfPresent([Part: PartLook].self, forKey: .parts) ?? [:]
+    }
+
+    public var retouchesSkin: Bool { smooth != 0 || brighten != 0 || whiten != 0 }
+    public var isActive: Bool { retouchesSkin || parts.values.contains { $0.changesPixels } }
+
+    public func look(_ part: Part) -> PartLook { parts[part] ?? PartLook() }
+    public mutating func setLook(_ look: PartLook, for part: Part) {
+        // Kept while only its mask's edge is set, so the edge isn't lost while the dials are at 0.
+        parts[part] = look == PartLook() ? nil : look
+    }
+}
+
+/// One part's dials, and how its mask is drawn.
+public struct PartLook: Codable, Sendable, Equatable, Hashable {
+    /// Stops, -2…2.
+    public var exposure = 0.0
+    public var contrast = 0.0
+    public var saturation = 0.0
+    public var temperature = 0.0
+    public var tint = 0.0
+    /// Turns the colours, -1…1 = ±60°.
+    public var hue = 0.0
+    /// The mask's edge: 0 hard, 1 very soft.
+    public var softness = 0.3
+    /// The mask grown (> 0) or shrunk (< 0), -1…1.
+    public var grow = 0.0
+
+    public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        exposure = try c.decodeIfPresent(Double.self, forKey: .exposure) ?? 0
+        contrast = try c.decodeIfPresent(Double.self, forKey: .contrast) ?? 0
+        saturation = try c.decodeIfPresent(Double.self, forKey: .saturation) ?? 0
+        temperature = try c.decodeIfPresent(Double.self, forKey: .temperature) ?? 0
+        tint = try c.decodeIfPresent(Double.self, forKey: .tint) ?? 0
+        hue = try c.decodeIfPresent(Double.self, forKey: .hue) ?? 0
+        softness = try c.decodeIfPresent(Double.self, forKey: .softness) ?? 0.3
+        grow = try c.decodeIfPresent(Double.self, forKey: .grow) ?? 0
+    }
+
+    public var changesPixels: Bool { exposure != 0 || contrast != 0 || saturation != 0 || temperature != 0 || tint != 0 || hue != 0 }
+}
+
 /// The dials of a quick edit, as in any photo editor: light, colour, detail, and which way up the photo is. Every
 /// value is 0 (or false) when it does nothing, so an empty set of adjustments is skipped.
 public struct Adjustments: Codable, Sendable, Equatable, Hashable {
@@ -70,6 +155,9 @@ public struct Adjustments: Codable, Sendable, Equatable, Hashable {
     public var contrast = 0.0
     public var highlights = 0.0
     public var shadows = 0.0
+    /// The brightest tones pushed towards white (or held back from it), and the darkest towards black (or lifted).
+    public var whites = 0.0
+    public var blacks = 0.0
     // Colour (-1…1)
     public var temperature = 0.0
     public var tint = 0.0
@@ -98,6 +186,8 @@ public struct Adjustments: Codable, Sendable, Equatable, Hashable {
         contrast = try c.decodeIfPresent(Double.self, forKey: .contrast) ?? 0
         highlights = try c.decodeIfPresent(Double.self, forKey: .highlights) ?? 0
         shadows = try c.decodeIfPresent(Double.self, forKey: .shadows) ?? 0
+        whites = try c.decodeIfPresent(Double.self, forKey: .whites) ?? 0
+        blacks = try c.decodeIfPresent(Double.self, forKey: .blacks) ?? 0
         temperature = try c.decodeIfPresent(Double.self, forKey: .temperature) ?? 0
         tint = try c.decodeIfPresent(Double.self, forKey: .tint) ?? 0
         vibrance = try c.decodeIfPresent(Double.self, forKey: .vibrance) ?? 0
@@ -118,7 +208,7 @@ public struct Adjustments: Codable, Sendable, Equatable, Hashable {
     public var isEmpty: Bool { !changesPixels && !changesOrientation }
     /// Light, colour or detail set.
     public var changesPixels: Bool {
-        exposure != 0 || contrast != 0 || highlights != 0 || shadows != 0 || temperature != 0 || tint != 0 || vibrance != 0
+        exposure != 0 || contrast != 0 || highlights != 0 || shadows != 0 || whites != 0 || blacks != 0 || temperature != 0 || tint != 0 || vibrance != 0
             || saturation != 0 || monochrome || sharpness != 0 || clarity != 0 || vignette != 0 || hasCurve || hsl?.isEmpty == false
     }
     public static let straightCurve = [0.0, 0.25, 0.5, 0.75, 1.0]
@@ -147,7 +237,7 @@ public struct Adjustments: Codable, Sendable, Equatable, Hashable {
     /// the strength of an auto tone. Orientation, black & white and HSL are kept.
     public func scaled(_ k: Double) -> Adjustments {
         var a = self
-        a.exposure *= k; a.contrast *= k; a.highlights *= k; a.shadows *= k
+        a.exposure *= k; a.contrast *= k; a.highlights *= k; a.shadows *= k; a.whites *= k; a.blacks *= k
         a.temperature *= k; a.tint *= k; a.vibrance *= k; a.saturation *= k
         a.sharpness *= k; a.clarity *= k; a.vignette *= k
         if hasCurve { a.tone = zip(tone, Adjustments.straightCurve).map { $1 + ($0 - $1) * k } }
@@ -163,6 +253,8 @@ public struct Adjustments: Codable, Sendable, Equatable, Hashable {
         a.contrast = (contrast + base.contrast).clamped(-1, 1)
         a.highlights = (highlights + base.highlights).clamped(-1, 1)
         a.shadows = (shadows + base.shadows).clamped(-1, 1)
+        a.whites = (whites + base.whites).clamped(-1, 1)
+        a.blacks = (blacks + base.blacks).clamped(-1, 1)
         a.temperature = (temperature + base.temperature).clamped(-1, 1)
         a.tint = (tint + base.tint).clamped(-1, 1)
         a.vibrance = (vibrance + base.vibrance).clamped(-1, 1)
@@ -176,6 +268,7 @@ public struct Adjustments: Codable, Sendable, Equatable, Hashable {
         guard let base else { return self }
         var a = self
         a.exposure -= base.exposure; a.contrast -= base.contrast; a.highlights -= base.highlights; a.shadows -= base.shadows
+        a.whites -= base.whites; a.blacks -= base.blacks
         a.temperature -= base.temperature; a.tint -= base.tint; a.vibrance -= base.vibrance; a.saturation -= base.saturation
         if base.hasCurve { a.tone = Adjustments.unwind(tone, inner: base.tone) }
         return a

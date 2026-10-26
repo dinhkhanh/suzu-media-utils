@@ -911,3 +911,24 @@ the preview, regular size, on a dark disc, and takes no clicks.
   kept, which `settleEditedFolders` skipped and the processor refuses. The scan now clears the flag, and the settle
   pass also takes `skippedAsEdited AND status = 'pending'` (36 such files in the event library).
 
+
+## v0.8.14 (2026-10-26): Retouch (skin and auto masks); Whites and Blacks
+
+- **Body parts** (`FaceCore/BodyParts.swift`): Meta's Sapiens 0.3B body-part segmentation (Goliath's 28 parts,
+  CC BY-NC) converted by `tools/convert_sapiens.py` into five soft masks (face skin, body skin, lips, clothes, hair).
+  The export only took 1024 x 768 and ran 4.5 s a tile: the position embedding is resized (bicubic) to 768 x 576, and
+  the decoder's transposed convolutions are rewritten as four 2 x 2 sub-pixel convolutions each, which Core ML had
+  left on the CPU; now 0.48 s a tile on the GPU (the Neural Engine takes minutes to prepare it). Photos are scaled
+  to at most 768 high (never enlarged) and covered with overlapping tiles; faces get a closer pass when it gives at
+  least twice the detail. Eyes and brows (Vision landmarks) are cut out of face skin. Without the model, Vision's
+  person mask, landmarks and skin colour stand in. Results are cached by a 16 x 16 thumbnail (last 24 photos).
+- **The model is downloaded, not bundled** (`BodyPartsModel.swift`): 627 MB zipped, its own GitHub release
+  `models-bodyparts-1` (never latest: the update feed is releases/latest/appcast.xml), checked against its SHA-256 and
+  unpacked into Application Support/SuZu Media Utils/Models, kept across updates. The Retouch section's Download
+  button, or `--download-body-parts` from a script. `scripts/publish-model.sh` uploads a new one.
+- **Retouch** (`EditRecipe.retouch`, `EditPipeline.retouch`): smooth (frequency separation: fine detail kept, the
+  blotchy middle band evened), brighten, whiten (less saturation, cooler, a little magenta, lighter midtones), on face
+  skin and optionally body skin; per-part exposure, contrast, saturation, temperature, tint and hue, with edge
+  softness (blur) and grow/shrink (morphology) of the mask. "Show mask" tints the shaped mask red on the preview.
+- **Whites / Blacks**: one curve each, `0.25·w·x³` at the top and `0.2·b·(1−x)³` at the bottom, so the midtones
+  barely move.

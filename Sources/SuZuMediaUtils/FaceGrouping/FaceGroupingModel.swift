@@ -200,6 +200,8 @@ final class FaceGroupingModel: ObservableObject {
     private var restoredProject = false
 
     init() {
+        // Edit & Export's retouch finds the people's parts with it (Apple Vision until it's downloaded).
+        BodyParts.modelURL = BodyPartsModel.located
         guard let model = locateModel() else {
             startupError = "The face model (ArcFaceR50.mlmodelc) was not found. Rebuild the app with scripts/build-app.sh (see README)."
             return

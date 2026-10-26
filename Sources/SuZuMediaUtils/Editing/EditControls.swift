@@ -9,7 +9,9 @@ struct EditSections: OptionSet {
     static let crop = EditSections(rawValue: 2)
     static let watermark = EditSections(rawValue: 4)
     static let size = EditSections(rawValue: 8)
-    static let all: EditSections = [.tone, .crop, .watermark, .size]
+    /// Skin retouch and the people's parts (masks).
+    static let retouch = EditSections(rawValue: 16)
+    static let all: EditSections = [.tone, .retouch, .crop, .watermark, .size]
 }
 
 /// A titled group in an inspector column.
@@ -84,6 +86,8 @@ struct EditControls: View {
                     AdjustSlider("Contrast", value: shown.contrast)
                     AdjustSlider("Highlights", value: shown.highlights)
                     AdjustSlider("Shadows", value: shown.shadows)
+                    AdjustSlider("Whites", value: shown.whites, help: "Right: the brightest tones to pure white. Left: holds them back from it")
+                    AdjustSlider("Blacks", value: shown.blacks, help: "Left: the darkest tones to pure black. Right: lifts them")
                 }
                 InspectorSection(title: "Colour") {
                     AdjustSlider("Temperature", value: shown.temperature, help: "Left cooler (bluer), right warmer (more yellow)")
@@ -134,6 +138,9 @@ struct EditControls: View {
                         }
                     }
                 }
+            }
+            if sections.contains(.retouch) {
+                InspectorSection(title: "Retouch") { RetouchControls(retouch: $recipe.retouch) }
             }
             if sections.contains(.crop) {
                 InspectorSection(title: "Crop") { AspectChooser(recipe: $recipe) }
@@ -691,6 +698,91 @@ struct FontPicker: View, Equatable {
     static func startFace(of family: String) -> String? {
         let f = faces(family)
         return (f.first { $0.style == "Medium" } ?? f.first { $0.style == "Regular" } ?? f.first)?.name
+    }
+}
+
+/// Skin retouch, then the people's parts (face skin, body skin, lips, clothes), each with its own dials and mask
+/// shape. The parts are found by the app in every photo; Show Mask tints the chosen one red on the preview.
+struct RetouchControls: View {
+    @Binding var retouch: Retouch?
+    @State private var part = Retouch.Part.faceSkin
+    @ObservedObject private var overlay = MaskOverlay.shared
+    @ObservedObject private var model = BodyPartsModel.shared
+
+    /// Nothing set is no retouch at all (nothing to find in the photos).
+    var r: Binding<Retouch> {
+        Binding(get: { retouch ?? Retouch() }, set: { retouch = $0.isActive || $0 != Retouch() ? $0 : nil })
+    }
+
+    /// The chosen part's dials, written back in one go.
+    var look: Binding<PartLook> {
+        Binding(get: { r.wrappedValue.look(part) }, set: { new in
+            var x = r.wrappedValue
+            x.setLook(new, for: part)
+            r.wrappedValue = x
+        })
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            modelRow
+            AdjustSlider("Smooth skin", value: r.smooth, range: 0...1, help: "Evens out blemishes and blotches; pores, eyes and edges stay sharp")
+            AdjustSlider("Brighten skin", value: r.brighten, range: 0...1)
+            AdjustSlider("Whiten skin", value: r.whiten, range: 0...1, help: "Fairer skin: less yellow, a touch rosier and lighter")
+            Toggle("Body skin too", isOn: r.bodyToo)
+                .help("Smooth, brighten and whiten arms, legs and shoulders as well as faces")
+            Divider().padding(.vertical, 2)
+            HStack {
+                Text("Masks").font(.callout.weight(.medium))
+                Spacer()
+                Toggle("Show mask", isOn: Binding(get: { overlay.part == part }, set: { overlay.part = $0 ? part : nil }))
+                    .toggleStyle(.checkbox)
+                    .help("Tint the chosen part red on the preview, to see what the dials below change")
+            }
+            Picker("", selection: $part) {
+                ForEach(Retouch.Part.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented).labelsHidden()
+            .onChange(of: part) { if overlay.part != nil { overlay.part = part } }
+            AdjustSlider("Exposure", value: look.exposure, range: -2...2, unit: " EV")
+            AdjustSlider("Contrast", value: look.contrast)
+            AdjustSlider("Saturation", value: look.saturation)
+            AdjustSlider("Temperature", value: look.temperature, help: "Left cooler (bluer), right warmer (more yellow)")
+            AdjustSlider("Tint", value: look.tint, help: "Left greener, right more magenta")
+            AdjustSlider("Hue", value: look.hue, help: "Turns the colours: recolour lips or clothes")
+            AdjustSlider("Edge softness", value: look.softness, range: 0...1, help: "How gently the change fades out at the part's edge")
+            AdjustSlider("Grow / shrink", value: look.grow, help: "Right: the mask reaches a little further. Left: it keeps further inside the part")
+            if r.wrappedValue.look(part) != PartLook() {
+                Button("Reset \(part.label)") { look.wrappedValue = PartLook() }.controlSize(.small)
+            }
+        }
+        .onDisappear { overlay.part = nil }
+    }
+
+    /// Until the body-parts model is downloaded, macOS finds the parts (rougher masks).
+    @ViewBuilder var modelRow: some View {
+        let size = ByteCountFormatter.string(fromByteCount: BodyPartsModel.downloadSize, countStyle: .file)
+        switch model.state {
+        case .ready:
+            EmptyView()
+        case .missing, .failed:
+            VStack(alignment: .leading, spacing: 4) {
+                if case .failed(let why) = model.state {
+                    Text(why).font(.caption).foregroundStyle(.red)
+                } else {
+                    Text("Masks are rough until the body-parts model is downloaded (once, kept across updates).")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Button("Download Model (\(size))") { model.download() }.controlSize(.small)
+            }
+            Divider().padding(.vertical, 2)
+        case .downloading(let p):
+            HStack {
+                ProgressView(value: p) { Text("Downloading the body-parts model… \(Int(p * 100))%").font(.caption) }
+                Button("Cancel") { model.cancel() }.controlSize(.small)
+            }
+            Divider().padding(.vertical, 2)
+        }
     }
 }
 

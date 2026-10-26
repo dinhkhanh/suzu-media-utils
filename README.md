@@ -240,10 +240,25 @@ cd -  # back to the repo
 for m in ArcFaceR50 SFace; do xcrun coremlcompiler compile models/$m.mlpackage models/compiled; done
 ```
 
+Edit & Export's retouch finds people's face skin, body skin, lips, clothes and hair with Meta's Sapiens body-part
+segmentation (0.3B, CC BY-NC 4.0: personal use). Without it the app falls back to Apple Vision (rougher: hair can
+count as clothes, skin-coloured clothes as skin). Build it once (1.4 GB download, 645 MB model):
+
+```sh
+curl -L -o ~/fg-models/sapiens_seg_0.3b.pt2 https://huggingface.co/facebook/sapiens-seg-0.3b-torchscript/resolve/main/sapiens_0.3b_goliath_best_goliath_mIoU_7673_epoch_194_torchscript.pt2
+~/fg-models/venv/bin/python tools/convert_sapiens.py ~/fg-models/sapiens_seg_0.3b.pt2 ~/fg-models/sapiens
+xcrun coremlcompiler compile ~/fg-models/sapiens/BodyParts.mlpackage models/compiled
+```
+
+It isn't put inside the app (600 MB in every update): `N=1 scripts/publish-model.sh` puts it on GitHub as a release
+of its own, and the app downloads it once into `~/Library/Application Support/SuZu Media Utils/Models` (the
+Download button in the Retouch section, or `"SuZu Media Utils.app/Contents/MacOS/SuZu Media Utils" --download-body-parts`
+for setting up several Macs). A development build also finds it in `models/compiled`.
+
 ### Build and run
 
 ```sh
-scripts/build-app.sh          # -> dist/SuZu Media Utils.app (model, icon and Sparkle bundled)
+scripts/build-app.sh          # -> dist/SuZu Media Utils.app (face model, icon and Sparkle bundled)
 open "dist/SuZu Media Utils.app"
 swift test                    # library tests (no model needed)
 ```

@@ -296,6 +296,7 @@ struct RulesView: View {
             if e.autoTone { edits.append("auto tone") }
             if let c = e.cropDescription { edits.append(c) }
             if e.watermark != nil { edits.append("watermark") }
+            if e.retouch?.isActive == true { edits.append("retouch") }
             if let l = e.maxLongSide { edits.append("\(l) px") }
             if !edits.isEmpty { parts.append(edits.joined(separator: ", ")) }
         }

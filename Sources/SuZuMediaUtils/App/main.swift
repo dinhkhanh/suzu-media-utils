@@ -8,9 +8,15 @@ import MediaKit
 func locateModel() -> URL? {
     if let u = Bundle.main.url(forResource: "ArcFaceR50", withExtension: "mlmodelc") { return u }
     if let env = ProcessInfo.processInfo.environment["SUZU_FACE_MODEL"] { return URL(fileURLWithPath: env) }
+    return locateModel(named: "ArcFaceR50")
+}
+
+/// A compiled model by name: inside the app bundle, else models/compiled above the executable (development).
+func locateModel(named name: String) -> URL? {
+    if let u = Bundle.main.url(forResource: name, withExtension: "mlmodelc") { return u }
     var dir = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().deletingLastPathComponent()
     for _ in 0..<6 {
-        let u = dir.appendingPathComponent("models/compiled/ArcFaceR50.mlmodelc")
+        let u = dir.appendingPathComponent("models/compiled/\(name).mlmodelc")
         if FileManager.default.fileExists(atPath: u.path) { return u }
         dir = dir.deletingLastPathComponent()
     }
@@ -208,6 +214,18 @@ func suggestNamesHeadless(_ service: LibraryService, apply: Bool) {
     service.engine.waitUntilIdle()
 }
 
+/// Steps passed, counted once each from any thread.
+final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = -1
+    func advance(to v: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard v > value else { return false }
+        value = v
+        return true
+    }
+}
+
 /// SUZU_HANG_LOG=1 (testing): logs to stderr whenever the main thread is blocked for more than 250 ms.
 func startHangWatchdog() {
     guard ProcessInfo.processInfo.environment["SUZU_HANG_LOG"] != nil else { return }
@@ -229,6 +247,24 @@ func startHangWatchdog() {
 
 if CommandLine.arguments.contains("--headless") {
     runHeadless(CommandLine.arguments)
+} else if CommandLine.arguments.contains("--download-body-parts") {
+    // Edit & Export's body-parts model, as its Download button gets it (for setting up several Macs from a script).
+    setvbuf(stdout, nil, _IOLBF, 0)
+    let sem = DispatchSemaphore(value: 0)
+    Task.detached {
+        let shown = Counter()
+        do {
+            let url = try await BodyPartsModel.fetch { p in
+                if shown.advance(to: Int(p * 10)) { print("\(Int(p * 100))%") }
+            }
+            print("installed \(url.path)")
+            exit(0)
+        } catch {
+            print("failed: \(error.localizedDescription)")
+            exit(1)
+        }
+    }
+    sem.wait()
 } else {
     NSApplication.shared.setActivationPolicy(.regular)
     startHangWatchdog()

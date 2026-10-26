@@ -146,7 +146,98 @@ public enum EditPipeline {
     /// As above with the auto tone's dials already measured (`autoAdjustments`), so a caller can show them.
     public static func tone(_ image: CIImage, _ recipe: EditRecipe, auto: Adjustments?) -> CIImage {
         let look = recipe.look.composed(over: auto)
-        return look.changesPixels ? adjust(image, look) : image
+        var out = look.changesPixels ? adjust(image, look) : image
+        // The people's parts are found on the photo before toning (so moving a dial doesn't look for them again).
+        if let r = recipe.retouch, r.isActive, let parts = BodyParts.find(in: image) { out = retouch(out, r, parts: parts) }
+        return out
+    }
+
+    // MARK: - Retouch
+
+    /// Skin smoothed, brightened and made fairer where face skin (and body skin) is, then each part's own dials
+    /// where it is.
+    public static func retouch(_ image: CIImage, _ r: Retouch, parts: BodyParts) -> CIImage {
+        let ext = image.extent
+        let short = min(ext.width, ext.height)
+        var out = image
+        if r.retouchesSkin {
+            var skin = parts.mask(.faceSkin, extent: ext)
+            if r.bodyToo {
+                skin = skin.applyingFilter("CIMaximumCompositing", parameters: [kCIInputBackgroundImageKey: parts.mask(.bodySkin, extent: ext)])
+            }
+            skin = shape(skin, PartLook(), short: short, extent: ext)
+            out = beautify(out, r, short: short).applyingFilter("CIBlendWithMask", parameters: [
+                kCIInputBackgroundImageKey: out, kCIInputMaskImageKey: skin])
+        }
+        for (part, look) in r.parts.sorted(by: { $0.key.rawValue < $1.key.rawValue }) where look.changesPixels {
+            let mask = shape(parts.mask(part.kind, extent: ext), look, short: short, extent: ext)
+            out = adjust(out, part: look).applyingFilter("CIBlendWithMask", parameters: [
+                kCIInputBackgroundImageKey: out, kCIInputMaskImageKey: mask])
+        }
+        return out.cropped(to: ext)
+    }
+
+    /// A part's mask over a photo of this extent, shaped by its dials: what Show Mask draws.
+    public static func partMask(_ part: Retouch.Part, _ r: Retouch?, parts: BodyParts, extent: CGRect) -> CIImage {
+        shape(parts.mask(part.kind, extent: extent), r?.look(part) ?? PartLook(), short: min(extent.width, extent.height), extent: extent)
+    }
+
+    /// A mask grown or shrunk, then its edge softened, by the part's dials (sized on the photo's short side).
+    public static func shape(_ mask: CIImage, _ look: PartLook, short: CGFloat, extent: CGRect) -> CIImage {
+        var m = mask.clampedToExtent()
+        let grow = look.grow * Double(short) * 0.015
+        if grow >= 0.5 { m = m.applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: grow]) }
+        if grow <= -0.5 { m = m.applyingFilter("CIMorphologyMinimum", parameters: [kCIInputRadiusKey: -grow]) }
+        let soft = look.softness * Double(short) * 0.008
+        if soft >= 0.5 { m = m.applyingGaussianBlur(sigma: soft) }
+        return m.cropped(to: extent)
+    }
+
+    /// The skin look over the whole picture (the mask keeps it to the skin): blotches and unevenness softened while
+    /// fine texture stays (the band between a fine and a coarse blur taken out), brighter, fairer.
+    static func beautify(_ image: CIImage, _ r: Retouch, short: CGFloat) -> CIImage {
+        var out = image
+        if r.smooth > 0 {
+            let base = image.clampedToExtent()
+            let k = r.smooth * 0.9
+            // out = image − k·fine + k·coarse: the band between the two blurs (blemishes, uneven tone) goes, the finer
+            // texture and the broad shading stay. Core Image works in floating point, so the negative layer adds up
+            // exactly; alpha is left out of both layers.
+            func scaled(_ img: CIImage, _ f: Double) -> CIImage {
+                img.applyingFilter("CIColorMatrix", parameters: ["inputRVector": CIVector(x: f, y: 0, z: 0, w: 0),
+                                                                 "inputGVector": CIVector(x: 0, y: f, z: 0, w: 0),
+                                                                 "inputBVector": CIVector(x: 0, y: 0, z: f, w: 0),
+                                                                 "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0)])
+            }
+            let fine = scaled(base.applyingGaussianBlur(sigma: Double(short) * 0.0012), -k)
+            let coarse = scaled(base.applyingGaussianBlur(sigma: Double(short) * 0.01), k)
+            out = fine.applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: out])
+            out = coarse.applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: out]).cropped(to: image.extent)
+        }
+        if r.brighten > 0 { out = out.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: r.brighten * 0.6]) }
+        if r.whiten > 0 {
+            // Fairer: less yellow and less colour, lighter mid-tones, a touch of pink.
+            out = out.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 1 - r.whiten * 0.22, kCIInputBrightnessKey: 0])
+            out = out.applyingFilter("CITemperatureAndTint", parameters: ["inputNeutral": CIVector(x: 6500, y: 0),
+                                                                          "inputTargetNeutral": CIVector(x: 6500 + r.whiten * 700, y: r.whiten * 18)])
+            out = out.applyingFilter("CIGammaAdjust", parameters: ["inputPower": 1 - r.whiten * 0.25])
+        }
+        return out
+    }
+
+    /// One part's dials, as the main ones do it.
+    static func adjust(_ image: CIImage, part a: PartLook) -> CIImage {
+        var out = image
+        if a.exposure != 0 { out = out.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: a.exposure]) }
+        if a.contrast != 0 || a.saturation != 0 {
+            out = out.applyingFilter("CIColorControls", parameters: [kCIInputContrastKey: 1 + a.contrast * 0.5, kCIInputSaturationKey: 1 + a.saturation])
+        }
+        if a.temperature != 0 || a.tint != 0 {
+            out = out.applyingFilter("CITemperatureAndTint", parameters: ["inputNeutral": CIVector(x: 6500, y: 0),
+                                                                          "inputTargetNeutral": CIVector(x: 6500 - a.temperature * 2500, y: a.tint * 60)])
+        }
+        if a.hue != 0 { out = out.applyingFilter("CIHueAdjust", parameters: [kCIInputAngleKey: a.hue * .pi / 3]) }
+        return out
     }
 
     /// What Core Image's auto-enhance would do to this photo, as the editor's own dials: its tone curve, its
@@ -209,6 +300,11 @@ public enum EditPipeline {
             // Brighter highlights: the top of the curve lifted, the rest untouched.
             out = curve(out, [0, 0.25, 0.5, 0.75 + min(1, a.highlights) * 0.12, 1])
         }
+        if a.whites != 0 || a.blacks != 0 {
+            out = out.applyingFilter("CIColorCurves", parameters: [
+                "inputCurvesData": endsLUT(whites: a.whites, blacks: a.blacks), "inputCurvesDomain": CIVector(x: 0, y: 1),
+                "inputColorSpace": CGColorSpace(name: CGColorSpace.sRGB)!])
+        }
         if a.contrast != 0 || a.saturation != 0 {
             out = out.applyingFilter("CIColorControls", parameters: [kCIInputContrastKey: 1 + a.contrast * 0.5, kCIInputSaturationKey: 1 + a.saturation])
         }
@@ -263,6 +359,29 @@ public enum EditPipeline {
         }
         let data = lut.withUnsafeBufferPointer { Data(buffer: $0) }
         curveCache = (points, data)
+        return data
+    }
+
+    nonisolated(unsafe) static var endsCache: (Double, Double, Data)?
+
+    /// Whites and blacks: each end of the tones moved, the middle barely. Whites shifts tone x by 0.25·w·x³ (at 1
+    /// white clips, at −1 the brightest come down a quarter), blacks by 0.2·b·(1−x)³; always rising, so no tones swap.
+    public static func endsValue(_ x: Double, whites w: Double, blacks b: Double) -> Double {
+        min(1, max(0, x + 0.25 * w * x * x * x + 0.2 * b * (1 - x) * (1 - x) * (1 - x)))
+    }
+
+    /// 256 RGB triples of `endsValue`.
+    public static func endsLUT(whites: Double, blacks: Double) -> Data {
+        hslLock.lock(); defer { hslLock.unlock() }
+        if let c = endsCache, c.0 == whites, c.1 == blacks { return c.2 }
+        var lut = [Float]()
+        lut.reserveCapacity(256 * 3)
+        for i in 0..<256 {
+            let v = Float(endsValue(Double(i) / 255, whites: whites, blacks: blacks))
+            lut.append(v); lut.append(v); lut.append(v)
+        }
+        let data = lut.withUnsafeBufferPointer { Data(buffer: $0) }
+        endsCache = (whites, blacks, data)
         return data
     }
 
@@ -591,5 +710,17 @@ public enum EditPipeline {
         guard CGImageDestinationFinalize(d) else { try? FileManager.default.removeItem(at: tmp); throw Failure.write(dest.lastPathComponent) }
         if FileManager.default.fileExists(atPath: dest.path) { try FileManager.default.removeItem(at: dest) }
         try FileManager.default.moveItem(at: tmp, to: dest)
+    }
+}
+
+extension Retouch.Part {
+    /// The mask this part is drawn with.
+    public var kind: BodyParts.Kind {
+        switch self {
+        case .faceSkin: .faceSkin
+        case .bodySkin: .bodySkin
+        case .lips: .lips
+        case .clothes: .clothes
+        }
     }
 }

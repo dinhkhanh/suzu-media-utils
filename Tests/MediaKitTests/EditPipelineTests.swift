@@ -1,5 +1,6 @@
 import CoreGraphics
 import CoreImage
+@testable import FaceCore
 import ImageIO
 import XCTest
 @testable import MediaKit
@@ -592,5 +593,120 @@ final class StraightenTests: XCTestCase {
         let p = f!.primary!
         XCTAssertEqual(p.midX, 0.75, accuracy: 0.05)
         XCTAssertTrue(CGRect(x: 0, y: 0, width: 1, height: 1).contains(p))
+    }
+}
+
+final class WhitesBlacksTests: XCTestCase {
+    func testWhitesAndBlacksMoveTheEndsAndSpareTheMiddle() throws {
+        func v(_ x: Double, _ w: Double, _ b: Double) -> Double { EditPipeline.endsValue(x, whites: w, blacks: b) }
+        XCTAssertEqual(v(1, 1, 0), 1)                           // whites up: the top clips to white
+        XCTAssertGreaterThan(v(0.85, 1, 0), 0.97)
+        XCTAssertEqual(v(1, -1, 0), 0.75, accuracy: 1e-9)       // whites down: the brightest held back
+        XCTAssertEqual(v(0, 0, -1), 0)                          // blacks down: the bottom clips to black
+        XCTAssertLessThan(v(0.12, 0, -1), 0.02)
+        XCTAssertEqual(v(0, 0, 1), 0.2, accuracy: 1e-9)         // blacks up: the bottom lifted
+        for w in [-1.0, 1] {
+            for b in [-1.0, 1] {
+                XCTAssertEqual(v(0.5, w, 0), 0.5, accuracy: 0.035)  // the middle barely moves
+                XCTAssertEqual(v(0.5, 0, b), 0.5, accuracy: 0.03)
+                var last = -1.0
+                for i in 0...100 {                                  // always rising: no tones swap places
+                    let y = v(Double(i) / 100, w, b)
+                    XCTAssertGreaterThanOrEqual(y, last)
+                    last = y
+                }
+            }
+        }
+        // Through the pipeline: a light grey gets lighter with whites, a dark one darker with blacks.
+        func out(_ grey: CGFloat, _ a: Adjustments) -> Double {
+            let img = EditPipeline.adjust(CIImage(color: CIColor(red: grey, green: grey, blue: grey)).cropped(to: CGRect(x: 0, y: 0, width: 4, height: 4)), a)
+            var px = [UInt8](repeating: 0, count: 4)
+            CIContext(options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!])
+                .render(img, toBitmap: &px, rowBytes: 4, bounds: CGRect(x: 0, y: 0, width: 1, height: 1), format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+            return Double(px[0]) / 255
+        }
+        var w = Adjustments(); w.whites = 1
+        var b = Adjustments(); b.blacks = -1
+        XCTAssertTrue(w.changesPixels && b.changesPixels)
+        XCTAssertGreaterThan(out(0.85, w), out(0.85, Adjustments()) + 0.05)
+        XCTAssertLessThan(out(0.15, b), out(0.15, Adjustments()) - 0.05)
+    }
+
+    func testWhitesAndBlacksAddUpWithAutoToneAndOldEditsLoad() throws {
+        var auto = Adjustments(); auto.whites = 0.2
+        var user = Adjustments(); user.whites = 0.3; user.blacks = -0.4
+        let shown = user.composed(over: auto)
+        XCTAssertEqual(shown.whites, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(shown.subtracting(auto).whites, 0.3, accuracy: 1e-9)
+        XCTAssertEqual(user.scaled(0.5).blacks, -0.2, accuracy: 1e-9)
+        let old = try JSONDecoder().decode(Adjustments.self, from: Data(#"{"exposure":0.5,"shadows":0.2}"#.utf8))
+        XCTAssertEqual(old.whites, 0); XCTAssertEqual(old.blacks, 0)
+    }
+}
+
+final class RetouchTests: XCTestCase {
+    /// Left half of a 200 x 100 photo is the part (planes run from the top), right half is not.
+    func leftHalf(_ kind: BodyParts.Kind, topOnly: Bool = false) -> BodyParts {
+        let w = 20, h = 10
+        var planes = [[Float]](repeating: [Float](repeating: 0, count: w * h), count: BodyParts.Kind.allCases.count)
+        for y in 0..<(topOnly ? h / 2 : h) { for x in 0..<(w / 2) { planes[kind.rawValue][y * w + x] = 1 } }
+        return BodyParts(width: w, height: h, planes: planes, byModel: true)
+    }
+
+    func value(_ image: CIImage, _ x: CGFloat, _ y: CGFloat) -> Double {
+        var px = [UInt8](repeating: 0, count: 4)
+        CIContext(options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!])
+            .render(image, toBitmap: &px, rowBytes: 4, bounds: CGRect(x: x, y: y, width: 1, height: 1), format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+        return Double(px[0]) / 255
+    }
+
+    func testMasksAreTheRightWayUp() {
+        // The plane's top rows are the photo's top (Core Image: high y).
+        let mask = leftHalf(.lips, topOnly: true).mask(.lips, extent: CGRect(x: 0, y: 0, width: 200, height: 100))
+        XCTAssertGreaterThan(value(mask, 40, 85), 0.9)
+        XCTAssertLessThan(value(mask, 40, 15), 0.1)
+        XCTAssertLessThan(value(mask, 160, 85), 0.1)
+    }
+
+    func testRetouchChangesOnlyItsParts() {
+        let photo = CIImage(color: CIColor(red: 0.5, green: 0.4, blue: 0.35)).cropped(to: CGRect(x: 0, y: 0, width: 200, height: 100))
+        var r = Retouch()
+        r.brighten = 1
+        let bright = EditPipeline.retouch(photo, r, parts: leftHalf(.faceSkin))
+        XCTAssertGreaterThan(value(bright, 30, 50), value(photo, 30, 50) + 0.1)   // skin brighter
+        XCTAssertEqual(value(bright, 170, 50), value(photo, 170, 50), accuracy: 0.01) // the rest as it was
+        // Body skin left out unless asked.
+        r.bodyToo = false
+        XCTAssertEqual(value(EditPipeline.retouch(photo, r, parts: leftHalf(.bodySkin)), 30, 50), value(photo, 30, 50), accuracy: 0.01)
+        // A part's own dials, on that part only.
+        var clothes = Retouch()
+        var look = PartLook(); look.exposure = -1
+        clothes.setLook(look, for: .clothes)
+        let dark = EditPipeline.retouch(photo, clothes, parts: leftHalf(.clothes))
+        XCTAssertLessThan(value(dark, 30, 50), value(photo, 30, 50) - 0.1)
+        XCTAssertEqual(value(dark, 170, 50), value(photo, 170, 50), accuracy: 0.01)
+    }
+
+    func testRetouchSettingsSaveAndOlderEditsLoad() throws {
+        var r = Retouch()
+        r.smooth = 0.4
+        var lips = PartLook(); lips.hue = 0.2; lips.softness = 0.5
+        r.setLook(lips, for: .lips)
+        r.setLook(PartLook(), for: .clothes)   // nothing set: not kept
+        XCTAssertEqual(r.parts.count, 1)
+        XCTAssertTrue(r.isActive)
+        var recipe = EditRecipe()
+        recipe.retouch = r
+        XCTAssertFalse(recipe.isPassthrough)
+        let back = try JSONDecoder().decode(EditRecipe.self, from: JSONEncoder().encode(recipe))
+        XCTAssertEqual(back.retouch, r)
+        let json = String(data: try JSONEncoder().encode(r), encoding: .utf8)!
+        XCTAssertTrue(json.contains("\"lips\""), "parts saved by name: \(json)")
+        let old = try JSONDecoder().decode(EditRecipe.self, from: Data(#"{"autoTone":true,"autoToneStrength":0.8,"jpegQuality":0.9,"writePeopleNames":true}"#.utf8))
+        XCTAssertNil(old.retouch)
+        var onlyEdge = Retouch()
+        var soft = PartLook(); soft.softness = 0.9
+        onlyEdge.setLook(soft, for: .faceSkin)
+        XCTAssertFalse(onlyEdge.isActive, "a mask's edge alone changes nothing")
     }
 }

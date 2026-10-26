@@ -6,7 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 NAME="SuZu Media Utils"
-VERSION="${VERSION:-0.8.13}"
+VERSION="${VERSION:-0.8.14}"
 SPARKLE_FEED_URL="${SPARKLE_FEED_URL:-https://github.com/dinhkhanh/suzu-media-utils/releases/latest/download/appcast.xml}"
 SPARKLE_PUBLIC_KEY="${SPARKLE_PUBLIC_KEY:-SRLHhBqtlIsBvuqpk/ONBFaAS629idQVYwoebgfGd/E=}"
 swift build -c release --product SuZuMediaUtils
@@ -15,6 +15,8 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp .build/release/SuZuMediaUtils "$APP/Contents/MacOS/$NAME"
 cp -R models/compiled/ArcFaceR50.mlmodelc "$APP/Contents/Resources/"
+# Edit & Export's body-parts model is not in the app (600 MB in every update): the app downloads it once into
+# Application Support (scripts/publish-model.sh puts it on GitHub).
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 # Sparkle ships as a framework next to the binary; the binary looks for it in ../Frameworks.
 SPARKLE=".build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
