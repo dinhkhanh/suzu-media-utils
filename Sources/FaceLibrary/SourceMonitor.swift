@@ -174,27 +174,30 @@ public final class SourceMonitor: @unchecked Sendable {
             && (ImageLoader.extensions.contains(ext) || VideoSampler.extensions.contains(ext))
     }
 
-    /// All media files under root. Folders whose mtime is unchanged reuse their cached listing.
-    func list() -> [String: FileInfo] {
+    /// All media files under root. Folders whose mtime is unchanged reuse their cached listing. `complete` is false
+    /// when a folder or an entry in it could not be read (a share dropping half-way through the listing): such a
+    /// folder keeps its last listing, and what is missing from this one is not taken for deleted.
+    func list() -> (files: [String: FileInfo], complete: Bool) {
         var out: [String: FileInfo] = [:]
+        var complete = true
         var seenDirs: Set<String> = []
         var stack = [root.path]
         let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
         while let dir = stack.popLast() {
-            if cancelled { return [:] }
+            if cancelled { return ([:], false) }
             seenDirs.insert(dir)
             let dirURL = URL(fileURLWithPath: dir, isDirectory: true)
-            let mtime = (try? dirURL.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate?.timeIntervalSince1970 ?? 0
+            let mtime = (try? dirURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate?.timeIntervalSince1970
             var entry: DirEntry
-            if let cached = dirCache[dir], cached.mtime == mtime {
+            if let mtime, let cached = dirCache[dir], cached.mtime == mtime {
                 entry = cached
-            } else {
+            } else if let mtime, let items = try? FileManager.default.contentsOfDirectory(
+                at: dirURL, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants]) {
                 entry = DirEntry(mtime: mtime, files: [:], subdirs: [])
-                let items = (try? FileManager.default.contentsOfDirectory(
-                    at: dirURL, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants])) ?? []
+                var whole = true
                 for u in items {
-                    guard let v = try? u.resourceValues(forKeys: Set(keys)) else { continue }
+                    // Not known whether it is a file or a folder: this listing of the folder can't be trusted.
+                    guard let v = try? u.resourceValues(forKeys: Set(keys)) else { whole = false; continue }
                     if v.isDirectory == true {
                         entry.subdirs.append(u.path)
                     } else if Self.isMedia(u.lastPathComponent) {
@@ -202,20 +205,25 @@ public final class SourceMonitor: @unchecked Sendable {
                                                        mtime: v.contentModificationDate?.timeIntervalSince1970 ?? 0)
                     }
                 }
-                dirCache[dir] = entry
+                if whole { dirCache[dir] = entry } else { complete = false }
+            } else {
+                // Unreadable (it used to count as empty, and every file in it was dropped from the library with its
+                // faces, then read again from scratch once the share was back): the last listing stands in.
+                complete = false
+                entry = dirCache[dir] ?? DirEntry(mtime: 0, files: [:], subdirs: [])
             }
             out.merge(entry.files) { a, _ in a }
             foundCount = out.count
             stack += entry.subdirs
         }
-        dirCache = dirCache.filter { seenDirs.contains($0.key) }
+        if complete { dirCache = dirCache.filter { seenDirs.contains($0.key) } }
         // A file still being written grows without touching its folder's mtime: re-stat unsettled ones.
         for path in candidates.keys where out[path] != nil {
             if let v = try? URL(fileURLWithPath: path, isDirectory: false).resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) {
                 out[path] = FileInfo(size: Int64(v.fileSize ?? 0), mtime: v.contentModificationDate?.timeIntervalSince1970 ?? 0)
             }
         }
-        return out
+        return (out, complete)
     }
 
     // MARK: - Scan
@@ -238,7 +246,7 @@ public final class SourceMonitor: @unchecked Sendable {
         configureWatching()
         isScanning = true
         defer { isScanning = false }
-        let files = list()
+        let (files, complete) = list()
         if cancelled { return }
         guard let known = try? store.db.read({ db in
             try Row.fetchAll(db, sql: "SELECT id, path, size, mtime, contentKey, duplicateOf, status FROM media WHERE sourceId = ?",
@@ -272,7 +280,8 @@ public final class SourceMonitor: @unchecked Sendable {
             }
         }
         candidates = candidates.filter { files[$0.key] != nil }
-        var missing = known.filter { files[$0.key] == nil && !FileManager.default.fileExists(atPath: $0.key) }
+        // Only a whole listing says what is gone (the next look, once the share answers again, will).
+        var missing = complete ? known.filter { files[$0.key] == nil && !FileManager.default.fileExists(atPath: $0.key) } : [:]
         settledNew.sort { $0.0 < $1.0 }
         pace(busy: !settledNew.isEmpty || !settledChanged.isEmpty || !missing.isEmpty || needFollowUp)
 

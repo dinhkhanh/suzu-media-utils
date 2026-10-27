@@ -248,6 +248,38 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(try media().map(\.status), [.pending], "a file that is gone is not retried (the scan drops it)")
     }
 
+    /// A folder that can't be read for a moment (the share dropping half-way through a look) is not an empty one:
+    /// its files used to be dropped from the library with their faces, and read again from scratch once it was back.
+    func testAFolderThatCantBeReadKeepsItsFilesAndFaces() throws {
+        try makeFile("a.jpg", seed: 1)
+        try makeFile("sub/b.jpg", seed: 2)
+        try makeFile("sub/deeper/c.jpg", seed: 3)
+        let m = monitor()
+        m.scan()
+        let pid = try newPerson("An")
+        for r in try media() { _ = try addFace(mediaId: r.id!, personId: pid) }
+        let before = try media()
+
+        let sub = root.appendingPathComponent("sub")
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: sub.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: sub.path) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sub.appendingPathComponent("b.jpg").path), "looks gone, as on a dropped share")
+        m.dirCache = [:]  // not even a listing to fall back on, as after Rescan
+        m.scan()
+        XCTAssertEqual(try media().map(\.id), before.map(\.id), "nothing dropped")
+        XCTAssertEqual(try store.db.read { db in try FaceRecord.fetchCount(db) }, 3)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: sub.path)
+        m.scan()
+        XCTAssertEqual(try media().map(\.id), before.map(\.id), "back: the same records, nothing to read again")
+        XCTAssertTrue(try media().allSatisfy { $0.status == .done })
+
+        // A whole listing still notices a file deleted for real.
+        try FileManager.default.removeItem(at: sub.appendingPathComponent("b.jpg"))
+        m.scan()
+        XCTAssertEqual(try media().map(\.url.lastPathComponent), ["a.jpg", "c.jpg"])
+    }
+
     func testRemoveSourceDeletesEverythingInBatches() throws {
         for i in 0..<1200 { try makeFile("r/\(i).jpg", bytes: 64 + i) }
         let service = LibraryServiceStub(store: store)
