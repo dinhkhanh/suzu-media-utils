@@ -453,6 +453,8 @@ public final class TeamSync: @unchecked Sendable {
         var folder: FolderPayload?
         /// watermark: the saved watermark and its files in the team folder.
         var watermark: WatermarkPayload?
+        /// look: the saved look's sliders.
+        var look: LookPayload?
     }
 
     struct FolderPayload: Codable {
@@ -672,6 +674,10 @@ public final class TeamSync: @unchecked Sendable {
         let (wmOps, wmUpdates) = try watermarkOps(team, state: state)
         ops += wmOps
         updates.merge(wmUpdates) { _, b in b }
+        // Saved looks.
+        let (lookOps, lookUpdates) = try lookOps(state: state)
+        ops += lookOps
+        updates.merge(lookUpdates) { _, b in b }
         // Lists of people and who is on them.
         let (listOps, listUpdates) = try listOps(state: state)
         ops += listOps
@@ -797,7 +803,7 @@ public final class TeamSync: @unchecked Sendable {
     /// Mac for good (0.8.3 did this to the first team and edited folders). When a newer version first reads a
     /// team, it goes over what it had already read once more, for just the kinds it learnt since. A new kind of
     /// entry is added here with the next version number.
-    static let lateKinds: [(version: Int, kinds: Set<String>)] = [(2, ["folder"]), (3, ["pin"]), (4, ["watermark", "list", "listMember"])]
+    static let lateKinds: [(version: Int, kinds: Set<String>)] = [(2, ["folder"]), (3, ["pin"]), (4, ["watermark", "list", "listMember"]), (5, ["look"])]
     static var readerVersion: Int { lateKinds.map(\.version).max() ?? 1 }
 
     /// Reads what this Mac already read of each teammate's log again, applying only the kinds learnt since
@@ -1288,6 +1294,9 @@ public final class TeamSync: @unchecked Sendable {
 
         case "watermark":
             return try applyWatermarkOp(op, team: team, db: db)
+
+        case "look":
+            return try applyLookOp(op, team: team, db: db)
 
         case "list":
             return try applyListOp(op, team: team, db: db)

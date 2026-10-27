@@ -231,6 +231,7 @@ final class FaceGroupingModel: ObservableObject {
         self.service = service
         Thumbnails.shared.store = service.store
         WatermarkPresets.shared.attach(service.store) { [teamSync = service.teamSync] in teamSync.pushSoon() }
+        UserLooks.shared.attach(service.store) { [teamSync = service.teamSync] in teamSync.pushSoon() }
         service.onDelivered = { [weak self] report in
             Notifier.post(report)
             Task { @MainActor in self?.logDelivery(report) }

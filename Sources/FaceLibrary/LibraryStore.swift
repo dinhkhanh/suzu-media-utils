@@ -515,6 +515,19 @@ public final class LibraryStore: @unchecked Sendable {
                 t.column("boxes", .text).notNull()
             }
         }
+        m.registerMigration("v24-saved-looks") { db in
+            /// Saved looks (see SavedLooks), in the library so they travel to teammates; until now they were the
+            /// app's own settings. A deleted one stays as a tombstone.
+            try db.create(table: "lookPreset") { t in
+                t.column("id", .text).primaryKey()
+                t.column("name", .text).notNull()
+                t.column("autoTone", .boolean).notNull().defaults(to: false)
+                t.column("adjustments", .text).notNull()
+                t.column("updatedAt", .double).notNull()
+                t.column("createdAt", .double).notNull()
+                t.column("deleted", .boolean).notNull().defaults(to: false)
+            }
+        }
         return m
     }
 }

@@ -178,7 +178,7 @@ public struct Adjustments: Codable, Sendable, Equatable, Hashable {
     public var vibrance = 0.0
     public var saturation = 0.0
     public var monochrome = false
-    // Detail (0…1)
+    // Detail: sharpness and clarity -1…1 (below 0 softens), vignette 0…1
     public var sharpness = 0.0
     public var clarity = 0.0
     public var vignette = 0.0

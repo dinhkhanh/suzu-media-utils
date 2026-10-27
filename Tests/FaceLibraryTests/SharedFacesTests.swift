@@ -423,6 +423,33 @@ final class SharedFacesTests: XCTestCase {
         XCTAssertTrue(onB.isEmpty)
     }
 
+    func testSavedLooksTravel() throws {
+        var a1 = Adjustments(); a1.exposure = 0.4; a1.sharpness = -0.3; a1.clarity = -0.5; a1.tone = [0, 0.3, 0.55, 0.8, 1]
+        let l = SavedLook(name: "Gala warm", autoTone: true, adjustments: a1)
+        try a.store.db.write { db in try SavedLooks.save(l, db: db) }
+        exchange()
+        var onB = try b.store.db.read { db in try SavedLooks.all(db) }
+        XCTAssertEqual(onB, [l])
+
+        // Retuned on B: A follows.
+        Thread.sleep(forTimeInterval: 0.01)
+        var a2 = a1; a2.temperature = 0.3
+        try b.store.db.write { db in try SavedLooks.save(SavedLook(id: l.id, name: "Gala warmer", autoTone: false, adjustments: a2), db: db) }
+        exchange()
+        let onA = try a.store.db.read { db in try SavedLooks.all(db) }
+        XCTAssertEqual(onA, [SavedLook(id: l.id, name: "Gala warmer", autoTone: false, adjustments: a2)])
+
+        // Deleted on A: gone on B, and an old copy doesn't bring it back.
+        Thread.sleep(forTimeInterval: 0.01)
+        try a.store.db.write { db in try SavedLooks.delete(l.id, db: db) }
+        exchange()
+        onB = try b.store.db.read { db in try SavedLooks.all(db) }
+        XCTAssertTrue(onB.isEmpty)
+        try b.store.db.write { db in try SavedLooks.save(SavedLook(id: l.id, name: "Gala warm", adjustments: a1), db: db, at: 1) }
+        exchange()
+        XCTAssertTrue(try a.store.db.read { db in try SavedLooks.all(db) }.isEmpty)
+    }
+
     func testListsTravelWithWhoIsOnThem() throws {
         let an = try a.person("An"), bo = try a.person("Bo")
         exchange()

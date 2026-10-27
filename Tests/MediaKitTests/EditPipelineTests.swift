@@ -597,6 +597,37 @@ final class StraightenTests: XCTestCase {
 }
 
 final class WhitesBlacksTests: XCTestCase {
+    func testSharpenAndClarityBelowZeroSoften() throws {
+        // A hard edge down the middle of a 1500-pixel-wide picture: black left, white right.
+        let side = 1500
+        let black = CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: side / 2, height: 64))
+        let edge = black.composited(over: CIImage(color: .white).cropped(to: CGRect(x: 0, y: 0, width: side, height: 64)))
+        /// The red level (0–1) of each pixel across row 32.
+        func row(_ img: CIImage) -> [Double] {
+            var px = [UInt8](repeating: 0, count: side * 4)
+            CIContext(options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!])
+                .render(img, toBitmap: &px, rowBytes: side * 4, bounds: CGRect(x: 0, y: 32, width: side, height: 1), format: .RGBA8,
+                        colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+            return stride(from: 0, to: px.count, by: 4).map { Double(px[$0]) / 255 }
+        }
+        let mid = side / 2
+        let plain = row(edge)
+        XCTAssertEqual(plain[mid - 1], 0, accuracy: 0.01); XCTAssertEqual(plain[mid], 1, accuracy: 0.01)
+        for (name, set) in [("sharpen", { (a: inout Adjustments) in a.sharpness = -1 }), ("clarity", { (a: inout Adjustments) in a.clarity = -1 })] {
+            var a = Adjustments(); set(&a)
+            XCTAssertTrue(a.changesPixels, name)
+            let soft = row(EditPipeline.adjust(edge, a))
+            XCTAssertGreaterThan(soft[mid - 1], 0.05, "\(name): the black side of the edge lightens")
+            XCTAssertLessThan(soft[mid], 0.95, "\(name): the white side darkens")
+            XCTAssertEqual(soft[0], 0, accuracy: 0.02, "\(name): far from the edge, and at the picture's border, nothing changes")
+            XCTAssertEqual(soft[side - 1], 1, accuracy: 0.02, name)
+        }
+        // A little softening is gentler than a lot.
+        var little = Adjustments(); little.sharpness = -0.3
+        var lot = Adjustments(); lot.sharpness = -1
+        XCTAssertLessThan(row(EditPipeline.adjust(edge, little))[mid - 1], row(EditPipeline.adjust(edge, lot))[mid - 1])
+    }
+
     func testWhitesAndBlacksMoveTheEndsAndSpareTheMiddle() throws {
         func v(_ x: Double, _ w: Double, _ b: Double) -> Double { EditPipeline.endsValue(x, whites: w, blacks: b) }
         XCTAssertEqual(v(1, 1, 0), 1)                           // whites up: the top clips to white

@@ -344,18 +344,30 @@ public enum EditPipeline {
         }
         if a.vibrance != 0 { out = out.applyingFilter("CIVibrance", parameters: [kCIInputAmountKey: a.vibrance]) }
         if a.monochrome { out = out.applyingFilter("CIPhotoEffectMono") }
+        let side = max(ext.width, ext.height)
         if a.clarity > 0 {
             // Local contrast: a wide, gentle unsharp mask.
-            let r = max(ext.width, ext.height) / 100
-            out = out.applyingFilter("CIUnsharpMask", parameters: [kCIInputRadiusKey: r, kCIInputIntensityKey: a.clarity * 0.8])
+            out = out.applyingFilter("CIUnsharpMask", parameters: [kCIInputRadiusKey: side / 100, kCIInputIntensityKey: a.clarity * 0.8])
+        } else if a.clarity < 0 {
+            // Less local contrast: part of the way to the same wide blur, a softer, hazier look.
+            out = soften(out, radius: side / 100, amount: -a.clarity * 0.6, extent: ext)
         }
         if a.sharpness > 0 {
             out = out.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: a.sharpness * 1.2, kCIInputRadiusKey: 1.5])
+        } else if a.sharpness < 0 {
+            // Softer: towards a fine blur, sized to the picture so the preview looks like the export.
+            out = soften(out, radius: side / 1500, amount: -a.sharpness, extent: ext)
         }
         if a.vignette > 0 {
             out = out.applyingFilter("CIVignette", parameters: [kCIInputIntensityKey: a.vignette * 1.6, kCIInputRadiusKey: 1.6])
         }
         return out.cropped(to: ext)
+    }
+
+    /// The image `amount` (0…1) of the way to a Gaussian blur of `radius` pixels; edges clamped so they don't darken.
+    static func soften(_ image: CIImage, radius: CGFloat, amount: Double, extent: CGRect) -> CIImage {
+        let blurred = image.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius]).cropped(to: extent)
+        return image.applyingFilter("CIDissolveTransition", parameters: [kCIInputTargetImageKey: blurred, kCIInputTimeKey: min(1, amount)])
     }
 
     // MARK: Tone curve

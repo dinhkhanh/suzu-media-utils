@@ -1,4 +1,5 @@
 import FaceLibrary
+import GRDB
 import MediaKit
 import SwiftUI
 
@@ -121,8 +122,8 @@ struct EditControls: View {
                     .onTapGesture { hslOpen.toggle() }
                 }
                 InspectorSection(title: "Detail") {
-                    AdjustSlider("Sharpen", value: look.sharpness, range: 0...1)
-                    AdjustSlider("Clarity", value: look.clarity, range: 0...1, help: "Local contrast: more bite in the midtones")
+                    AdjustSlider("Sharpen", value: look.sharpness, help: "Right: crisper fine detail. Left: softer")
+                    AdjustSlider("Clarity", value: look.clarity, help: "Local contrast. Right: more bite in the midtones. Left: softer, hazier")
                     AdjustSlider("Vignette", value: look.vignette, range: 0...1, help: "Darkens the corners")
                 }
                 InspectorSection(title: "Orientation") {
@@ -275,7 +276,7 @@ struct EditControls: View {
             Button("Save") { userLooks.save(Look(name: lookName.isEmpty ? "Look \(userLooks.looks.count + 1)" : lookName, autoTone: recipe.autoTone, adjustments: look.wrappedValue)) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("The light, colour, detail, tone curve and HSL sliders as they are now, to pick from Looks in every editing screen.")
+            Text("The light, colour, detail, tone curve and HSL sliders as they are now, to pick from Looks in every editing screen, on this Mac and your teammates'. A look with the same name is replaced.")
         }
     }
 
@@ -285,7 +286,8 @@ struct EditControls: View {
     }
 }
 
-/// Looks saved by the user, kept in UserDefaults like watermark presets.
+/// Looks saved by the user. Like watermark presets, they live in the library (SavedLooks) once it is open, so
+/// they reach every Mac of the user's teams; the settings keep a copy for the moment before the library opens.
 @MainActor
 final class UserLooks: ObservableObject {
     static let shared = UserLooks()
@@ -300,19 +302,58 @@ final class UserLooks: ObservableObject {
     /// The look copied with "Copy Look", for "Paste Look" on another photo.
     static var clipboard: Adjustments?
 
+    private var store: LibraryStore?
+    private var push: (@Sendable () -> Void)?
+    private var observer: AnyDatabaseCancellable?
+
     init() {
         looks = UserDefaults.standard.data(forKey: "looks").flatMap { try? JSONDecoder().decode([Saved].self, from: $0) } ?? []
     }
 
-    func save(_ l: Look) {
-        if let i = looks.firstIndex(where: { $0.name == l.name }) { looks[i].adjustments = l.adjustments; looks[i].autoTone = l.autoTone }
-        else { looks.append(Saved(name: l.name, autoTone: l.autoTone, adjustments: l.adjustments)) }
+    /// From now on the looks are the library's: this Mac's earlier ones go into it (as old, so a teammate's change
+    /// to the same look wins), and the list follows the library, teammates' changes included.
+    func attach(_ store: LibraryStore, push: @escaping @Sendable () -> Void) {
+        self.store = store
+        self.push = push
+        let mine = looks
+        try? store.db.write { db in
+            for l in mine where try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM lookPreset WHERE id = ?", arguments: [l.id]) == 0 {
+                try SavedLooks.save(SavedLook(id: l.id, name: l.name, autoTone: l.autoTone, adjustments: l.adjustments), db: db, at: 1)
+            }
+        }
+        if !mine.isEmpty { push() }
+        observer = ValueObservation.tracking { db in try SavedLooks.all(db) }
+            .start(in: store.db, scheduling: .async(onQueue: .main), onError: { _ in }) { [weak self] saved in
+                MainActor.assumeIsolated { self?.show(saved.map { Saved(id: $0.id, name: $0.name, autoTone: $0.autoTone, adjustments: $0.adjustments) }) }
+            }
+    }
+
+    private func show(_ list: [Saved]) {
+        guard list != looks else { return }
+        looks = list
         persist()
+    }
+
+    /// Saves the look, replacing the one with the same name (which keeps its id, so teammates get the change).
+    func save(_ l: Look) {
+        // Orientation belongs to the photo, not the look.
+        let adjustments = Adjustments().withLook(of: l.adjustments)
+        var s = Saved(name: l.name, autoTone: l.autoTone, adjustments: adjustments)
+        if let i = looks.firstIndex(where: { $0.name == l.name }) { s.id = looks[i].id; looks[i] = s } else { looks.append(s) }
+        persist()
+        if let store {
+            try? store.db.write { db in try SavedLooks.save(SavedLook(id: s.id, name: s.name, autoTone: s.autoTone, adjustments: s.adjustments), db: db) }
+            push?()
+        }
     }
 
     func delete(_ id: String) {
         looks.removeAll { $0.id == id }
         persist()
+        if let store {
+            try? store.db.write { db in try SavedLooks.delete(id, db: db) }
+            push?()
+        }
     }
 
     private func persist() { UserDefaults.standard.set(try? JSONEncoder().encode(looks), forKey: "looks") }
