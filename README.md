@@ -279,9 +279,17 @@ day (Settings → Updates, or SuZu Media Utils → Check for Updates…) and ins
 ### Releasing
 
 ```sh
-VERSION=0.7.0 scripts/release.sh                 # signed, notarized zip + dmg + appcast.xml in dist/
-VERSION=0.7.0 NOTES=notes.md scripts/publish.sh  # tag, push, GitHub release with the three files
+VERSION=0.7.0 NOTES=dist/notes-0.7.0.md scripts/release.sh  # signed, notarized zip + dmg + appcast.xml in dist/
+VERSION=0.7.0 NOTES=dist/notes-0.7.0.md scripts/publish.sh  # tag, push, GitHub release with the three files
+VERSION=0.7.0 NOTES=dist/notes-0.7.0.md scripts/appcast.sh  # only to redo the feed (new notes), no notarizing
 ```
+
+**Every release carries its changelog, in both places, from one file.** Write `dist/notes-<version>.md` before
+`release.sh` and pass the same file to both scripts: `release.sh` puts it in `appcast.xml`, which is what installed
+apps show in their update window, and `publish.sh` makes it the GitHub release's description. Neither runs without
+it, and `publish.sh` refuses a feed whose entry for this version has no notes. The notes are for the people using
+the app: a bold one-line summary per change, then what was wrong and what happens now, ending with the
+"Install on every Mac of the team…" line (see an earlier `dist/notes-*.md`). Paragraphs and `**bold**` only.
 
 Installed apps read `releases/latest/download/appcast.xml`, so publishing the release is the update. Updates are
 signed with the Sparkle key in the login keychain (`generate_keys`; back it up with `generate_keys -x`); its public
