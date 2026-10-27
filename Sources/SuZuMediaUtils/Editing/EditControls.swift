@@ -880,31 +880,46 @@ struct RetouchControls: View {
         let earlier = part == .skin ? photo.map { CropPlacements.shared.strokes(.skin, for: $0).count } ?? 0 : 0
         let strokes = own + earlier
         let painting = overlay.brushing && overlay.part == part
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                Toggle("Show mask", isOn: Binding(get: { overlay.part == part }, set: { overlay.part = $0 ? part : nil }))
-                    .toggleStyle(.checkbox)
-                    .help("Tint the \(name) mask red on the preview, to see where \(part == .skin ? "the skin retouch goes (the face skin mask, and body skin's with Body skin too)" : part == .faceSkin || part == .bodySkin ? "the dials and the skin retouch change the photo" : "the dials change the photo")")
-                if photo != nil {
-                    Toggle("Paint", isOn: Binding(get: { painting }, set: { on in
-                        if on { overlay.part = part }
-                        overlay.brushing = on
-                    }))
-                    .toggleStyle(.checkbox)
-                    .help("Drag on the preview to paint the \(name) mask of this photo; ⌥-drag does the opposite, [ and ] change the size, Z-click zooms in, ⌥Z-click out")
-                }
-                Spacer()
-                if let photo, strokes > 0 {
-                    Text("\(strokes) stroke\(strokes == 1 ? "" : "s")\(part == .skin ? " on \(target.label.lowercased())" : "")").font(.caption).foregroundStyle(.secondary)
-                    Button { CropPlacements.shared.removeLastStroke(own > 0 ? target : .skin, for: photo) } label: { Image(systemName: "arrow.uturn.backward") }
-                        .controlSize(.small)
-                        .help("Take away the last stroke painted on the \(target.label.lowercased()) mask of this photo (⌘Z too)")
-                    Button("Clear") {
-                        CropPlacements.shared.clearStrokes(target, for: photo)
-                        if part == .skin { CropPlacements.shared.clearStrokes(.skin, for: photo) }
-                    }
+        @ViewBuilder var toggles: some View {
+            Toggle("Show mask", isOn: Binding(get: { overlay.part == part }, set: { overlay.part = $0 ? part : nil }))
+                .toggleStyle(.checkbox)
+                .help("Tint the \(name) mask red on the preview, to see where \(part == .skin ? "the skin retouch goes (the face skin mask, and body skin's with Body skin too)" : part == .faceSkin || part == .bodySkin ? "the dials and the skin retouch change the photo" : "the dials change the photo")")
+            if photo != nil {
+                Toggle("Paint", isOn: Binding(get: { painting }, set: { on in
+                    if on { overlay.part = part }
+                    overlay.brushing = on
+                }))
+                .toggleStyle(.checkbox)
+                .help("Drag on the preview to paint the \(name) mask of this photo; ⌥-drag does the opposite, [ and ] change the size, Z-click zooms in, ⌥Z-click out")
+            }
+        }
+        @ViewBuilder func strokeTools(spread: Bool) -> some View {
+            if let photo, strokes > 0 {
+                Text("\(strokes) stroke\(strokes == 1 ? "" : "s")\(part == .skin ? " on \(target.label.lowercased())" : "")").font(.caption).foregroundStyle(.secondary)
+                if spread { Spacer() }
+                Button { CropPlacements.shared.removeLastStroke(own > 0 ? target : .skin, for: photo) } label: { Image(systemName: "arrow.uturn.backward") }
                     .controlSize(.small)
-                    .help("The \(target.label.lowercased()) mask of this photo as the app finds it, without the strokes painted on it")
+                    .help("Take away the last stroke painted on the \(target.label.lowercased()) mask of this photo (⌘Z too)")
+                Button("Clear") {
+                    CropPlacements.shared.clearStrokes(target, for: photo)
+                    if part == .skin { CropPlacements.shared.clearStrokes(.skin, for: photo) }
+                }
+                .controlSize(.small)
+                .help("The \(target.label.lowercased()) mask of this photo as the app finds it, without the strokes painted on it")
+            }
+        }
+        return VStack(alignment: .leading, spacing: 8) {
+            // One row when the panel is wide enough; else the strokes' count and buttons go on a row of their own
+            // (squeezed into one, every label wrapped onto two or three lines).
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    toggles
+                    Spacer()
+                    strokeTools(spread: false)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 12) { toggles }
+                    if strokes > 0 { HStack(spacing: 12) { strokeTools(spread: true) } }
                 }
             }
             .id(placements)

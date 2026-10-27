@@ -658,15 +658,19 @@ struct EditPreview: View {
         let delta = liveAngle.map { $0 + (r.angle ?? 0) } ?? 0
         let grow = delta == 0 ? 1 : 1 / EditPipeline.rotatedScale(out, degrees: delta)
         return ZStack {
-            Image(nsImage: r.image)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: w, height: h)
-                .rotationEffect(.degrees(delta))
-                .scaleEffect(grow)
-                .shadow(color: .black.opacity(0.5), radius: 8)
-                .overlay { if hovering && clickPlacesWatermark && !spaceDown { thirds } }
-                .offset(pan)
+            // An overlay, so a photo zoomed in past the view doesn't grow the stack: the layers over it (the brushes,
+            // the watermark's click) take their points as the view's (in a bigger stack, a stroke landed off the photo).
+            Color.clear.overlay {
+                Image(nsImage: r.image)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: w, height: h)
+                    .rotationEffect(.degrees(delta))
+                    .scaleEffect(grow)
+                    .shadow(color: .black.opacity(0.5), radius: 8)
+                    .overlay { if hovering && clickPlacesWatermark && !spaceDown { thirds } }
+                    .offset(pan)
+            }
             Color.clear.contentShape(Rectangle())
                 .gesture(panOrPlaceGesture(r, in: size).simultaneously(with: viewZoomGesture))
                 .simultaneousGesture(TapGesture(count: 2).onEnded { if !zoomToolOn() { setZoom(zoom == nil ? 1 : nil) } })
