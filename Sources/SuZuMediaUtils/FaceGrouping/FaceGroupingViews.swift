@@ -77,7 +77,7 @@ struct FaceGroupingSidebar: View {
                 .badge(model.people.filter { $0.faces > 0 }.count)
                 .tag(AppRoute.faces(.people))
             Label("To Name", systemImage: "questionmark.circle")
-                .badge(Text(unnamed.formatted()).foregroundStyle(unnamed > 0 ? Color.amber : .secondary))
+                .badge(Text(unnamed.formatted()).foregroundStyle(unnamed > 0 ? Color.notice : .secondary))
                 .tag(AppRoute.faces(.toName))
                 .help("People without a name yet")
             Label("Pinned", systemImage: "star")
@@ -166,7 +166,7 @@ struct FaceGroupingSidebar: View {
         return HStack(spacing: 6) {
             Text(title)
             if offline > 0 {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.amber)
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.notice)
                     .help("\(offline) folder\(offline == 1 ? " is" : "s are") offline — renamed or moved? Open to locate it")
             }
         }
@@ -360,7 +360,7 @@ struct FaceGroupingStatusBody: View {
             let status = model.teamStatus[team.id!]
             let ok = status?.reachable == true && status?.error == nil
             HStack(spacing: 5) {
-                Circle().fill(ok ? Color.good : Color.amber).frame(width: 7, height: 7)
+                Circle().fill(ok ? Color.good : Color.notice).frame(width: 7, height: 7)
                 Text(ok ? "Team \(TeamBar.subtitle(status))" : "Team \(team.name): \(TeamBar.subtitle(status))")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }

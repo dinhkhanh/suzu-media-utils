@@ -23,14 +23,38 @@ enum Appearance: String, CaseIterable, Identifiable {
     }
 }
 
-/// The colour of selection, toggles and primary buttons: SuZu's coral (from the app icon) or the Mac's own accent.
+/// The colour of selection, toggles and primary buttons: the Mac's own accent, SuZu's coral (from the app icon) or
+/// one of a few more. Coral also marks what needs you (`Color.notice`) whichever is picked.
 enum AccentChoice: String, CaseIterable, Identifiable {
-    case coral, system
+    case system, coral, blue, purple, pink, indigo, teal, green, graphite
     var id: Self { self }
-    var title: String { self == .coral ? "Coral" : "Mac accent colour" }
+    var title: String {
+        switch self {
+        case .system: "Mac accent colour"
+        case .coral: "Coral"
+        case .blue: "Blue"
+        case .purple: "Purple"
+        case .pink: "Pink"
+        case .indigo: "Indigo"
+        case .teal: "Teal"
+        case .green: "Green"
+        case .graphite: "Graphite"
+        }
+    }
     /// nil = the system accent.
-    var color: Color? { self == .coral ? .coral : nil }
-    static var current: AccentChoice { AccentChoice(rawValue: UserDefaults.standard.string(forKey: "accent") ?? "") ?? .coral }
+    var color: Color? { Self.colors[self] }
+    /// Darker in light mode so white text on them stays readable (≥ 4.5:1).
+    private static let colors: [AccentChoice: Color] = [
+        .coral: .coral,
+        .blue: .shade("accent.blue", light: 0x0068D6, dark: 0x0A84FF),
+        .purple: .shade("accent.purple", light: 0x8944AB, dark: 0xBF5AF2),
+        .pink: .shade("accent.pink", light: 0xC2185B, dark: 0xF2609A),
+        .indigo: .shade("accent.indigo", light: 0x5856D6, dark: 0x7D7AFF),
+        .teal: .shade("accent.teal", light: 0x00797A, dark: 0x40C8E0),
+        .green: .shade("accent.green", light: 0x1F7A36, dark: 0x30D158),
+        .graphite: .shade("accent.graphite", light: 0x6E6E73, dark: 0x98989D),
+    ]
+    static var current: AccentChoice { AccentChoice(rawValue: UserDefaults.standard.string(forKey: "accent") ?? "") ?? .system }
 }
 
 /// The screen the app opens on.
@@ -54,18 +78,21 @@ extension Color {
             ? NSColor(srgbRed: 0.949, green: 0.361, blue: 0.310, alpha: 1)
             : NSColor(srgbRed: 0.851, green: 0.271, blue: 0.184, alpha: 1)
     })
+    /// A colour with its own light- and dark-mode sRGB values (0xRRGGBB).
+    static func shade(_ name: String, light: UInt32, dark: UInt32) -> Color {
+        func rgb(_ v: UInt32) -> NSColor {
+            NSColor(srgbRed: CGFloat(v >> 16 & 0xFF) / 255, green: CGFloat(v >> 8 & 0xFF) / 255, blue: CGFloat(v & 0xFF) / 255, alpha: 1)
+        }
+        return Color(nsColor: NSColor(name: name) { a in a.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? rgb(dark) : rgb(light) })
+    }
     /// The app's accent as the user set it (Settings › General); `.accentColor` stays the system's.
     static var accent: Color { AccentChoice.current.color ?? .accentColor }
     /// Cards and panels on the window background.
     static let panel = Color(nsColor: NSColor(name: "panel") { a in
         a.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? NSColor(srgbRed: 0.106, green: 0.106, blue: 0.125, alpha: 1) : .white
     })
-    /// "Needs you": amber, darker in light mode for contrast.
-    static let amber = Color(nsColor: NSColor(name: "amber") { a in
-        a.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            ? NSColor(srgbRed: 0.969, green: 0.631, blue: 0.325, alpha: 1)
-            : NSColor(srgbRed: 0.706, green: 0.325, blue: 0.035, alpha: 1)
-    })
+    /// "Needs you": unnamed people, a card not copied yet, an offline folder. Coral whatever the accent.
+    static let notice = coral
     /// Done, synced, delivered.
     static let good = Color(nsColor: NSColor(name: "good") { a in
         a.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
@@ -77,7 +104,7 @@ extension Color {
 /// Settings › General: appearance, accent and the start screen.
 struct GeneralSettings: View {
     @AppStorage("appearance") private var appearance = Appearance.system
-    @AppStorage("accent") private var accent = AccentChoice.coral
+    @AppStorage("accent") private var accent = AccentChoice.system
     @AppStorage("startScreen") private var start = StartScreen.overview
     @EnvironmentObject private var faces: FaceGroupingModel
 
@@ -96,15 +123,18 @@ struct GeneralSettings: View {
                 Text("Appearance")
             }
             Section {
-                Picker("Accent colour", selection: $accent) {
-                    ForEach(AccentChoice.allCases) { c in
+                LabeledContent("Accent colour") {
+                    VStack(alignment: .trailing, spacing: 4) {
                         HStack(spacing: 8) {
-                            Circle().fill(c.color ?? Color(nsColor: .controlAccentColor)).frame(width: 12, height: 12)
-                            Text(c.title)
+                            ForEach(AccentChoice.allCases) { c in
+                                AccentSwatch(choice: c, selected: accent == c) { accent = c }
+                            }
                         }
-                        .tag(c)
+                        Text(accent.title).font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                Text("Coral always marks what needs you: people without a name, a card not copied yet, a folder gone offline.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Picker("Open the app on", selection: $start) {
                     ForEach(StartScreen.allCases) { Text($0.title).tag($0) }
                 }
@@ -120,7 +150,37 @@ struct GeneralSettings: View {
     }
 }
 
-/// One of the three appearance choices, as a little window: sidebar, a card, a coral line.
+/// One accent colour as a dot, as in System Settings › Appearance. The Mac's own is a colour wheel, as it can change.
+struct AccentSwatch: View {
+    let choice: AccentChoice
+    let selected: Bool
+    let pick: () -> Void
+
+    var body: some View {
+        Button(action: pick) {
+            Group {
+                if let color = choice.color {
+                    Circle().fill(color)
+                } else {
+                    Circle().fill(AngularGradient(colors: [.red, .orange, .yellow, .green, .blue, .purple, .pink, .red], center: .center))
+                }
+            }
+            .frame(width: 18, height: 18)
+            .overlay(Circle().stroke(.black.opacity(0.12), lineWidth: 1))
+            .overlay { if selected { Circle().fill(.white).frame(width: 6, height: 6) } }
+            .padding(3)
+            .overlay(Circle().stroke(selected ? Color.secondary : .clear, lineWidth: 1.5))
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+        .help(choice.title)
+        .accessibilityLabel(choice.title)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// One of the three appearance choices, as a little window: sidebar, a card, a line in the accent colour.
 struct AppearanceOption: View {
     let appearance: Appearance
     let selected: Bool
@@ -167,7 +227,7 @@ struct AppearanceOption: View {
                 RoundedRectangle(cornerRadius: 3).fill(dark ? Color(white: 0.13) : .white).frame(height: 24)
                     .overlay(RoundedRectangle(cornerRadius: 3).stroke(dark ? Color.white.opacity(0.1) : Color.black.opacity(0.08)))
                 Capsule().fill(dark ? Color(white: 0.2) : Color(white: 0.85)).frame(width: 80, height: 5)
-                Capsule().fill(Color.coral).frame(width: 40, height: 5)
+                Capsule().fill(Color.accent).frame(width: 40, height: 5)
             }
             .padding(8)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

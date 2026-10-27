@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Small pieces every screen shares: filter chips, the floating bar over a selection, section labels.
 
-/// A capsule toggle: a session, a person, a filter. Coral when on.
+/// A capsule toggle: a session, a person, a filter. The accent colour when on.
 struct Chip<Leading: View>: View {
     let title: String
     var count: String? = nil

@@ -197,7 +197,7 @@ struct PeopleGrid: View {
     /// "24 people still need a name" with the keys, and a button that starts the run.
     var namingBanner: some View {
         HStack(spacing: 12) {
-            Image(systemName: "pencil").foregroundStyle(Color.amber)
+            Image(systemName: "pencil").foregroundStyle(Color.notice)
             VStack(alignment: .leading, spacing: 1) {
                 Text("\(unnamed) \(unnamed == 1 ? "person still needs" : "people still need") a name").fontWeight(.semibold)
                 Text("Click a tile's name, type, press ⏎ — the cursor moves to the next unnamed person. ⇥ skips one; names from every project are suggested as you type.")
@@ -207,8 +207,8 @@ struct PeopleGrid: View {
             Button("Start Naming") { startNaming() }.controlSize(.small)
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color.amber.opacity(0.1)))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.amber.opacity(0.3), lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.notice.opacity(0.1)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.notice.opacity(0.3), lineWidth: 1))
         .padding(.horizontal, 18).padding(.top, 12)
     }
 
@@ -384,13 +384,13 @@ struct PersonCell: View {
             FaceImage(faceId: person.coverFaceId, side: 112)
                 .clipShape(Circle())
                 .overlay(Circle().stroke(.separator, lineWidth: 1))
-                .overlay(Circle().stroke(selected ? Color.accent : isEditing ? Color.amber : .clear, lineWidth: 3))
+                .overlay(Circle().stroke(selected || isEditing ? Color.accent : .clear, lineWidth: 3))
                 .shadow(color: .black.opacity(selected ? 0.25 : 0), radius: 6, y: 2)
                 .overlay(alignment: .topTrailing) {
                     if person.pinned {
                         Image(systemName: "star.fill")
                             .font(.caption2.weight(.bold)).foregroundStyle(.white)
-                            .padding(5).background(Circle().fill(Color.amber))
+                            .padding(5).background(Circle().fill(Color.accent))
                             .overlay(Circle().stroke(Color.panel, lineWidth: 2))
                             .offset(x: 2, y: -2)
                             .help("Pinned: comes first in every grid")
@@ -403,12 +403,12 @@ struct PersonCell: View {
                     .textFieldStyle(.plain)
                     .multilineTextAlignment(.center)
                     .font(person.name == nil && !isEditing ? .callout.weight(.medium) : .headline)
-                    .foregroundStyle(person.name == nil && !isEditing ? Color.amber : marquee ? .clear : .primary)
+                    .foregroundStyle(person.name == nil && !isEditing ? Color.accent : marquee ? .clear : .primary)
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(RoundedRectangle(cornerRadius: 6).fill(isEditing ? Color.primary.opacity(0.06) : .clear))
                     .overlay {
                         if person.name == nil && !isEditing {
-                            RoundedRectangle(cornerRadius: 6).strokeBorder(Color.amber.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+                            RoundedRectangle(cornerRadius: 6).strokeBorder(Color.accent.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
                         } else if marquee {
                             // The name in full on hover (a click still lands on the field and starts editing).
                             MarqueeText(text: person.displayName, scrolling: hovering)
@@ -432,9 +432,9 @@ struct PersonCell: View {
             } else if editing != nil, person.name == nil {
                 // The field's look while unnamed: a dashed "Add name".
                 Text("Add name")
-                    .font(.callout.weight(.medium)).foregroundStyle(Color.amber)
+                    .font(.callout.weight(.medium)).foregroundStyle(Color.accent)
                     .padding(.horizontal, 8).padding(.vertical, 3)
-                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.amber.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [3, 2])))
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.accent.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [3, 2])))
                     .fixedSize()
             } else if editing != nil {
                 MarqueeText(text: person.displayName, scrolling: hovering)
@@ -586,7 +586,7 @@ struct PersonDetail: View {
                         .help("Click to rename; the name applies in every project")
                     Button { model.pin([personId], !(person?.pinned ?? false)) } label: {
                         Image(systemName: person?.pinned == true ? "star.fill" : "star")
-                            .font(.title3).foregroundStyle(person?.pinned == true ? Color.amber : .secondary)
+                            .font(.title3).foregroundStyle(person?.pinned == true ? Color.accent : .secondary)
                     }
                     .buttonStyle(.plain)
                     .help(person?.pinned == true ? "Pinned: comes first in every grid. Click to unpin" : "Pin: comes first in every grid")

@@ -7,7 +7,7 @@ struct SuZuMediaUtilsApp: App {
     @StateObject private var updater = Updater()
     // Settings › General. Applied at the root of every scene so windows, sheets and popovers agree.
     @AppStorage("appearance") private var appearance = Appearance.system
-    @AppStorage("accent") private var accent = AccentChoice.coral
+    @AppStorage("accent") private var accent = AccentChoice.system
 
     var body: some Scene {
         WindowGroup("SuZu Media Utils") {

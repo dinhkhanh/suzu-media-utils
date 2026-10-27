@@ -198,7 +198,7 @@ struct DestinationBox: View {
             Image(systemName: url == nil ? "folder.badge.questionmark" : "externaldrive").foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text(url?.lastPathComponent ?? "Choose a folder").fontWeight(.semibold).lineLimit(1).truncationMode(.middle)
-                    .foregroundStyle(url == nil ? Color.amber : .primary)
+                    .foregroundStyle(url == nil ? Color.notice : .primary)
                 Text(url.map { u in "\(title) · \(u.deletingLastPathComponent().path)" + (CardCopier.freeSpace(at: u).map { " · \($0.formatted(.byteCount(style: .file))) free" } ?? "") } ?? "\(title) · nothing chosen yet")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
@@ -306,7 +306,7 @@ struct CardRow: View {
         }
         .padding(16)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.panel))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(hasNew && !card.copying && !card.gone ? Color.amber.opacity(0.5) : Color(nsColor: .separatorColor), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(hasNew && !card.copying && !card.gone ? Color.notice.opacity(0.5) : Color(nsColor: .separatorColor), lineWidth: 1))
         .onChange(of: card.plan?.card.label) { label = card.plan?.card.label ?? "" }
     }
 
@@ -321,9 +321,9 @@ struct CardRow: View {
             if p.new.isEmpty {
                 pill("Up to date", color: .good, icon: "checkmark")
             } else if let at = p.card.lastCopiedAt {
-                pill("New since \(at.formatted(date: .omitted, time: .shortened))", color: .amber)
+                pill("New since \(at.formatted(date: .omitted, time: .shortened))", color: .notice)
             } else {
-                pill("Never copied", color: .amber)
+                pill("Never copied", color: .notice)
             }
         }
     }
@@ -411,7 +411,7 @@ struct CardRow: View {
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     .help(destination.appendingPathComponent(folder).path)
             } else {
-                Text("Choose a destination folder on the right").font(.caption).foregroundStyle(Color.amber)
+                Text("Choose a destination folder on the right").font(.caption).foregroundStyle(Color.notice)
             }
             destinationMenu
         }

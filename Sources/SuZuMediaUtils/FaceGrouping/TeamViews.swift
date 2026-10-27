@@ -93,7 +93,7 @@ struct TeamBar: View {
         // Newly opened windows hand keyboard focus to the first control; a focus ring on this label looks wrong.
         .focusEffectDisabled()
         .padding(.horizontal, 10).padding(.vertical, 8)
-        // A faint tint, not a ring: a coral outline here reads as keyboard focus.
+        // A faint tint, not a ring: an accent outline here reads as keyboard focus.
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.accent.opacity(team == nil ? 0.04 : 0.1)))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.accent.opacity(team == nil ? 0.12 : 0.2), lineWidth: 1))
         .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 2)
@@ -130,7 +130,7 @@ struct TeamBar: View {
 
     func label(team: TeamRecord?, status: TeamSync.TeamStatus?) -> some View {
         let offline = status?.reachable == false
-        let tint: Color = team == nil ? .secondary : offline ? .orange : .accentColor
+        let tint: Color = team == nil ? .secondary : offline ? .orange : .accent
         return HStack(spacing: 8) {
             Image(systemName: team == nil ? "person.3" : "person.3.fill").foregroundStyle(tint)
             VStack(alignment: .leading, spacing: 0) {

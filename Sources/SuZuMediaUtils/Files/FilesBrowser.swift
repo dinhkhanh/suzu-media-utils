@@ -854,7 +854,7 @@ struct FolderColumn: View {
                     ForEach(model.projectSources) { sourceRows($0) }
                 }
                 if model.projectSources.count { !$0.online } > 0 {
-                    Text("Offline: renamed or moved? Right-click → Locate Folder…").font(.caption).foregroundStyle(Color.amber)
+                    Text("Offline: renamed or moved? Right-click → Locate Folder…").font(.caption).foregroundStyle(Color.notice)
                         .padding(.horizontal, 10).padding(.top, 4).fixedSize(horizontal: false, vertical: true)
                 }
                 if model.currentTeam != nil {
@@ -905,11 +905,11 @@ struct FolderColumn: View {
         let selected = folder == path
         return Button { go(path) } label: {
             HStack(spacing: 6) {
-                Image(systemName: icon).foregroundStyle(offline ? AnyShapeStyle(Color.amber) : selected ? AnyShapeStyle(.primary) : AnyShapeStyle(.tint))
+                Image(systemName: icon).foregroundStyle(offline ? AnyShapeStyle(Color.notice) : selected ? AnyShapeStyle(.primary) : AnyShapeStyle(.tint))
                     .frame(width: 16)
                 Text(title).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 4)
-                Text(offline ? "offline" : count.formatted()).font(.caption).foregroundStyle(offline ? Color.amber : .secondary).monospacedDigit()
+                Text(offline ? "offline" : count.formatted()).font(.caption).foregroundStyle(offline ? Color.notice : .secondary).monospacedDigit()
             }
             .font(.callout)
             .padding(.vertical, 4).padding(.trailing, 8).padding(.leading, 8 + CGFloat(depth) * 14)

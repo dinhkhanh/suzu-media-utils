@@ -123,7 +123,7 @@ struct OverviewView: View {
                 BigNumber(named + unnamed)
                 HStack(spacing: 4) {
                     Text("\(named) named").foregroundStyle(.secondary)
-                    if unnamed > 0 { Text("· \(unnamed) still unnamed").foregroundStyle(Color.amber) }
+                    if unnamed > 0 { Text("· \(unnamed) still unnamed").foregroundStyle(Color.notice) }
                 }
                 .lineLimit(1)
                 FaceStack(faceIds: model.people.filter { $0.faces > 0 }.prefix(5).compactMap(\.coverFaceId))
@@ -132,7 +132,7 @@ struct OverviewView: View {
                 BigNumber(model.stats.unassignedFaces)
                 Text(model.stats.unassignedFaces == 0 ? "Everyone is assigned" : "Unassigned, in \(model.overview.unassignedPhotos.formatted()) photos")
                     .foregroundStyle(.secondary).lineLimit(1)
-                if model.stats.unassignedFaces > 0 { Text("Review →").foregroundStyle(Color.amber).fontWeight(.medium) }
+                if model.stats.unassignedFaces > 0 { Text("Review →").foregroundStyle(Color.notice).fontWeight(.medium) }
             }
             OverviewCard(title: "Delivered", action: { route = .faces(.rules) }) {
                 BigNumber(model.overview.delivered)
@@ -141,7 +141,7 @@ struct OverviewView: View {
                     .foregroundStyle(.secondary).lineLimit(1)
                 if let r = unreachableRules.first {
                     Label("\(r.displayName { id in model.knownPeople.first { $0.id == id }?.displayName }) waits for its folder", systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(Color.amber).lineLimit(1)
+                        .foregroundStyle(Color.notice).lineLimit(1)
                 } else if n > 0 {
                     Label("Running", systemImage: "checkmark.circle.fill").foregroundStyle(Color.good)
                 }
@@ -157,7 +157,7 @@ struct OverviewView: View {
             HStack(spacing: 10) {
                 WorkflowStep(number: 1, title: "Ingest", icon: "sdcard", action: { route = .tool(.cards) }) {
                     if cards > 0 {
-                        Text("\(cards) card\(cards == 1 ? "" : "s") connected").foregroundStyle(Color.amber)
+                        Text("\(cards) card\(cards == 1 ? "" : "s") connected").foregroundStyle(Color.notice)
                         Text("Copy what is new").foregroundStyle(.secondary)
                     } else {
                         Text("No card connected").foregroundStyle(.secondary)
@@ -176,7 +176,7 @@ struct OverviewView: View {
                 }
                 WorkflowStep(number: 3, title: "Name", icon: "pencil", action: { route = .faces(unnamed > 0 ? .toName : .people) }) {
                     Text("\(named) of \(named + unnamed) named").foregroundStyle(.secondary)
-                    if unnamed > 0 { Text("\(unnamed) to go").foregroundStyle(Color.amber) }
+                    if unnamed > 0 { Text("\(unnamed) to go").foregroundStyle(Color.notice) }
                     else if named > 0 { Label("Everyone named", systemImage: "checkmark").foregroundStyle(Color.good) }
                     else { Text("Groups appear as files are processed").foregroundStyle(.tertiary) }
                 }
@@ -224,7 +224,7 @@ struct OverviewView: View {
             ForEach(Array(items.enumerated()), id: \.offset) { i, item in
                 if i > 0 { Divider() }
                 HStack(spacing: 10) {
-                    Circle().fill(item.urgent ? Color.red : Color.amber).frame(width: 8, height: 8)
+                    Circle().fill(item.urgent ? Color.red : Color.notice).frame(width: 8, height: 8)
                     Text(item.text).fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 8)
                     Button(item.button, action: item.action).controlSize(.small)

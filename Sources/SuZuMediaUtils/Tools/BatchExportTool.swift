@@ -97,7 +97,7 @@ struct BatchExportTool: View {
                     (Text("\(chosenCount) of \(items.count)").fontWeight(.semibold) + Text(" ticked"))
                         .monospacedDigit()
                     Text(output.map { "→ \($0.lastPathComponent)" } ?? "Choose where to save (Output, on the right)")
-                        .foregroundStyle(output == nil ? Color.amber : .secondary).lineLimit(1)
+                        .foregroundStyle(output == nil ? Color.notice : .secondary).lineLimit(1)
                 }
                 Spacer()
                 if running { Button("Stop") { cancel = true } }
