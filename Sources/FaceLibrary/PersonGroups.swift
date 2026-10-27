@@ -53,19 +53,31 @@ public enum PersonGroups {
     public static func rename(_ id: Int64, to rawName: String, db: Database) throws {
         let name = PersonNames.clean(rawName)
         guard !name.isEmpty else { return }
-        try db.execute(sql: "UPDATE personGroup SET name = ?, updatedAt = ? WHERE id = ?", arguments: [name, Date().timeIntervalSince1970, id])
+        try db.execute(sql: "UPDATE personGroup SET name = ?, updatedAt = \(SyncIds.stampSQL("updatedAt")) WHERE id = ?",
+                       arguments: [name, Date().timeIntervalSince1970, id])
     }
 
     public static func delete(_ id: Int64, db: Database) throws {
-        try db.execute(sql: "INSERT OR REPLACE INTO personGroupGone (uuid, at) SELECT uuid, ? FROM personGroup WHERE id = ?",
-                       arguments: [Date().timeIntervalSince1970, id])
+        // Later than the list's last change (and than an earlier deletion of a list with this id), so the
+        // deletion wins on every Mac whatever its clock.
+        try db.execute(sql: """
+            INSERT OR REPLACE INTO personGroupGone (uuid, at)
+            SELECT uuid, MAX(?, updatedAt + 0.001, COALESCE((SELECT at FROM personGroupGone g WHERE g.uuid = personGroup.uuid), 0) + 0.001)
+            FROM personGroup WHERE id = ?
+            """, arguments: [Date().timeIntervalSince1970, id])
         try db.execute(sql: "DELETE FROM personGroup WHERE id = ?", arguments: [id])
     }
 
     /// Puts people on a list, or takes them off it.
     public static func set(_ group: Int64, people: [Int64], member: Bool, db: Database) throws {
-        let now = Date().timeIntervalSince1970
         for p in people {
+            // Later than the pair's last change either way (on the list, or taken off it), so this change wins
+            // on every Mac whatever its clock.
+            let now = SyncIds.stamp(after: try Double.fetchOne(db, sql: """
+                SELECT MAX(COALESCE((SELECT at FROM personGroupMember WHERE groupId = ? AND personId = ?), 0),
+                           COALESCE((SELECT at FROM personGroupMemberGone WHERE groupUuid = (SELECT uuid FROM personGroup WHERE id = ?)
+                                     AND personUuid = (SELECT uuid FROM person WHERE id = ?)), 0))
+                """, arguments: [group, p, group, p]))
             if member {
                 try db.execute(sql: "INSERT OR IGNORE INTO personGroupMember (groupId, personId, at) VALUES (?, ?, ?)", arguments: [group, p, now])
                 guard db.changesCount > 0 else { continue }
@@ -90,9 +102,9 @@ public enum PersonGroups {
         guard !list.isEmpty else { return }
         let now = Date().timeIntervalSince1970
         if on {
-            try db.execute(sql: "UPDATE person SET pinnedAt = ?, pinAt = ? WHERE id IN (\(list)) AND pinnedAt IS NULL", arguments: [now, now])
+            try db.execute(sql: "UPDATE person SET pinnedAt = ?, pinAt = \(SyncIds.stampSQL("pinAt")) WHERE id IN (\(list)) AND pinnedAt IS NULL", arguments: [now, now])
         } else {
-            try db.execute(sql: "UPDATE person SET pinnedAt = NULL, pinAt = ? WHERE id IN (\(list)) AND pinnedAt IS NOT NULL", arguments: [now])
+            try db.execute(sql: "UPDATE person SET pinnedAt = NULL, pinAt = \(SyncIds.stampSQL("pinAt")) WHERE id IN (\(list)) AND pinnedAt IS NOT NULL", arguments: [now])
         }
     }
 

@@ -504,6 +504,17 @@ public final class LibraryStore: @unchecked Sendable {
                 t.column("intoUuid", .text).notNull()
             }
         }
+        m.registerMigration("v23-crop-retry") { db in
+            /// Files taken from a teammate's face records whose crops or thumbnail couldn't all be copied yet
+            /// (see `TeamSync.fetchMissingCrops`): tried again each pass until they are.
+            try db.create(table: "cropRetry") { t in
+                t.column("mediaId", .integer).primaryKey()
+                t.column("teamId", .integer).notNull().references("team", onDelete: .cascade)
+                t.column("deviceId", .text).notNull()
+                t.column("contentKey", .text).notNull()
+                t.column("boxes", .text).notNull()
+            }
+        }
         return m
     }
 }

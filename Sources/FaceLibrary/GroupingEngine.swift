@@ -476,13 +476,20 @@ public final class GroupingEngine: @unchecked Sendable {
         let candidates = touched.filter { people[$0]?.count ?? 0 > 0 }
         touched = []
         guard !candidates.isEmpty, people.count >= 2 else { return }
-        let (names, kept) = try store.db.read { db in
+        let passive = passiveProjects.map(String.init).joined(separator: ",")
+        let (names, kept, theirs) = try store.db.read { db in
             (Dictionary(uniqueKeysWithValues: try Row.fetchAll(db, sql: "SELECT id, name FROM person").map { ($0["id"] as Int64, $0["name"] as String?) }),
              Set(try Row.fetchAll(db, sql: "SELECT DISTINCT personId, rejectedPersonId FROM face WHERE personId IS NOT NULL AND rejectedPersonId IS NOT NULL")
-                .map { Pair($0["personId"] as Int64, $0["rejectedPersonId"] as Int64) }))
+                .map { Pair($0["personId"] as Int64, $0["rejectedPersonId"] as Int64) }),
+             // Unnamed groups of a project another Mac processes: its clustering, not this Mac's to merge (this
+             // Mac has a part of the faces and would decide merges for the whole team on less; merges travel).
+             passive.isEmpty ? Set<Int64>() : Set(try Int64.fetchAll(db, sql: """
+                SELECT DISTINCT f.personId FROM face f JOIN media m ON m.id = f.mediaId JOIN source s ON s.id = m.sourceId
+                JOIN person p ON p.id = f.personId WHERE s.projectId IN (\(passive)) AND p.name IS NULL
+                """)))
         }
         func named(_ id: Int64) -> Bool { (names[id] ?? nil) != nil }
-        let ids = people.keys.filter { people[$0]!.count > 0 && names[$0] != nil }.sorted()
+        let ids = people.keys.filter { people[$0]!.count > 0 && names[$0] != nil && !theirs.contains($0) }.sorted()
         guard ids.count >= 2 else { return }
         let index = Dictionary(uniqueKeysWithValues: ids.enumerated().map { ($1, $0) })
         // Mean vectors: their dot product is the mean pairwise similarity of the two groups (average linkage).

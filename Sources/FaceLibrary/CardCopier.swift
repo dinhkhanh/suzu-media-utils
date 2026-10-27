@@ -595,7 +595,8 @@ public enum CardCopier {
     public static func setLabel(_ label: String, card id: Int64, store: LibraryStore) throws {
         let l = label.trimmingCharacters(in: .whitespaces)
         try store.db.write { db in
-            try db.execute(sql: "UPDATE card SET label = ?, labelAt = ? WHERE id = ?", arguments: [l.isEmpty ? nil : l, Date().timeIntervalSince1970, id])
+            try db.execute(sql: "UPDATE card SET label = ?, labelAt = \(SyncIds.stampSQL("labelAt")) WHERE id = ?",
+                           arguments: [l.isEmpty ? nil : l, Date().timeIntervalSince1970, id])
         }
     }
 

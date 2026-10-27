@@ -270,11 +270,9 @@ extension TeamSync {
         var signatures: [(mediaId: Int64, sig: String, boxes: String)] = []
         var handled: [Int64] = []
         var copies: [(from: URL, to: URL)] = []
+        var finals: [(tmp: URL, dir: URL)] = []
+        var stale: [URL] = []
         let started = Date()
-        let list = ids.map(String.init).joined(separator: ",")
-        let publishedBoxes = Dictionary(uniqueKeysWithValues: try store.db.read { db in
-            try Row.fetchAll(db, sql: "SELECT mediaId, boxes FROM facePublished WHERE mediaId IN (\(list))").map { ($0["mediaId"] as Int64, $0["boxes"] as String) }
-        })
         for mid in ids {
             // A backlog is published over several passes: one pass never holds the team's queue (and every other
             // team change behind it) for minutes.
@@ -287,32 +285,39 @@ extension TeamSync {
             written.append(mid)
             let sig = Self.signature(payload.faces)
             signatures.append((mid, sig.sig, sig.boxes))
-            // Crops: the file's own folder, faces numbered as in the record. Written again when the faces aren't
-            // the ones published last (found again, dropped): a teammate taking the new record must not number
-            // the old pictures onto the new faces.
-            let cropDir = dir.appendingPathComponent("crops", isDirectory: true).appendingPathComponent(payload.key, isDirectory: true)
-            let exists = fm.fileExists(atPath: cropDir.path)
-            if !exists || publishedBoxes[mid] != sig.boxes {
-                if exists { try? fm.removeItem(at: cropDir) }
-                try? fm.createDirectory(at: cropDir, withIntermediateDirectories: true)
+            // Crops: a folder per file and per set of faces (named by the boxes, which a reader computes from
+            // the record), faces numbered as in the record. Faces found again (dropped, in another order) get a
+            // folder of their own, so a teammate taking an older record never numbers new pictures onto old
+            // faces, and nothing is deleted under a reader's feet; the older sets go once the new one is there.
+            let cropDir = Self.cropFolder(dir, key: payload.key, boxes: sig.boxes)
+            if !fm.fileExists(atPath: cropDir.path) {
+                // Filled under a temporary name and renamed into place once whole: a reader that sees the folder
+                // has all of it, and one that doesn't tries again later.
+                let tmp = cropDir.appendingPathExtension("tmp")
+                try? fm.removeItem(at: tmp)
+                try? fm.createDirectory(at: tmp, withIntermediateDirectories: true)
                 for (i, fid) in faceIds.enumerated() {
-                    copies.append((store.faceCropURL(fid), cropDir.appendingPathComponent("\(i).jpg")))
+                    copies.append((store.faceCropURL(fid), tmp.appendingPathComponent("\(i).jpg")))
                 }
                 // The file's thumbnail too, so the other Macs never read the file for their grids.
-                copies.append((store.thumbnailURL(mid), cropDir.appendingPathComponent("thumb.jpg")))
+                copies.append((store.thumbnailURL(mid), tmp.appendingPathComponent("thumb.jpg")))
+                finals.append((tmp, cropDir))
+                stale += (try? fm.contentsOfDirectory(at: cropDir.deletingLastPathComponent(), includingPropertiesForKeys: nil))?
+                    .filter { $0.lastPathComponent != sig.boxes && $0.lastPathComponent != tmp.lastPathComponent } ?? []
             }
         }
         // Before the records that name them. Plain bytes, several at a time: a Finder-style copy also sets owner,
         // mode, flags and extended attributes, each a round trip to the NAS, and copying them one by one made a
         // pass take minutes.
         Self.copyCrops(copies)
+        for f in finals { try? fm.moveItem(at: f.tmp, to: f.dir) }
+        for s in stale { try? fm.removeItem(at: s) }
         if !lines.isEmpty {
             let file = try Self.currentRecordFile(dir)
             if !fm.fileExists(atPath: file.path) { fm.createFile(atPath: file.path, contents: nil) }
-            let h = try FileHandle(forWritingTo: file)
+            let h = try FileHandle(forUpdating: file)
             defer { try? h.close() }
-            try h.seekToEnd()
-            try h.write(contentsOf: lines)
+            try Self.appendLines(lines, to: h)
         }
         guard !handled.isEmpty else { return false }
         let done = handled.map(String.init).joined(separator: ",")
@@ -325,6 +330,20 @@ extension TeamSync {
         }
         lock.withLock { for mid in written { facesPublishedAt[mid] = now } }
         return !written.isEmpty
+    }
+
+    /// Where a file's crops sit for one set of faces: `crops/<content key>/<boxes>/`. Records from before 0.8.31
+    /// kept them in `crops/<content key>/` itself; a reader falls back to that.
+    static func cropFolder(_ deviceDir: URL, key: String, boxes: String) -> URL {
+        deviceDir.appendingPathComponent("crops", isDirectory: true).appendingPathComponent(key, isDirectory: true)
+            .appendingPathComponent(boxes, isDirectory: true)
+    }
+
+    /// The folder a reader takes a record's crops from: the record's own set, else the old flat layout.
+    static func cropSource(_ deviceDir: URL, key: String, boxes: String) -> URL {
+        let versioned = cropFolder(deviceDir, key: key, boxes: boxes)
+        if FileManager.default.fileExists(atPath: versioned.path) { return versioned }
+        return versioned.deletingLastPathComponent()
     }
 
     /// The newest `media-NNN.jsonl`, or the next one when it is full.
@@ -500,7 +519,7 @@ extension TeamSync {
     func faceEditOps() throws -> ([Op], [Int64]) {
         let rows = try store.db.read { db in
             try Row.fetchAll(db, sql: """
-                SELECT e.faceId, f.mediaId, m.contentKey, f.assignment, p.uuid AS person, r.uuid AS rejected,
+                SELECT e.faceId, f.mediaId, m.contentKey, m.path, m.size, f.assignment, p.uuid AS person, r.uuid AS rejected,
                        (SELECT COUNT(*) FROM face g WHERE g.mediaId = f.mediaId AND g.id < f.id) AS idx
                 FROM faceEditPublish e JOIN face f ON f.id = e.faceId JOIN media m ON m.id = f.mediaId
                 LEFT JOIN person p ON p.id = f.personId LEFT JOIN person r ON r.id = f.rejectedPersonId
@@ -511,8 +530,15 @@ extension TeamSync {
         let now = Date().timeIntervalSince1970
         for r in rows {
             let fid: Int64 = r["faceId"]
+            // A file without a content key yet gets one now; one that can't be read (offline) waits for a later
+            // pass. The edit used to be dropped unsent.
+            var key: String? = r["contentKey"]
+            if key == nil, let path: String = r["path"], let size: Int64 = r["size"] {
+                key = ContentKey.compute(URL(fileURLWithPath: path, isDirectory: false), size: size)
+                if let key { try store.db.write { db in try db.execute(sql: "UPDATE media SET contentKey = ? WHERE id = ?", arguments: [key, r["mediaId"] as Int64]) } }
+            }
+            guard let key else { continue }
             done.append(fid)
-            guard let key: String = r["contentKey"] else { continue }
             var op = Op(t: "face", at: now, uuid: r["person"])
             op.key = key
             op.index = r["idx"]
@@ -703,22 +729,70 @@ extension TeamSync {
                 """, arguments: [payload.w, payload.h, payload.dur, payload.taken, payload.fp.flatMap { Data(base64Encoded: $0) }, payload.v, device, mid])
             // On the processing Mac, a copier's ungrouped faces are this Mac's to group (after the transaction).
             if processorId == deviceId, payload.faces.contains(where: { $0.p == nil }) { lock.withLock { takenToGroup.append(mid) } }
-            // The crops, so the faces have pictures here too.
-            let cropDir = Self.facesURL(team.url, device: device).appendingPathComponent("crops", isDirectory: true).appendingPathComponent(payload.key, isDirectory: true)
-            for (i, fid) in ids.enumerated() {
-                let src = cropDir.appendingPathComponent("\(i).jpg"), dst = store.faceCropURL(fid)
-                try? FileManager.default.removeItem(at: dst)
-                try? FileManager.default.copyItem(at: src, to: dst)
-            }
-            let thumb = cropDir.appendingPathComponent("thumb.jpg"), mine = store.thumbnailURL(mid)
-            if FileManager.default.fileExists(atPath: thumb.path) {
-                try? FileManager.default.removeItem(at: mine)
-                if (try? FileManager.default.copyItem(at: thumb, to: mine)) != nil {
-                    try db.execute(sql: "UPDATE media SET thumbAt = ? WHERE id = ?", arguments: [Date().timeIntervalSince1970, mid])
-                }
-            }
+            // The crops, so the faces have pictures here too. Any that can't be copied now (the share rewriting
+            // them, a hiccup) are fetched again on later passes (see fetchMissingCrops): a face without its picture
+            // stayed that way, and the person's picture with it.
+            for fid in ids { try? FileManager.default.removeItem(at: store.faceCropURL(fid)) }
+            try? FileManager.default.removeItem(at: store.thumbnailURL(mid))
+            try db.execute(sql: "INSERT OR REPLACE INTO cropRetry (mediaId, teamId, deviceId, contentKey, boxes) VALUES (?, ?, ?, ?, ?)",
+                           arguments: [mid, team.id, device, payload.key, Self.signature(payload.faces).boxes])
+            try fetchCrops(mid, from: device, team: team, key: payload.key, boxes: Self.signature(payload.faces).boxes, faceIds: ids, db: db)
         }
         return affected
+    }
+
+    /// Copies a file's crops and thumbnail from a teammate's folder for the faces that have none here. Done with
+    /// the file when every one of them is there, or isn't in a folder that is (the teammate had none to give);
+    /// tried again while the folder can't be seen (being written, the share away) or a copy fails.
+    func fetchCrops(_ mid: Int64, from device: String, team: TeamRecord, key: String, boxes: String, faceIds: [Int64], db: Database) throws {
+        let fm = FileManager.default
+        let cropDir = Self.cropSource(Self.facesURL(team.url, device: device), key: key, boxes: boxes)
+        // The old flat layout counts as there only when it holds something: the parent folder stays after a set
+        // of crops moved out of it.
+        let folderThere = cropDir.lastPathComponent == boxes
+            ? fm.fileExists(atPath: cropDir.path)
+            : !((try? fm.contentsOfDirectory(at: cropDir, includingPropertiesForKeys: nil))?.filter { !$0.hasDirectoryPath }.isEmpty ?? true)
+        var complete = true
+        func fetch(_ name: String, to dst: URL) -> Bool {
+            guard !fm.fileExists(atPath: dst.path) else { return false }
+            let src = cropDir.appendingPathComponent(name)
+            guard folderThere, fm.fileExists(atPath: src.path) else {
+                if !folderThere { complete = false }
+                return false
+            }
+            if (try? fm.copyItem(at: src, to: dst)) == nil { complete = false; return false }
+            return true
+        }
+        for (i, fid) in faceIds.enumerated() { _ = fetch("\(i).jpg", to: store.faceCropURL(fid)) }
+        if fetch("thumb.jpg", to: store.thumbnailURL(mid)) {
+            try db.execute(sql: "UPDATE media SET thumbAt = ? WHERE id = ?", arguments: [Date().timeIntervalSince1970, mid])
+        }
+        if complete { try db.execute(sql: "DELETE FROM cropRetry WHERE mediaId = ?", arguments: [mid]) }
+    }
+
+    /// Files taken from teammates whose crops or thumbnail couldn't all be copied: tried again, a batch per pass.
+    static let cropRetryBatch = 200
+    func fetchMissingCrops(_ team: TeamRecord) throws -> Bool {
+        let rows = try store.db.read { db in
+            try Row.fetchAll(db, sql: "SELECT mediaId, deviceId, contentKey, boxes FROM cropRetry WHERE teamId = ? ORDER BY mediaId LIMIT ?",
+                             arguments: [team.id, Self.cropRetryBatch])
+        }
+        guard !rows.isEmpty else { return false }
+        var fetched = false
+        try store.db.write { db in
+            for r in rows {
+                let mid: Int64 = r["mediaId"]
+                let faceIds = try Int64.fetchAll(db, sql: "SELECT id FROM face WHERE mediaId = ? ORDER BY id", arguments: [mid])
+                guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM media WHERE id = ?)", arguments: [mid]) == true else {
+                    try db.execute(sql: "DELETE FROM cropRetry WHERE mediaId = ?", arguments: [mid]); continue
+                }
+                let before = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM cropRetry WHERE mediaId = ?", arguments: [mid]) ?? 0
+                try fetchCrops(mid, from: r["deviceId"], team: team, key: r["contentKey"], boxes: r["boxes"], faceIds: faceIds, db: db)
+                let after = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM cropRetry WHERE mediaId = ?", arguments: [mid]) ?? 0
+                if after < before { fetched = true }
+            }
+        }
+        return fetched
     }
 
     /// A teammate rejected or moved a face: the same face here (by content key and position) follows.
@@ -728,7 +802,17 @@ extension TeamSync {
             SELECT f.id, f.personId FROM face f JOIN media m ON m.id = f.mediaId JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId
             WHERE m.contentKey = ? AND p.teamId = ? AND (SELECT COUNT(*) FROM face g WHERE g.mediaId = f.mediaId AND g.id < f.id) = ?
             """, arguments: [key, team.id, index])
-        guard !faces.isEmpty else { return .ignored }  // a file this Mac doesn't have: nothing to do
+        if faces.isEmpty {
+            // Not processed here yet. The processing Mac keeps the edit for when it has read the file (a card's
+            // file edited on the laptop right after the copy used to lose it, the Mac's own grouping winning);
+            // so does a Mac that has the file waiting. A Mac without the file lets it go: the processing Mac's
+            // record brings the result.
+            let waiting = try Bool.fetchOne(db, sql: """
+                SELECT EXISTS (SELECT 1 FROM media m JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId
+                               WHERE m.contentKey = ? AND p.teamId = ? AND m.status != 'done')
+                """, arguments: [key, team.id]) ?? false
+            return team.processorId == deviceId || waiting ? .deferred : .ignored
+        }
         func person(_ uuid: String?) throws -> Int64? {
             guard let uuid else { return nil }
             if let id = try Self.resolve(uuid, db: db) { return id }

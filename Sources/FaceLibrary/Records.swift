@@ -194,6 +194,15 @@ public struct PersonRecord: Codable, FetchableRecord, MutablePersistableRecord, 
 /// Ids that are the same on every Mac.
 public enum SyncIds {
     public static func new() -> String { UUID().uuidString.lowercased() }
+
+    /// The moment of a change made here that travels to teammates, where the newest change wins: now, but always
+    /// later than `after`, the moment of the value it replaces. A Mac whose clock runs behind a teammate's would
+    /// otherwise stamp its edit older than what it replaces; the teammates ignore it while this Mac shows it, and
+    /// the two never agree again. With this, what the user did last on any Mac wins everywhere.
+    public static func stamp(after: Double?) -> Double { max(Date().timeIntervalSince1970, (after ?? 0) + 0.001) }
+
+    /// The same in SQL, for an UPDATE of `column` in place; binds one argument, the current time.
+    public static func stampSQL(_ column: String) -> String { "MAX(?, COALESCE(\(column), 0) + 0.001)" }
 }
 
 /// Macs sharing projects through a folder they can all reach (see TeamSync). A team holds any number of projects

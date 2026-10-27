@@ -28,8 +28,10 @@ public enum SavedWatermarks {
     }
 
     /// Adds the watermark, or replaces the one with the same id.
-    public static func save(_ w: SavedWatermark, db: Database, at: Double = Date().timeIntervalSince1970) throws {
+    public static func save(_ w: SavedWatermark, db: Database, at: Double? = nil) throws {
         let spec = String(decoding: try JSONEncoder().encode(w.spec), as: UTF8.self)
+        // Later than the version it replaces, so it wins on every Mac whatever this one's clock says.
+        let at = try at ?? SyncIds.stamp(after: try Double.fetchOne(db, sql: "SELECT updatedAt FROM watermarkPreset WHERE id = ?", arguments: [w.id]))
         try db.execute(sql: """
             INSERT INTO watermarkPreset (id, name, spec, updatedAt, createdAt, deleted) VALUES (?, ?, ?, ?, ?, 0)
             ON CONFLICT(id) DO UPDATE SET name = excluded.name, spec = excluded.spec, updatedAt = excluded.updatedAt, deleted = 0
@@ -38,7 +40,8 @@ public enum SavedWatermarks {
 
     /// Gone here and, through the team, on the other Macs (kept as a tombstone so an older copy doesn't come back).
     public static func delete(_ id: String, db: Database) throws {
-        try db.execute(sql: "UPDATE watermarkPreset SET deleted = 1, updatedAt = ? WHERE id = ?", arguments: [Date().timeIntervalSince1970, id])
+        try db.execute(sql: "UPDATE watermarkPreset SET deleted = 1, updatedAt = \(SyncIds.stampSQL("updatedAt")) WHERE id = ?",
+                       arguments: [Date().timeIntervalSince1970, id])
     }
 
     /// This Mac's copies of teammates' logo and banner files.

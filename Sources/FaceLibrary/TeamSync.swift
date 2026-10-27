@@ -380,6 +380,7 @@ public final class TeamSync: @unchecked Sendable {
                 if try publishFaces(team) { changed = true }
                 if try pullSummaries(team) { changed = true }
                 if try pullFaces(team) { changed = true }
+                if try fetchMissingCrops(team) { changed = true }
             } catch let e {
                 error = e.localizedDescription
             }
@@ -543,6 +544,15 @@ public final class TeamSync: @unchecked Sendable {
                 updates["pub:person:\(p.uuid)"] = value
             }
         }
+        // A name taken away travels too (the person was named once: nameAt is set), or teammates kept it.
+        for r in try store.db.read({ db in try Row.fetchAll(db, sql: "SELECT uuid, nameAt FROM person WHERE name IS NULL AND nameAt IS NOT NULL") }) {
+            let uuid: String = r["uuid"], at: Double = r["nameAt"]
+            let value = "\(at)|"
+            if state["pub:person:\(uuid)"] != value {
+                ops.append(Op(t: "person", at: at, uuid: uuid))
+                updates["pub:person:\(uuid)"] = value
+            }
+        }
         for r in try store.db.read({ db in try Row.fetchAll(db, sql: "SELECT fromUuid, intoUuid, at FROM personMerge") }) {
             let from: String = r["fromUuid"], into: String = r["intoUuid"]
             if state["pub:merge:\(from)"] != into {
@@ -697,9 +707,24 @@ public final class TeamSync: @unchecked Sendable {
         let fm = FileManager.default
         try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         if !fm.fileExists(atPath: url.path) { fm.createFile(atPath: url.path, contents: nil) }
-        let h = try FileHandle(forWritingTo: url)
+        let h = try FileHandle(forUpdating: url)
         defer { try? h.close() }
-        try h.seekToEnd()
+        try Self.appendLines(data, to: h)
+    }
+
+    /// Appends whole lines. A write cut short (the share went away mid-append) leaves a half line; the next lines
+    /// glued to it made one unreadable line that every reader dropped, so a half line is ended first (the change
+    /// in it is written again, as its state wasn't saved). `h` is open for reading and writing.
+    static func appendLines(_ data: Data, to h: FileHandle) throws {
+        let end = try h.seekToEnd()
+        if end > 0 {
+            try h.seek(toOffset: end - 1)
+            if try h.read(upToCount: 1) != Data("\n".utf8) {
+                try h.seekToEnd()
+                try h.write(contentsOf: Data("\n".utf8))
+            }
+            try h.seekToEnd()
+        }
         try h.write(contentsOf: data)
     }
 
@@ -1090,12 +1115,23 @@ public final class TeamSync: @unchecked Sendable {
             return .applied(people: [], remote: [])
 
         case "person":
-            guard let uuid = op.uuid, let name = op.name.map(PersonNames.clean), !name.isEmpty else { return .ignored }
+            guard let uuid = op.uuid else { return .ignored }
+            // No name: the teammate took the name away.
+            let name = op.name.map(PersonNames.clean).flatMap { $0.isEmpty ? nil : $0 }
             if let pid = try Self.resolve(uuid, db: db) {
                 let row = try Row.fetchOne(db, sql: "SELECT name, nameAt FROM person WHERE id = ?", arguments: [pid])
-                guard (row?["name"] as String?) != name, op.at > ((row?["nameAt"] as Double?) ?? 0) else { return .ignored }
+                let current: String? = row?["name"], currentAt: Double = (row?["nameAt"] as Double?) ?? 0
+                guard current != name else { return .ignored }
+                // A person never named here (a group from the processing Mac's records) takes the name whatever its
+                // time: names given before names had a time are sent with 0.
+                guard (current == nil && currentAt == 0) || op.at > currentAt else { return .ignored }
+                guard let name else {
+                    try db.execute(sql: "UPDATE person SET name = NULL, nameAt = ? WHERE id = ?", arguments: [op.at, pid])
+                    return .applied(people: [], remote: [])
+                }
                 return .applied(people: try Self.setName(pid, name, at: op.at, db: db), remote: [])
             }
+            guard let name else { return .ignored }
             if let existing = try PersonNames.find(name, db: db) {
                 // Both Macs named someone independently: the smaller id becomes the one everybody uses.
                 let theirs: String = try String.fetchOne(db, sql: "SELECT uuid FROM person WHERE id = ?", arguments: [existing]) ?? ""
@@ -1125,6 +1161,16 @@ public final class TeamSync: @unchecked Sendable {
             if let f, i == nil {
                 // Only the merged person is known here: it simply takes the surviving id.
                 try db.execute(sql: "UPDATE person SET uuid = ? WHERE id = ?", arguments: [into, f])
+            }
+            if let f, let i, f == i {
+                // The same two people merged the other way round here: each Mac kept its own survivor, with its
+                // own name. Both settle on the smaller id (see settleOppositeMerge).
+                return try settleOppositeMerge(f, mine: from, theirs: into, team: team, db: db)
+            }
+            if f == nil, let i, let mine = try Self.resolve(from, db: db), mine != i {
+                // `from` went into someone else here: one person to the teammate, two here. The two become one
+                // unless both carry a name, each its own (the users told them apart).
+                return try Self.reconcileSurvivors(mine, i, db: db)
             }
             try db.execute(sql: "INSERT OR IGNORE INTO personMerge (fromUuid, intoUuid, at) VALUES (?, ?, ?)", arguments: [from, into, op.at])
             return .applied(people: [], remote: [])
@@ -1274,6 +1320,44 @@ public final class TeamSync: @unchecked Sendable {
         default:
             return .ignored
         }
+    }
+
+    /// A merge made here as `theirs` → `mine` while a teammate made it `mine` → `theirs`: both Macs keep the person
+    /// with the smaller id, the same one everywhere. When that is this Mac's survivor, its name, pin and picture
+    /// are published again (the teammate's copy is put back to "unnamed" so they take them); else this Mac's
+    /// survivor takes the other id and waits for the teammate's name.
+    func settleOppositeMerge(_ pid: Int64, mine: String, theirs: String, team: TeamRecord, db: Database) throws -> Outcome {
+        if mine < theirs {
+            for key in ["pub:person:\(mine)", "pub:pin:\(mine)", "pub:cover:\(mine)"] {
+                try db.execute(sql: "DELETE FROM syncState WHERE teamId = ? AND key = ?", arguments: [team.id, key])
+            }
+            // With a fresh time, so the teammate's copy (put back to 0) takes it even if this name had none.
+            try db.execute(sql: "UPDATE person SET nameAt = \(SyncIds.stampSQL("nameAt")) WHERE id = ? AND name IS NOT NULL",
+                           arguments: [Date().timeIntervalSince1970, pid])
+            try db.execute(sql: "INSERT OR REPLACE INTO personMerge (fromUuid, intoUuid, at) VALUES (?, ?, ?)",
+                           arguments: [theirs, mine, Date().timeIntervalSince1970])
+            return .applied(people: [], remote: [])
+        }
+        try db.execute(sql: "UPDATE person SET uuid = ?, nameAt = 0 WHERE id = ?", arguments: [theirs, pid])
+        try db.execute(sql: "DELETE FROM personMerge WHERE fromUuid = ?", arguments: [theirs])
+        try db.execute(sql: "INSERT OR REPLACE INTO personMerge (fromUuid, intoUuid, at) VALUES (?, ?, ?)",
+                       arguments: [mine, theirs, Date().timeIntervalSince1970])
+        try db.execute(sql: "UPDATE personMerge SET intoUuid = ? WHERE intoUuid = ?", arguments: [theirs, mine])
+        return .applied(people: [pid], remote: [])
+    }
+
+    /// Two people here that a teammate's merge says are one. Two different names stay two people (each user's
+    /// call); otherwise the named one survives, else the one with the smaller id, so every Mac keeps the same.
+    static func reconcileSurvivors(_ a: Int64, _ b: Int64, db: Database) throws -> Outcome {
+        guard let ra = try Row.fetchOne(db, sql: "SELECT uuid, name FROM person WHERE id = ?", arguments: [a]),
+              let rb = try Row.fetchOne(db, sql: "SELECT uuid, name FROM person WHERE id = ?", arguments: [b]) else { return .ignored }
+        let na: String? = ra["name"], nb: String? = rb["name"]
+        if let na, let nb, PersonNames.key(na) != PersonNames.key(nb) { return .ignored }
+        let ua: String = ra["uuid"], ub: String = rb["uuid"]
+        let into: Int64
+        if na != nil && nb == nil { into = a } else if nb != nil && na == nil { into = b } else { into = ua < ub ? a : b }
+        try PersonNames.merge([into == a ? b : a], into: into, db: db)
+        return .applied(people: [a, b], remote: [])
     }
 
     /// Names a person from a teammate's change. A name another person already has merges the two, keeping the

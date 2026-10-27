@@ -125,7 +125,7 @@ public struct DeliveryService: Sendable {
     @discardableResult
     public func add(_ rule: DeliveryRule, includeExisting: Bool) throws -> DeliveryRule {
         var r = rule
-        r.updatedAt = Date().timeIntervalSince1970
+        r.updatedAt = SyncIds.stamp(after: nil)
         try store.db.write { db in try r.insert(db) }
         if !includeExisting { try markDelivered(try pending(r, limit: nil), rule: r.id!) }
         return r
@@ -134,13 +134,13 @@ public struct DeliveryService: Sendable {
     /// Changes a rule in place (its files already delivered stay delivered).
     public func update(_ rule: DeliveryRule) throws {
         var r = rule
-        r.updatedAt = Date().timeIntervalSince1970
+        r.updatedAt = SyncIds.stamp(after: rule.updatedAt)
         try store.db.write { db in try r.update(db) }
     }
 
     /// Hides the rule and stops it; the row stays so teammates' Macs delete it too.
     public func delete(_ rule: DeliveryRule) throws {
-        let now = Date().timeIntervalSince1970
+        let now = SyncIds.stamp(after: rule.updatedAt)
         try store.db.write { db in
             try db.execute(sql: "UPDATE deliveryRule SET deletedAt = ?, updatedAt = ?, enabled = 0 WHERE id = ?", arguments: [now, now, rule.id])
             try db.execute(sql: "DELETE FROM delivery WHERE ruleId = ?", arguments: [rule.id])

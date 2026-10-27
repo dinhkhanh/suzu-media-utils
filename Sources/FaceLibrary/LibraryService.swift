@@ -228,7 +228,7 @@ public final class LibraryService: @unchecked Sendable {
         if share != .mac { try requireTeam(s.projectId) }
         try store.db.write { db in
             // Kept as this Mac's own from now on: a teammate dropping it later doesn't take it away here.
-            try db.execute(sql: "UPDATE source SET share = ?, shareAt = ?, fromDevice = CASE WHEN ? = 'mac' THEN NULL ELSE fromDevice END WHERE id = ?",
+            try db.execute(sql: "UPDATE source SET share = ?, shareAt = \(SyncIds.stampSQL("shareAt")), fromDevice = CASE WHEN ? = 'mac' THEN NULL ELSE fromDevice END WHERE id = ?",
                            arguments: [share.rawValue, Date().timeIntervalSince1970, share.rawValue, sourceId])
         }
         if share == .edited || s.share == .edited { maintenanceQueue.async { [weak self] in self?.settleEditedFolders() } }
@@ -340,7 +340,8 @@ public final class LibraryService: @unchecked Sendable {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         try store.db.write { db in
-            try db.execute(sql: "UPDATE project SET name = ?, updatedAt = ? WHERE id = ?", arguments: [trimmed, Date().timeIntervalSince1970, id])
+            try db.execute(sql: "UPDATE project SET name = ?, updatedAt = \(SyncIds.stampSQL("updatedAt")) WHERE id = ?",
+                           arguments: [trimmed, Date().timeIntervalSince1970, id])
         }
         teamSync.pushSoon()
     }
@@ -540,7 +541,7 @@ public final class LibraryService: @unchecked Sendable {
             return existing
         }
         try store.db.write { db in
-            try db.execute(sql: "UPDATE person SET name = ?, nameAt = ? WHERE id = ?",
+            try db.execute(sql: "UPDATE person SET name = ?, nameAt = \(SyncIds.stampSQL("nameAt")) WHERE id = ?",
                            arguments: [name.isEmpty ? nil : name, Date().timeIntervalSince1970, personId])
         }
         engine.reclusterNow()  // runs autoName, so unnamed groups that match this person join it
@@ -637,7 +638,8 @@ public final class LibraryService: @unchecked Sendable {
     /// Picks the face used as a person's picture; nil goes back to the best shot automatically.
     public func setCover(_ personId: Int64, faceId: Int64?) throws {
         try store.db.write { db in
-            try db.execute(sql: "UPDATE person SET coverFaceId = ?, coverAt = ? WHERE id = ?", arguments: [faceId, Date().timeIntervalSince1970, personId])
+            try db.execute(sql: "UPDATE person SET coverFaceId = ?, coverAt = \(SyncIds.stampSQL("coverAt")) WHERE id = ?",
+                           arguments: [faceId, Date().timeIntervalSince1970, personId])
         }
         teamSync.pushSoon()
     }

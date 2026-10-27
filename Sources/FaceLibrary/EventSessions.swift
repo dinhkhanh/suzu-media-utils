@@ -55,7 +55,10 @@ public enum EventSessions {
     public static func setName(_ store: LibraryStore, project: Int64, session: EventSession, name: String?) throws {
         let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         _ = try store.db.write { db in
-            try setName(db, project: project, at: session.start, name: trimmed, updatedAt: Date().timeIntervalSince1970,
+            // Later than every name it replaces or clears, so it wins on every Mac whatever this one's clock says.
+            let last = try Double.fetchOne(db, sql: "SELECT MAX(updatedAt) FROM sessionLabel WHERE projectId = ? AND at BETWEEN ? AND ?",
+                                           arguments: [project, session.start, session.end])
+            try setName(db, project: project, at: session.start, name: trimmed, updatedAt: SyncIds.stamp(after: last),
                         clearing: session.start...session.end)
         }
     }
