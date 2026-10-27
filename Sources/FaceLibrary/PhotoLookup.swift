@@ -44,8 +44,9 @@ public struct PhotoLookup: @unchecked Sendable {
 extension GroupingEngine {
     /// The people `v` (a normalized embedding) looks most like, best first, scored as `bestPerson` scores them.
     /// Only the first can be `likely`: like the library, a face goes with its best match, however many clear the bar.
+    /// Waits for the engine's job under way only, not for the ones queued behind it (see `stateLock`).
     public func nearestPeople(to v: [Float], limit: Int) -> [(personId: Int64, similarity: Float, likely: Bool)] {
-        queue.sync {
+        stateLock.withLock {
             let c = means.similarities(v), e = exemplars.similarities(v)
             var top: [Int64: (Float, Float)] = [:]
             for (row, pid) in exemplars.owner.enumerated() where pid >= 0 {

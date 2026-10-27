@@ -88,6 +88,16 @@ final class GroupingTests: XCTestCase {
         let stranger = engine.nearestPeople(to: direction(), limit: 1)
         XCTAssertEqual(stranger.count, 1)
         XCTAssertFalse(stranger[0].likely)
+
+        // Files being processed queue grouping work: a lookup doesn't wait for it to drain.
+        let started = DispatchSemaphore(value: 0)
+        engine.queue.async { started.signal(); Thread.sleep(forTimeInterval: 3) }  // a backlog's worth, not holding the people
+        started.wait()
+        engine.mediaProcessed(-1)  // queued behind it
+        let t = Date()
+        XCTAssertEqual(engine.nearestPeople(to: face(an), limit: 1).first?.personId, ids[0])
+        XCTAssertLessThan(Date().timeIntervalSince(t), 1, "answered at once, not after the queued work")
+        engine.waitUntilIdle()
     }
 
     /// A face from outside finds every file it is in: grouped with its person or not, a video once (at its best

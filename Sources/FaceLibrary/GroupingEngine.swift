@@ -52,6 +52,10 @@ public final class GroupingEngine: @unchecked Sendable {
     public let store: LibraryStore
     public var settings = GroupingSettings()
     let queue = DispatchQueue(label: "grouping")
+    /// Held by every job on `queue` while it runs, so a lookup from outside (Find by Photo) reads the people as they
+    /// stand after waiting for the job under way only, not for every job queued behind it: while a backlog was
+    /// processed, that was minutes.
+    let stateLock = NSLock()
     var people: [Int64: Person] = [:]
     var means = Rows()
     var exemplars = Rows()
@@ -128,7 +132,7 @@ public final class GroupingEngine: @unchecked Sendable {
     // MARK: - Public API (all work runs on the engine's serial queue)
 
     public func start() {
-        queue.async { [self] in
+        work { [self] in
             try? rebuildAll()
             try? recluster()
         }
@@ -136,7 +140,7 @@ public final class GroupingEngine: @unchecked Sendable {
 
     /// Call after a media's faces were written.
     public func mediaProcessed(_ mediaId: Int64) {
-        queue.async { [self] in
+        work { [self] in
             try? assignPending(mediaIds: [mediaId])
             scheduleRecluster()
         }
@@ -145,7 +149,7 @@ public final class GroupingEngine: @unchecked Sendable {
     /// Faces in these files were let go to be placed again ("Regroup"): each goes to whoever it looks most like,
     /// and the rest wait for the next clustering pass.
     public func regroup(mediaIds: [Int64]) {
-        queue.async { [self] in
+        work { [self] in
             try? assignPending(mediaIds: mediaIds)
             scheduleRecluster()
         }
@@ -153,12 +157,12 @@ public final class GroupingEngine: @unchecked Sendable {
 
     /// Call after faces were removed from or added to people outside the engine (user edits, deleted files).
     public func peopleChanged(_ ids: Set<Int64>) {
-        queue.async { [self] in try? rebuild(personIds: ids) }
+        work { [self] in try? rebuild(personIds: ids) }
     }
 
     /// A reference photo was added for this person: re-match waiting faces and name matching groups.
     public func referenceChanged(_ pid: Int64) {
-        queue.async { [self] in
+        work { [self] in
             try? rebuild(personIds: [pid])
             try? assignAllPending()
             try? consolidate()
@@ -166,13 +170,13 @@ public final class GroupingEngine: @unchecked Sendable {
     }
 
     public func reclusterNow() {
-        queue.async { [self] in try? recluster() }
+        work { [self] in try? recluster() }
     }
 
     /// Teammates' summaries of these people arrived (team sync): re-match waiting faces and name matching groups.
     public func remoteChanged(_ ids: Set<Int64>) {
         guard !ids.isEmpty else { return }
-        queue.async { [self] in
+        work { [self] in
             try? rebuild(personIds: ids)
             try? assignAllPending()
             try? consolidate()
@@ -207,6 +211,11 @@ public final class GroupingEngine: @unchecked Sendable {
 
     /// Blocks until queued engine work is done (tests, shutdown).
     public func waitUntilIdle() { queue.sync {} }
+
+    /// Runs `body` on the engine's queue, holding `stateLock`.
+    func work(_ body: @escaping () -> Void) {
+        queue.async { [self] in stateLock.withLock(body) }
+    }
 
     // MARK: - Units
 
@@ -536,7 +545,10 @@ public final class GroupingEngine: @unchecked Sendable {
 
     func scheduleRecluster() {
         reclusterWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in try? self?.recluster() }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            stateLock.withLock { _ = try? self.recluster() }
+        }
         reclusterWork = work
         let pending = (try? store.db.read { db in
             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM face WHERE assignment = 'none' AND embedding IS NOT NULL")
