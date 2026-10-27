@@ -57,6 +57,46 @@ final class HealingTests: XCTestCase {
         }
     }
 
+    func testAMoleTheBrushJustCoversIsGoneToItsEdge() {
+        // Painted with a brush hardly bigger than the mole, its soft edge (the default) included: none of it is left.
+        let image = skin { x, y in (x - 200) * (x - 200) + (y - 150) * (y - 150) < 14 * 14 }
+        let healed = Healing.apply([HealStroke(points: [CGPoint(x: 0.5, y: 0.5)], radius: 16.5 / 300, softness: 0.3)], to: image)
+        for box in [CGRect(x: 210, y: 147, width: 4, height: 6), CGRect(x: 186, y: 147, width: 4, height: 6), CGRect(x: 197, y: 137, width: 6, height: 4)] {
+            let skinThere = stats(image, box.offsetBy(dx: 0, dy: box.minY < 140 ? -30 : 30)).mean
+            XCTAssertEqual(stats(healed, box).mean, skinThere, accuracy: 6, "the mole's rim at \(box.origin)")
+        }
+    }
+
+    func testAMolePokingPastTheBrushIsNotDrawnBackIn() {
+        // The brush a little off the mole: its rim crosses the mole on one side, which must not darken the fill.
+        let image = skin { x, y in (x - 200) * (x - 200) + (y - 150) * (y - 150) < 81 }
+        let healed = Healing.apply([HealStroke(points: [CGPoint(x: 205.0 / 400, y: 0.5)], radius: 12.0 / 300, softness: 0.3)], to: image)
+        let box = CGRect(x: 195, y: 147, width: 6, height: 6)
+        XCTAssertEqual(stats(healed, box).mean, stats(image, box.offsetBy(dx: 0, dy: -30)).mean, accuracy: 6)
+    }
+
+    func testAWrinkleIsGoneAlongItsWholeLength() {
+        // Every few pixels along it, the joins between its pieces too.
+        let image = skin { x, y in abs(y - 150) <= 2 && x > 60 && x < 340 }
+        let stroke = HealStroke(points: [CGPoint(x: 0.15, y: 0.5), CGPoint(x: 0.85, y: 0.5)], radius: 0.02, softness: 0.3)
+        let healed = Healing.apply([stroke], to: image)
+        var worst = 0.0
+        for x in stride(from: 70, through: 326, by: 4) {
+            let line = stats(healed, CGRect(x: x, y: 148, width: 4, height: 5)).mean, near = stats(image, CGRect(x: x, y: 130, width: 4, height: 5)).mean
+            worst = max(worst, abs(line - near))
+        }
+        XCTAssertLessThan(worst, 10)
+    }
+
+    func testTheAmountShowsThatShareOfTheHealing() {
+        let image = skin { x, y in (x - 200) * (x - 200) + (y - 150) * (y - 150) < 100 }
+        let stroke = HealStroke(points: [CGPoint(x: 0.5, y: 0.5)], radius: 0.06, softness: 0.3)
+        let spot = CGRect(x: 194, y: 144, width: 12, height: 12)
+        let before = stats(image, spot).mean, full = stats(Healing.apply([stroke], to: image), spot).mean
+        XCTAssertEqual(stats(Healing.apply([stroke], to: image, amount: 0.5), spot).mean, (before + full) / 2, accuracy: 2)
+        XCTAssertEqual(stats(Healing.apply([stroke], to: image, amount: 0), spot).mean, before, accuracy: 0.01)
+    }
+
     func testAPickedSourceIsUsed() {
         // Healed from a spot picked by hand, the spot is copied over: the source is the one picked, even if worse.
         let image = skin { x, y in (x - 100) * (x - 100) + (y - 150) * (y - 150) < 16 }

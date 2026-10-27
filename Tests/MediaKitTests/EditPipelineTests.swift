@@ -687,6 +687,26 @@ final class RetouchTests: XCTestCase {
         XCTAssertEqual(value(dark, 170, 50), value(photo, 170, 50), accuracy: 0.01)
     }
 
+    func testTheSkinRetouchSharesTheFaceAndBodySkinMasks() {
+        // Face skin on the left half; a stroke painted on the face skin mask on the right (top-left origin: x 0.75).
+        let e = CGRect(x: 0, y: 0, width: 200, height: 100), parts = leftHalf(.faceSkin)
+        let stroke = MaskStroke(points: [CGPoint(x: 0.75, y: 0.5)], radius: 0.1, softness: 0, erase: false)
+        var r = Retouch()
+        XCTAssertLessThan(value(EditPipeline.partMask(.skin, r, parts: parts, extent: e), 150, 50), 0.1)
+        XCTAssertGreaterThan(value(EditPipeline.partMask(.skin, r, parts: parts, extent: e, brush: [.faceSkin: [stroke]]), 150, 50), 0.9,
+                             "painted on face skin, so the retouch goes there too")
+        // Face skin's mask shrunk in the Masks section: the retouch's shrinks with it.
+        var look = PartLook(); look.grow = -1
+        r.setLook(look, for: .faceSkin)
+        XCTAssertLessThan(value(EditPipeline.partMask(.skin, r, parts: parts, extent: e), 99, 50),
+                          value(EditPipeline.partMask(.skin, Retouch(), parts: parts, extent: e), 99, 50) - 0.3)
+        // Body skin's strokes count with Body skin too, not without.
+        let body = [Retouch.Part.bodySkin: [stroke]]
+        XCTAssertGreaterThan(value(EditPipeline.partMask(.skin, Retouch(), parts: parts, extent: e, brush: body), 150, 50), 0.9)
+        var faceOnly = Retouch(); faceOnly.bodyToo = false
+        XCTAssertLessThan(value(EditPipeline.partMask(.skin, faceOnly, parts: parts, extent: e, brush: body), 150, 50), 0.1)
+    }
+
     func testRefinedMaskFollowsThePhotosEdge() {
         // Skin on the left 40% of the photo, a blue wall right of it; the model's face skin reaches 45% across (two
         // of its pixels too far, as it does).

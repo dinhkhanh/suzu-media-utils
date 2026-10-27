@@ -105,7 +105,7 @@ public enum EditPipeline {
     /// watermark goes on, so the watermark is drawn at the screen's resolution however far the preview is zoomed.
     public static func apply(_ recipe: EditRecipe, to input: CIImage, focus: FocusHint?, previewLongSide: Int? = nil) throws -> CIImage {
         // Healed first, on the photo as shot (where the strokes are kept).
-        var (image, focus) = orient(Healing.apply(recipe.heal ?? [], to: input), recipe.look, focus: focus)
+        var (image, focus) = orient(Healing.apply(recipe.heal ?? [], to: input, amount: recipe.healAmount ?? 1), recipe.look, focus: focus)
         image = tone(image, recipe)
         if let degrees = rotation(recipe, image) { (image, focus) = rotate(image, degrees: degrees, focus: focus) }
         let size = image.extent.size
@@ -175,28 +175,34 @@ public enum EditPipeline {
         let short = min(ext.width, ext.height)
         var out = image
         if r.retouchesSkin {
-            let skin = partMask(.skin, r, parts: parts, extent: ext, brush: brush[.skin] ?? [])
+            let skin = partMask(.skin, r, parts: parts, extent: ext, brush: brush)
             out = beautify(out, r, short: short).applyingFilter("CIBlendWithMask", parameters: [
                 kCIInputBackgroundImageKey: out, kCIInputMaskImageKey: skin])
         }
         for (part, look) in r.parts.sorted(by: { $0.key.rawValue < $1.key.rawValue }) where look.changesPixels {
-            let mask = partMask(part, r, parts: parts, extent: ext, brush: brush[part] ?? [])
+            let mask = partMask(part, r, parts: parts, extent: ext, brush: brush)
             out = adjust(out, part: look).applyingFilter("CIBlendWithMask", parameters: [
                 kCIInputBackgroundImageKey: out, kCIInputMaskImageKey: mask])
         }
         return out.cropped(to: ext)
     }
 
-    /// A part's mask over a photo of this extent, shaped by its dials, then the strokes painted on it by hand (placed
-    /// in this image): what the part's dials change, and what Show Mask draws.
-    /// The skin retouch's mask is face skin, with body skin too when `bodyToo`.
-    public static func partMask(_ part: Retouch.Part, _ r: Retouch?, parts: BodyParts, extent: CGRect, brush: [MaskStroke] = []) -> CIImage {
-        var found = parts.mask(part.kind, extent: extent)
-        if part == .skin, r?.bodyToo ?? true {
-            found = found.applyingFilter("CIMaximumCompositing", parameters: [kCIInputBackgroundImageKey: parts.mask(.bodySkin, extent: extent)])
+    /// A part's mask over a photo of this extent, shaped by its dials, then the strokes painted on it by hand (`brush`,
+    /// each part's, placed in this image): what the part's dials change, and what Show Mask draws.
+    /// The skin retouch's mask is the face skin mask, with the body skin mask too when `bodyToo`: the same ones, so
+    /// shaping or painting them moves the retouch with them.
+    public static func partMask(_ part: Retouch.Part, _ r: Retouch?, parts: BodyParts, extent: CGRect,
+                                brush: [Retouch.Part: [MaskStroke]] = [:]) -> CIImage {
+        guard part == .skin else {
+            let shaped = shape(parts.mask(part.kind, extent: extent), r?.look(part) ?? PartLook(), short: min(extent.width, extent.height), extent: extent)
+            return MaskBrush.apply(brush[part] ?? [], to: shaped, extent: extent)
         }
-        let shaped = shape(found, r?.look(part) ?? PartLook(), short: min(extent.width, extent.height), extent: extent)
-        return MaskBrush.apply(brush, to: shaped, extent: extent)
+        var skin = partMask(.faceSkin, r, parts: parts, extent: extent, brush: brush)
+        if r?.bodyToo ?? true {
+            skin = skin.applyingFilter("CIMaximumCompositing", parameters: [
+                kCIInputBackgroundImageKey: partMask(.bodySkin, r, parts: parts, extent: extent, brush: brush)])
+        }
+        return MaskBrush.apply(brush[.skin] ?? [], to: skin, extent: extent)
     }
 
     /// A mask grown or shrunk, then its edge softened, by the part's dials (sized on the photo's short side).

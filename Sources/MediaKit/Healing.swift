@@ -1,6 +1,7 @@
 import CoreGraphics
 import CoreImage
 import Foundation
+import simd
 
 /// A stroke of the healing brush on one photo: what it covers (a blemish, a mole, freckles, a line) is filled from
 /// skin nearby, that skin's texture kept and its light and colour matched to the skin around the stroke, as
@@ -11,7 +12,8 @@ public struct HealStroke: Codable, Sendable, Hashable {
     public var points: [CGPoint]
     /// The brush's radius, as a share of the photo's short side.
     public var radius: Double
-    /// The brush's edge: 0 hard, 1 fading out from the centre.
+    /// The brush's edge: 0 hard; higher, the healing fades into the skin further past the brush (all it covers is
+    /// healed whatever the edge, so none of a spot painted over is left).
     public var softness: Double
     /// Where it heals from, picked by hand: the shift from the stroke to its source (normalized, as `points`). nil:
     /// the brush finds clean skin nearby itself (content-aware).
@@ -39,10 +41,10 @@ public enum Healing {
 
     /// `image` with the strokes healed, in order (each from what the ones before left). `key` names the picture (its
     /// file and size) for the preview, which draws the same strokes again for every dial moved: the strokes healed
-    /// before are kept, and only new ones are healed.
-    public static func apply(_ strokes: [HealStroke], to image: CIImage, key: String? = nil) -> CIImage {
+    /// before are kept, and only new ones are healed. `amount`: how much of the healing shows (1 all, 0 none).
+    public static func apply(_ strokes: [HealStroke], to image: CIImage, key: String? = nil, amount: Double = 1) -> CIImage {
         let ext = image.extent
-        guard !strokes.isEmpty, ext.width >= 8, ext.height >= 8, ext.width.isFinite, ext.height.isFinite else { return image }
+        guard !strokes.isEmpty, amount > 0, ext.width >= 8, ext.height >= 8, ext.width.isFinite, ext.height.isFinite else { return image }
         var patches: [CIImage?] = []
         if let key, let hit = cacheLock.withLock({ cache[key] }) {
             // The strokes they have in common, from the first.
@@ -62,17 +64,26 @@ public enum Healing {
                 while cacheOrder.count > 6 { cache[cacheOrder.removeFirst()] = nil }
             }
         }
-        return out.cropped(to: ext)
+        out = out.cropped(to: ext)
+        guard amount < 1 else { return out }
+        // Mixed in the photo's own values (as Photoshop's opacity), not in linear light, where half would look more.
+        return image.applyingFilter("CILinearToSRGBToneCurve")
+            .applyingFilter("CIDissolveTransition", parameters: [kCIInputTargetImageKey: out.applyingFilter("CILinearToSRGBToneCurve"), kCIInputTimeKey: amount])
+            .applyingFilter("CISRGBToneCurveToLinear").cropped(to: ext)
     }
 
     /// How far from a piece of a stroke its source is looked for.
     static func reach(_ r: Double) -> Double { max(8, r * 4.5) }
 
+    /// How far past the brush its soft edge fades the healing out, as a share of its radius.
+    public static func fade(_ softness: Double) -> Double { 1 + 0.5 * min(1, max(0, softness)) }
+
     /// One stroke healed in `image`: the pixels it changes (opaque where it covers, clear elsewhere), or nil.
     static func heal(_ s: HealStroke, in image: CIImage) -> CIImage? {
         let ext = image.extent
         let W = Int(ext.width.rounded(.down)), H = Int(ext.height.rounded(.down))
-        let r = max(1, s.radius * Double(min(W, H)))
+        // What the brush covers is healed fully; its edge fades out beyond, to `r`.
+        let core = max(1, s.radius * Double(min(W, H))), r = core * fade(s.softness), soft = 1 - core / r
         let pts = s.points.map { (Double($0.x) * Double(W), Double($0.y) * Double(H)) }
         guard !pts.isEmpty else { return nil }
         let shift = s.source.map { (Int(($0.dx * Double(W)).rounded()), Int(($0.dy * Double(H)).rounded())) }
@@ -88,15 +99,18 @@ public enum Healing {
         px.withUnsafeMutableBytes { EditPipeline.context.render(image, toBitmap: $0.baseAddress!, rowBytes: w * 16, bounds: bounds, format: .RGBAf, colorSpace: space) }
         let local = pts.map { ($0.0 - Double(rx), $0.1 - Double(ry)) }
         var all = [Float](repeating: 0, count: w * h)
-        guard MaskBrush.cover(local, radius: r, softness: s.softness, width: w, height: h, into: &all) != nil else { return nil }
+        guard MaskBrush.cover(local, radius: r, softness: soft, width: w, height: h, into: &all) != nil else { return nil }
 
         // A long stroke (a line) is healed a piece at a time, each from a source of its own; a source picked by hand
-        // serves the whole stroke.
-        for piece in shift == nil ? pieces(local, length: r * 5) : [local] {
+        // serves the whole stroke. What the pieces after it will heal (the rest of the line) is neither copied from
+        // nor matched to.
+        var pending = all.map { $0 > 0 }
+        for piece in shift == nil ? pieces(local, length: core * 5) : [local] {
             var m = [Float](repeating: 0, count: w * h)
-            guard let box = MaskBrush.cover(piece, radius: r, softness: s.softness, width: w, height: h, into: &m),
-                  let from = shift ?? findSource(px, w: w, h: h, mask: m, box: box, r: r) else { continue }
-            blend(&px, w: w, h: h, mask: m, box: box, shift: from)
+            guard let box = MaskBrush.cover(piece, radius: r, softness: soft, width: w, height: h, into: &m) else { continue }
+            for i in 0..<(w * h) where m[i] > 0 { pending[i] = false }
+            guard let from = shift ?? findSource(px, w: w, h: h, mask: m, box: box, r: r, pending: pending) else { continue }
+            blend(&px, w: w, h: h, mask: m, box: box, shift: from, pending: pending)
         }
         // Only what the stroke covers goes back.
         for i in 0..<(w * h) { if all[i] > 0 { px[i].w = 1 } else { px[i] = .zero } }
@@ -138,8 +152,10 @@ public enum Healing {
 
     /// The shift (in pixels) to the best source for what `m` covers within `box`, looked for on a grid where the
     /// brush is `searchRadius` cells: its rim matching the stroke's (texture and tone), its inside clean (no spots
-    /// or lines), and near. nil when none fits in the picture.
-    static func findSource(_ px: [SIMD4<Float>], w: Int, h: Int, mask m: [Float], box: (Int, Int, Int, Int), r: Double) -> (Int, Int)? {
+    /// or lines), and near. `pending`: what is still to be healed (the rest of a line), left out of the rim and
+    /// never copied from. nil when none fits in the picture.
+    static func findSource(_ px: [SIMD4<Float>], w: Int, h: Int, mask m: [Float], box: (Int, Int, Int, Int), r: Double,
+                           pending: [Bool]? = nil) -> (Int, Int)? {
         // Pixels per cell (below one for a small brush: cells then repeat pixels).
         let f = r / searchRadius, rc = searchRadius
         let ring = max(2, Int((rc * 0.35).rounded()))
@@ -153,21 +169,23 @@ public enum Healing {
             let a = min(limit - 1, origin + Int(Double(c) * f)), b = min(limit, origin + Int(Double(c + 1) * f))
             return a..<max(a + 1, b)
         }
-        // Each cell's colour, and whether it is in the stroke.
-        var col = [SIMD4<Float>](repeating: .zero, count: n), hole = [Bool](repeating: false, count: n)
+        // Each cell's colour, whether it is in the stroke, and whether it is still to be healed.
+        var col = [SIMD4<Float>](repeating: .zero, count: n), hole = [Bool](repeating: false, count: n), later = [Bool](repeating: false, count: n)
         for cy in 0..<ch {
             let ys = span(cy, y0, h)
             for cx in 0..<cw {
                 let xs = span(cx, x0, w)
-                var sum = SIMD4<Float>.zero, inside = false
+                var sum = SIMD4<Float>.zero, inside = false, ahead = false
                 for y in ys {
                     for x in xs {
                         sum += px[y * w + x]
                         if m[y * w + x] > 0 { inside = true }
+                        if pending?[y * w + x] == true { ahead = true }
                     }
                 }
                 col[cy * cw + cx] = sum / Float(ys.count * xs.count)
                 hole[cy * cw + cx] = inside
+                later[cy * cw + cx] = ahead && !inside
             }
         }
         // The rim: cells just outside the stroke.
@@ -177,7 +195,7 @@ public enum Healing {
                 for dy in -ring...ring {
                     for dx in -ring...ring where dx * dx + dy * dy <= ring * ring {
                         let x = cx + dx, y = cy + dy
-                        if x >= 0, x < cw, y >= 0, y < ch, !hole[y * cw + x] { rim[y * cw + x] = true }
+                        if x >= 0, x < cw, y >= 0, y < ch, !hole[y * cw + x], !later[y * cw + x] { rim[y * cw + x] = true }
                     }
                 }
             }
@@ -217,14 +235,14 @@ public enum Healing {
             var sum = SIMD4<Float>.zero, sq: Float = 0, e: Float = 0
             for p in rimCells {
                 let q = p + o
-                if hole[q] { return nil }
+                if hole[q] || later[q] { return nil }
                 let d = col[q] - col[p]
                 sum += d
                 sq += (d * d).sum()
             }
             for p in holeCells {
                 let q = p + o
-                if hole[q] { return nil }
+                if hole[q] || later[q] { return nil }
                 e += detail[q]
             }
             let nr = Float(rimCells.count), mean = sum / nr
@@ -252,15 +270,22 @@ public enum Healing {
     // MARK: - The blend
 
     /// What `m` covers (within `box`) filled from `shift` away: the source's pixels, corrected by the membrane between
-    /// the differences at the rim, then faded into the photo by the brush's edge.
-    static func blend(_ px: inout [SIMD4<Float>], w: Int, h: Int, mask m: [Float], box: (Int, Int, Int, Int), shift: (Int, Int)) {
+    /// the differences at the rim, then faded into the photo by the brush's edge. `pending` (what is still to be
+    /// healed) is no rim: the membrane runs on past it.
+    static func blend(_ px: inout [SIMD4<Float>], w: Int, h: Int, mask m: [Float], box: (Int, Int, Int, Int), shift: (Int, Int),
+                      pending: [Bool]? = nil) {
         let x0 = max(0, box.0 - 1), x1 = min(w - 1, box.1 + 1), y0 = max(0, box.2 - 1), y1 = min(h - 1, box.3 + 1)
         let ww = x1 - x0 + 1, wh = y1 - y0 + 1
         func source(_ x: Int, _ y: Int) -> SIMD4<Float> { px[min(h - 1, max(0, y + shift.1)) * w + min(w - 1, max(0, x + shift.0))] }
-        // 2 inside the stroke, 1 its rim (where the difference is known), 0 neither.
+        // 2 inside the stroke, 1 its rim (where the difference is known), 3 still to be healed, 0 none of these.
         var state = [UInt8](repeating: 0, count: ww * wh)
         var diff = [SIMD4<Float>](repeating: .zero, count: ww * wh)
-        for y in y0...y1 { for x in x0...x1 where m[y * w + x] > 0 { state[(y - y0) * ww + x - x0] = 2 } }
+        var rim: [Int] = []
+        for y in y0...y1 {
+            for x in x0...x1 {
+                if m[y * w + x] > 0 { state[(y - y0) * ww + x - x0] = 2 } else if pending?[y * w + x] == true { state[(y - y0) * ww + x - x0] = 3 }
+            }
+        }
         for y in 0..<wh {
             for x in 0..<ww where state[y * ww + x] == 2 {
                 for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] where nx >= 0 && nx < ww && ny >= 0 && ny < wh {
@@ -268,10 +293,12 @@ public enum Healing {
                     if state[j] == 0 {
                         state[j] = 1
                         diff[j] = px[(ny + y0) * w + nx + x0] - source(nx + x0, ny + y0)
+                        rim.append(j)
                     }
                 }
             }
         }
+        steady(&diff, at: rim)
         membrane(&diff, state, w: ww, h: wh)
         var healed: [(Int, SIMD4<Float>)] = []
         for y in 0..<wh {
@@ -285,8 +312,26 @@ public enum Healing {
         for (i, v) in healed { px[i] = v }
     }
 
+    /// The differences at the rim, those far off the rest (where a spot reaches past the brush: a mole's dark edge, a
+    /// line running on) brought back in line, so the fill doesn't take the spot's tone in from there.
+    static func steady(_ diff: inout [SIMD4<Float>], at rim: [Int]) {
+        guard rim.count >= 8 else { return }
+        var lo = SIMD4<Float>.zero, hi = SIMD4<Float>.zero
+        for c in 0..<3 {
+            let v = rim.map { diff[$0][c] }.sorted(), mid = v[v.count / 2]
+            let spread = rim.map { abs(diff[$0][c] - mid) }.sorted()[v.count / 2]
+            // Three standard deviations of the rim's own (median absolute deviation × 1.48), and never under a level
+            // of 8-bit grain.
+            let k = max(4.5 * spread, 3 / 255)
+            lo[c] = mid - k
+            hi[c] = mid + k
+        }
+        for i in rim { diff[i] = SIMD4(simd_clamp(diff[i].x, lo.x, hi.x), simd_clamp(diff[i].y, lo.y, hi.y), simd_clamp(diff[i].z, lo.z, hi.z), diff[i].w) }
+    }
+
     /// The values inside (`state` 2) set to the membrane stretched over the known ones (`state` 1): smooth, and meeting
-    /// them at the rim. A pull-push guess first, then over-relaxed toward Laplace's equation.
+    /// them at the rim; past the ones left out (`state` 3) it runs on level. A pull-push guess first, then
+    /// over-relaxed toward Laplace's equation.
     static func membrane(_ v: inout [SIMD4<Float>], _ state: [UInt8], w: Int, h: Int) {
         // Pull: averages of the known values, halving the size until one cell is left.
         var levels: [(v: [SIMD4<Float>], wt: [Float], w: Int, h: Int)] = []
@@ -327,8 +372,9 @@ public enum Healing {
             v[i] = levels[0].v[i]
             let x = i % w, y = i / w
             inside.append(Int32(i))
-            // Neighbours off the picture's edge are left out (-1).
-            around.append(SIMD4(x > 0 ? Int32(i - 1) : -1, x < w - 1 ? Int32(i + 1) : -1, y > 0 ? Int32(i - w) : -1, y < h - 1 ? Int32(i + w) : -1))
+            // Neighbours off the picture's edge, or left out, are left out (-1).
+            func at(_ ok: Bool, _ j: Int) -> Int32 { ok && state[j] != 3 ? Int32(j) : -1 }
+            around.append(SIMD4(at(x > 0, i - 1), at(x < w - 1, i + 1), at(y > 0, i - w), at(y < h - 1, i + w)))
         }
         guard !inside.isEmpty else { return }
         let span = Double(max(w, h))

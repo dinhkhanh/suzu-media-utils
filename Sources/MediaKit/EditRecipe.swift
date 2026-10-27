@@ -31,6 +31,8 @@ public struct EditRecipe: Codable, Sendable, Equatable, Hashable {
     public var brush: [Retouch.Part: [MaskStroke]]?
     /// Strokes of the healing brush on one photo (see HealStroke), filled in as `brush` is.
     public var heal: [HealStroke]?
+    /// How much of the healing shows, 0…1 (nil: all of it), as `heal`.
+    public var healAmount: Double?
     /// Long side in pixels after cropping; nil keeps the size.
     public var maxLongSide: Int?
     public var jpegQuality = 0.9
@@ -77,8 +79,9 @@ public struct EditRecipe: Codable, Sendable, Equatable, Hashable {
 public struct Retouch: Codable, Sendable, Equatable, Hashable {
     public enum Part: String, Codable, CodingKeyRepresentable, Sendable, CaseIterable, Identifiable, Hashable {
         case faceSkin, bodySkin, lips, clothes
-        /// Where the skin retouch (smooth, brighten, whiten) goes: face skin, and body skin with `bodyToo`. It has
-        /// no dials of its own, only its mask (shown and painted like the parts').
+        /// Where the skin retouch (smooth, brighten, whiten) goes: the face skin mask, and the body skin's with
+        /// `bodyToo`, the same masks (shaped by their dials, painted by hand) as theirs. It has no dials of its own;
+        /// strokes painted on it before it shared theirs are kept on it.
         case skin
         public var id: String { rawValue }
         public var label: String {

@@ -787,11 +787,16 @@ struct RetouchControls: View {
                     }
                 }
                 .id(placements)
+                if strokes > 0 {
+                    PercentSlider(label: "Amount", value: Binding(get: { CropPlacements.shared.healAmount(for: photo) },
+                                                                  set: { CropPlacements.shared.set(healAmount: $0, for: photo) }), range: 0...1)
+                        .help("How much of the healing shows on this photo: lower lets some of what was healed back through, for a natural look")
+                }
                 if overlay.healing {
                     BrushSizeSlider(value: $overlay.healSize)
                         .help("The brush's width in the photo's own pixels ([ and ] on the preview): a little bigger than the spot")
                     PercentSlider(label: "Brush edge", value: $overlay.healSoftness, range: 0...1)
-                        .help("0%: a hard edge; higher, the healing fades out further from its middle")
+                        .help("All the brush covers is healed; 0%: a hard edge, higher: the healing fades into the skin further past it")
                     if let source = overlay.healSource, source.photo == photo.path {
                         HStack {
                             Text(source.shift == nil ? "Heals from the spot picked." : "Heals from the spot picked, kept alongside the brush.")
@@ -840,6 +845,7 @@ struct RetouchControls: View {
             AdjustSlider("Whiten skin", value: r.whiten, range: 0...1, help: "Fairer skin: less yellow, a touch rosier and lighter")
             Toggle("Body skin too", isOn: r.bodyToo)
                 .help("Smooth, brighten and whiten arms, legs and shoulders as well as faces")
+                .onChange(of: r.wrappedValue.bodyToo, initial: true) { if !r.wrappedValue.bodyToo { overlay.skinPaint = .faceSkin } }
             maskTools(.skin)
             Divider().padding(.vertical, 2)
             Text("Masks").font(.callout.weight(.medium))
@@ -865,15 +871,20 @@ struct RetouchControls: View {
 
     /// A mask's tools: shown tinted red on the preview, and painted by hand on the shown photo (added to where the
     /// app missed some of it, erased where it took in too much). Each mask keeps its own strokes, the photo's own.
+    /// The skin retouch's mask is face skin's and body skin's: painting it paints the one picked, and the strokes
+    /// counted, undone and cleared are that one's (with any painted on the skin retouch's own before).
     func maskTools(_ part: Retouch.Part) -> some View {
+        let target = overlay.painted(part)
         let name = part == .skin ? "skin retouch" : part.label.lowercased()
-        let strokes = photo.map { CropPlacements.shared.strokes(part, for: $0).count } ?? 0
+        let own = photo.map { CropPlacements.shared.strokes(target, for: $0).count } ?? 0
+        let earlier = part == .skin ? photo.map { CropPlacements.shared.strokes(.skin, for: $0).count } ?? 0 : 0
+        let strokes = own + earlier
         let painting = overlay.brushing && overlay.part == part
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Toggle("Show mask", isOn: Binding(get: { overlay.part == part }, set: { overlay.part = $0 ? part : nil }))
                     .toggleStyle(.checkbox)
-                    .help("Tint the \(name) mask red on the preview, to see where \(part == .skin ? "the skin retouch goes" : "the dials change the photo")")
+                    .help("Tint the \(name) mask red on the preview, to see where \(part == .skin ? "the skin retouch goes (the face skin mask, and body skin's with Body skin too)" : part == .faceSkin || part == .bodySkin ? "the dials and the skin retouch change the photo" : "the dials change the photo")")
                 if photo != nil {
                     Toggle("Paint", isOn: Binding(get: { painting }, set: { on in
                         if on { overlay.part = part }
@@ -884,16 +895,31 @@ struct RetouchControls: View {
                 }
                 Spacer()
                 if let photo, strokes > 0 {
-                    Text("\(strokes) stroke\(strokes == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary)
-                    Button { CropPlacements.shared.removeLastStroke(part, for: photo) } label: { Image(systemName: "arrow.uturn.backward") }
+                    Text("\(strokes) stroke\(strokes == 1 ? "" : "s")\(part == .skin ? " on \(target.label.lowercased())" : "")").font(.caption).foregroundStyle(.secondary)
+                    Button { CropPlacements.shared.removeLastStroke(own > 0 ? target : .skin, for: photo) } label: { Image(systemName: "arrow.uturn.backward") }
                         .controlSize(.small)
-                        .help("Take away the last stroke painted on the \(name) mask of this photo (⌘Z too)")
-                    Button("Clear") { CropPlacements.shared.clearStrokes(part, for: photo) }.controlSize(.small)
-                        .help("The \(name) mask of this photo as the app finds it, without the strokes painted on it")
+                        .help("Take away the last stroke painted on the \(target.label.lowercased()) mask of this photo (⌘Z too)")
+                    Button("Clear") {
+                        CropPlacements.shared.clearStrokes(target, for: photo)
+                        if part == .skin { CropPlacements.shared.clearStrokes(.skin, for: photo) }
+                    }
+                    .controlSize(.small)
+                    .help("The \(target.label.lowercased()) mask of this photo as the app finds it, without the strokes painted on it")
                 }
             }
             .id(placements)
             if painting {
+                if part == .skin && r.wrappedValue.bodyToo {
+                    HStack {
+                        Text("Paint on").frame(width: 84, alignment: .leading)
+                        Picker("", selection: $overlay.skinPaint) {
+                            Text(Retouch.Part.faceSkin.label).tag(Retouch.Part.faceSkin)
+                            Text(Retouch.Part.bodySkin.label).tag(Retouch.Part.bodySkin)
+                        }
+                        .pickerStyle(.segmented).labelsHidden()
+                    }
+                    .help("The skin retouch goes where the face skin and body skin masks are: the strokes go on the one picked, as the Masks section's")
+                }
                 HStack {
                     Text("Brush").frame(width: 84, alignment: .leading)
                     Picker("", selection: $overlay.erase) {
@@ -906,7 +932,9 @@ struct RetouchControls: View {
                     .help("The brush's width in the photo's own pixels ([ and ] on the preview)")
                 PercentSlider(label: "Brush edge", value: $overlay.softness, range: 0...1)
                     .help("0%: a hard edge; higher, the stroke fades out further from its middle")
-                Text("Strokes are this photo's own; the other photos keep their masks as found.")
+                Text(part == .skin || part == .faceSkin || part == .bodySkin
+                     ? "Strokes are this photo's own; the other photos keep their masks as found. Face skin and body skin are the skin retouch's masks too: painting one here changes both."
+                     : "Strokes are this photo's own; the other photos keep their masks as found.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }

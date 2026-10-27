@@ -139,9 +139,12 @@ public final class BodyParts: @unchecked Sendable {
     static let context = CIContext(options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!, .cacheIntermediates: false])
 
     /// The parts in this photo, from the cache when the same picture was looked at before (a preview redrawn with
-    /// other dials). Nil when nobody is found.
-    public static func find(in image: CIImage) -> BodyParts? {
-        guard let key = fingerprint(image) else { return nil }
+    /// other dials). Nil when nobody is found. `key`: which picture this is, when the caller knows (its file and how
+    /// it is turned), so the same one at another size (the preview zoomed in, from a bigger decode) is not looked at
+    /// again: the parts are kept in the picture's own proportions, whatever its size, and pixels alone can't tell
+    /// it apart from the next shot of a burst at one size and from itself at another.
+    public static func find(in image: CIImage, key given: String? = nil) -> BodyParts? {
+        guard let key = given.map({ "file|\($0)" }) ?? fingerprint(image) else { return nil }
         lock.lock()
         if let hit = cache[key] { lock.unlock(); return hit }
         lock.unlock()
