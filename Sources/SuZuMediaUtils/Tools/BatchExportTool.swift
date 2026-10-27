@@ -141,7 +141,7 @@ struct BatchExportTool: View {
         // ⌘Z / ⇧⌘Z (Edit menu) step back through the sliders, crops and looks.
         .onChange(of: undoManager, initial: true) { history.undoManager = undoManager }
         .onChange(of: items, initial: true) { history.urls = items.map(\.url) }
-        .onAppear { history.setRecipe = { recipe = $0 } }
+        .onAppear { history.setRecipe = { recipe = $0 }; history.getRecipe = { recipe } }
         .onChange(of: recipe) { old, new in history.recipeChanged(from: old, to: new) }
         .onReceive(NotificationCenter.default.publisher(for: CropPlacements.changed)) { _ in history.editsChanged(recipe: recipe) }
         // Only photos still in the list can be left out.
@@ -479,10 +479,13 @@ final class EditHistory: ObservableObject {
     weak var undoManager: UndoManager?
     var urls: [URL] = [] { didSet { lastEdits = currentEdits() } }
     var setRecipe: ((EditRecipe) -> Void)?
+    var getRecipe: (() -> EditRecipe)?
     private var lastEdits: [String: CropPlacements.Edit?] = [:]
     private var lastTime = Date.distantPast
     private var lastKind = ""
-    /// The recipe an undo is putting back: its own change is not a new step.
+    /// The recipe an undo is putting back: its own change is not a new step. Only set when the recipe changes (a
+    /// stroke's undo leaves it as it is, and a flag never cleared kept every stroke after it out of the history, so
+    /// the next ⌘Z took them all back at once).
     private var restoring: EditRecipe?
 
     func currentEdits() -> [String: CropPlacements.Edit?] {
@@ -501,7 +504,6 @@ final class EditHistory: ObservableObject {
         guard now != lastEdits else { return }
         let before = lastEdits
         lastEdits = now
-        if restoring != nil { return }
         // A stroke painted on a mask or healed (or taken away) is a step of its own, however quickly the next one follows.
         let strokes = { (e: [String: CropPlacements.Edit?]) in
             e.values.reduce(0) { $0 + ($1?.masks?.values.reduce(0) { $0 + $1.count } ?? 0) + ($1?.heal?.count ?? 0) }
@@ -520,7 +522,8 @@ final class EditHistory: ObservableObject {
     private func register(_ before: State) {
         guard let um = undoManager else { return }
         um.registerUndo(withTarget: self) { h in
-            let now = State(recipe: h.currentRecipe ?? before.recipe, edits: h.currentEdits())
+            // What redo puts back: the recipe as it is now (the one from before the change put nothing back).
+            let now = State(recipe: h.getRecipe?() ?? before.recipe, edits: h.currentEdits())
             h.apply(before)
             h.register(now)
         }
@@ -528,12 +531,11 @@ final class EditHistory: ObservableObject {
         lastKind = ""
     }
 
-    private var currentRecipe: EditRecipe?
-
     private func apply(_ s: State) {
-        restoring = s.recipe
-        currentRecipe = s.recipe
-        setRecipe?(s.recipe)
+        if s.recipe != getRecipe?() {
+            restoring = s.recipe
+            setRecipe?(s.recipe)
+        }
         lastEdits = s.edits
         CropPlacements.shared.restore(s.edits)
         lastTime = .distantPast
