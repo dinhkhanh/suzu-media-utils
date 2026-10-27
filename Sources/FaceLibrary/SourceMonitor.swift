@@ -20,6 +20,10 @@ public final class SourceMonitor: @unchecked Sendable {
     /// True while a scan is listing or registering files; `foundCount` is the files listed so far.
     public private(set) var isScanning = false
     public private(set) var foundCount = 0
+    /// True from a Rescan's click until it is done (waiting for a look already under way included), so the folder
+    /// shows it at once; `retriedCount` is the unreadable files the last one put back in the queue.
+    public private(set) var isRescanning = false
+    public private(set) var retriedCount = 0
     /// Set by `stop()`; a running scan stops at the next folder or batch.
     private(set) var cancelled = false
 
@@ -113,32 +117,37 @@ public final class SourceMonitor: @unchecked Sendable {
         queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.scan() }
     }
 
-    /// Rescan: every folder listed afresh, and another go at the files that could not be read (most often read
-    /// while the share was dropping; unchanged since, a scan alone left them unreadable for good).
+    /// Rescan: another go at the files that could not be read (most often read while the share was dropping;
+    /// unchanged since, a scan alone left them unreadable for good), then every folder listed afresh. The files go
+    /// back in the queue first, at once: a fresh listing of a big share takes minutes.
     public func rescan() {
         guard !cancelled else { return }
+        isRescanning = true
         queue.async { [weak self] in
             guard let self else { return }
+            retriedCount = retryFailed()
             dirCache = [:]
             scan()
-            retryFailed()
+            isRescanning = false
         }
     }
 
-    /// Files marked unreadable that are there to read go back in the queue. Runs on `queue`.
-    func retryFailed() {
-        guard isOnline, !cancelled else { return }
-        let rows = (try? store.db.read { db in
-            try Row.fetchAll(db, sql: "SELECT id, path FROM media WHERE sourceId = ? AND status = 'failed'", arguments: [sourceId])
+    /// Files marked unreadable go back in the queue while the folder is there. Returns how many. Runs on `queue`.
+    /// Not looked for one by one (minutes on a slow share): one deleted meanwhile is dropped by the next look.
+    @discardableResult
+    func retryFailed() -> Int {
+        guard !cancelled, FileManager.default.fileExists(atPath: root.path) else { return 0 }
+        let ids = (try? store.db.read { db in
+            try Int64.fetchAll(db, sql: "SELECT id FROM media WHERE sourceId = ? AND status = 'failed'", arguments: [sourceId])
         }) ?? []
-        let ids = rows.filter { FileManager.default.fileExists(atPath: $0["path"]) }.map { $0["id"] as Int64 }
-        guard !ids.isEmpty else { return }
+        guard !ids.isEmpty else { return 0 }
         for chunk in stride(from: 0, to: ids.count, by: Self.batchSize).map({ ids[$0..<min($0 + Self.batchSize, ids.count)] }) {
             try? store.db.write { db in
                 try db.execute(sql: "UPDATE media SET status = 'pending', error = NULL WHERE status = 'failed' AND id IN (\(chunk.map(String.init).joined(separator: ",")))")
             }
         }
         onChange(true, [])
+        return ids.count
     }
 
     func startFSEvents() {

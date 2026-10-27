@@ -226,8 +226,13 @@ final class LibraryTests: XCTestCase {
         m.scan()
         XCTAssertTrue(try media().allSatisfy { $0.status == .failed }, "a plain look leaves them")
 
+        m.queue.suspend()  // a look already under way: the Rescan waits for it
         m.rescan()
+        XCTAssertTrue(m.isRescanning, "shown from the click, not only once it starts")
+        m.queue.resume()
         m.queue.sync {}
+        XCTAssertFalse(m.isRescanning)
+        XCTAssertEqual(m.retriedCount, 2)
         XCTAssertTrue(try media().allSatisfy { $0.status == .pending && $0.error == nil })
         XCTAssertEqual(told, 1, "processing is told")
 

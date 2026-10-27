@@ -52,6 +52,9 @@ struct SourceSummary: Identifiable, Hashable {
     var network = false
     var scanning = false
     var found = 0
+    /// A Rescan asked for and not done yet; `retried`: the unreadable files the last one queued again.
+    var rescanning = false
+    var retried = 0
     var name: String { (path as NSString).lastPathComponent }
 }
 
@@ -350,13 +353,19 @@ final class FaceGroupingModel: ObservableObject {
             var s = s
             if let m = service?.monitor(s.id) {
                 s.online = m.isOnline; s.network = m.isNetwork; s.scanning = m.isScanning; s.found = m.foundCount
+                s.rescanning = m.isRescanning; s.retried = m.retriedCount
             }
             return s
         }
         if updated != sources {
             for s in updated {
                 guard let old = sources.first(where: { $0.id == s.id }) else { continue }
-                if old.scanning && !s.scanning { log("Finished scanning \(s.name) · \(s.found.formatted()) files found", icon: "folder") }
+                if old.rescanning && !s.rescanning {
+                    log("Rescanned \(s.name) · \(s.found.formatted()) files"
+                        + (s.retried > 0 ? " · \(s.retried.formatted()) that couldn't be read are read again" : ""), icon: "arrow.clockwise")
+                } else if old.scanning && !s.scanning && !s.rescanning {
+                    log("Finished scanning \(s.name) · \(s.found.formatted()) files found", icon: "folder")
+                }
                 if old.online && !s.online { log("\(s.name) went offline", icon: "externaldrive.badge.xmark") }
                 if !old.online && s.online { log("\(s.name) is back online", icon: "externaldrive") }
             }
@@ -755,7 +764,10 @@ final class FaceGroupingModel: ObservableObject {
             }
         }
     }
-    func rescan(_ id: Int64) { service?.rescan(id) }
+    func rescan(_ id: Int64) {
+        service?.rescan(id)
+        refresh()  // shows Rescanning at once, not on the next tick
+    }
 
     /// The folder was renamed or moved in Finder: point the library at it again, keeping every face and name.
     func locateSource(_ id: Int64) {

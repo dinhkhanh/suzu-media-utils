@@ -234,6 +234,7 @@ struct SourceRow: View {
 
     var status: String {
         if !source.online { return "Offline (renamed? right-click → Locate Folder…)" }
+        if source.rescanning { return source.scanning ? "Rescanning… \(source.found.formatted()) of \(source.files.formatted()) files" : "Rescanning…" }
         if source.scanning && source.found > source.files { return "Scanning… \(source.found.formatted()) files found" }
         if source.pending > 0 { return "Processing \(source.pending.formatted()) of \(source.files.formatted())" }
         return "\(source.files.formatted()) files"
@@ -304,6 +305,9 @@ struct FaceGroupingStatusBody: View {
     /// Title, detail (right-aligned), and a progress fraction (nil: busy without a known end; -1: no bar).
     var state: (title: String, detail: String, progress: Double?) {
         if model.service == nil && model.startupError == nil { return ("Opening library…", "", nil) }
+        if let s = model.sources.first(where: \.rescanning) {
+            return ("Rescanning \(s.name)…", s.scanning ? "\(s.found.formatted()) of \(s.files.formatted())" : "", nil)
+        }
         if let scanning = model.sources.first(where: { $0.scanning && $0.found > $0.files }) {
             return ("Scanning \(scanning.name)…", "\(scanning.found.formatted()) found", nil)
         }
@@ -426,7 +430,11 @@ struct SourceView: View {
                 if s.failed > 0 { LabeledContent("Could not read", value: "\(s.failed)") }
                 HStack {
                     Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: s.path) }
-                    Button("Rescan") { model.rescan(s.id) }
+                    Button("Rescan") { model.rescan(s.id) }.disabled(s.rescanning || !s.online)
+                    if s.rescanning {
+                        ProgressView().controlSize(.small)
+                        Text(s.scanning ? "\(s.found.formatted()) of \(s.files.formatted()) files" : "Starting…").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             }
             .formStyle(.grouped)
