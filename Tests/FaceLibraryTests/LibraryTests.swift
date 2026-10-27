@@ -253,6 +253,16 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(try media().map(\.status), [.pending], "a file that is gone is not retried (the scan drops it)")
     }
 
+    /// Photos coming in go ahead of a backlog (thousands of unreadable files a Rescan put back): a card this Mac
+    /// copies first, then files that just turned up, then the rest.
+    func testFilesThatJustTurnedUpAreProcessedBeforeTheBacklog() {
+        let now = 1_000_000.0
+        XCTAssertEqual(Processor.priority(localWork: true, seenAt: now - 86_400, now: now), .veryHigh)
+        XCTAssertEqual(Processor.priority(localWork: false, seenAt: now - 5, now: now), .high)
+        XCTAssertEqual(Processor.priority(localWork: false, seenAt: now - Processor.freshFor - 1, now: now), .normal)
+        XCTAssertEqual(Processor.priority(localWork: false, seenAt: nil, now: now), .normal, "libraries from before seenAt")
+    }
+
     /// A folder that can't be read for a moment (the share dropping half-way through a look) is not an empty one:
     /// its files used to be dropped from the library with their faces, and read again from scratch once it was back.
     func testAFolderThatCantBeReadKeepsItsFilesAndFaces() throws {

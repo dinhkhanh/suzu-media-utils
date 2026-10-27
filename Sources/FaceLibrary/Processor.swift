@@ -80,15 +80,34 @@ public final class Processor: @unchecked Sendable {
     public func enqueuePending() {
         let rows = (try? store.db.read { db in
             try Row.fetchAll(db, sql: """
-                SELECT id, sourceId, localWork FROM media WHERE status = 'pending' AND duplicateOf IS NULL
+                SELECT id, sourceId, localWork, seenAt FROM media WHERE status = 'pending' AND duplicateOf IS NULL
                   AND sourceId NOT IN (\(SourceShare.editedIds)) ORDER BY path
                 """)
         }) ?? []
-        for r in rows where (r["localWork"] as Bool) || processesLocally?(r["sourceId"]) ?? true { enqueue(r["id"], first: r["localWork"]) }
+        let now = Date().timeIntervalSince1970
+        for r in rows where (r["localWork"] as Bool) || processesLocally?(r["sourceId"]) ?? true {
+            enqueue(r["id"], priority: Self.priority(localWork: r["localWork"], seenAt: r["seenAt"], now: now))
+        }
+    }
+
+    /// Files that turned up this recently go ahead of older ones waiting (a backlog from before a relaunch, files
+    /// that couldn't be read put back by a Rescan), so photos coming in during an event get their faces within
+    /// moments instead of after thousands of others.
+    public static let freshFor: Double = 600
+
+    /// A card's file this Mac just copied first; then files that just turned up; then the rest.
+    static func priority(localWork: Bool, seenAt: Double?, now: Double) -> Operation.QueuePriority {
+        if localWork { return .veryHigh }
+        guard let seenAt, now - seenAt < freshFor else { return .normal }
+        return .high
     }
 
     /// `first`: ahead of everything waiting (a file just copied off a card, while the card is still in).
     public func enqueue(_ mediaId: Int64, first: Bool = false) {
+        enqueue(mediaId, priority: first ? .veryHigh : .high)
+    }
+
+    func enqueue(_ mediaId: Int64, priority: Operation.QueuePriority) {
         let isNew = lock.withLock { queued.insert(mediaId).inserted }
         guard isNew else { return }
         let op = BlockOperation { [self] in
@@ -98,8 +117,8 @@ public final class Processor: @unchecked Sendable {
                 if worked { processedCount += 1 }
             }
         }
-        // New files always go before background extras (upgrades, burst fingerprints).
-        op.queuePriority = first ? .veryHigh : .high
+        // Background extras (upgrades, burst fingerprints) have a queue of their own, behind all of these.
+        op.queuePriority = priority
         workQueue.addOperation(op)
     }
 
