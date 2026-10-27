@@ -52,10 +52,13 @@ public final class GroupingEngine: @unchecked Sendable {
     public let store: LibraryStore
     public var settings = GroupingSettings()
     let queue = DispatchQueue(label: "grouping")
-    /// Held by every job on `queue` while it runs, so a lookup from outside (Find by Photo) reads the people as they
-    /// stand after waiting for the job under way only, not for every job queued behind it: while a backlog was
-    /// processed, that was minutes.
+    /// Held by every job on `queue` while it touches the people (`people`, `means`, `exemplars`), so a lookup from
+    /// outside (Find by Photo) reads them as they stand after waiting for that step only, not for every job queued
+    /// behind it (minutes while a backlog was processed). Jobs let go of it while they read the database or
+    /// cluster (`unlocked`), which is most of a big clustering pass.
     let stateLock = NSLock()
+    /// Whether the job running on `queue` holds `stateLock` (only touched on `queue`).
+    var holdingState = false
     var people: [Int64: Person] = [:]
     var means = Rows()
     var exemplars = Rows()
@@ -214,7 +217,25 @@ public final class GroupingEngine: @unchecked Sendable {
 
     /// Runs `body` on the engine's queue, holding `stateLock`.
     func work(_ body: @escaping () -> Void) {
-        queue.async { [self] in stateLock.withLock(body) }
+        queue.async { [self] in locked(body) }
+    }
+
+    func locked(_ body: () -> Void) {
+        stateLock.withLock {
+            holdingState = true
+            defer { holdingState = false }
+            body()
+        }
+    }
+
+    /// Lets go of `stateLock` around `body`, which must leave the people alone (reading the database, clustering):
+    /// a lookup waiting meanwhile goes ahead. Nothing else changes them meanwhile: every other job waits its turn on
+    /// `queue`. Outside a job (tests) it just runs `body`.
+    func unlocked<T>(_ body: () throws -> T) rethrows -> T {
+        guard holdingState else { return try body() }
+        stateLock.unlock()
+        defer { stateLock.lock() }
+        return try body()
     }
 
     // MARK: - Units
@@ -327,7 +348,7 @@ public final class GroupingEngine: @unchecked Sendable {
         means = Rows()
         exemplars = Rows()
         touched = []
-        let rows = try loadRows("face.personId IS NOT NULL")
+        let rows = try unlocked { try loadRows("face.personId IS NOT NULL") }
         for (pid, rs) in Dictionary(grouping: rows, by: { $0.face.personId! }) {
             // Best faces first, so they are the exemplars when a person has more than fit.
             for u in units(rs).sorted(by: { $0.quality > $1.quality }) { add(u.vector, to: pid, quality: u.quality) }
@@ -337,9 +358,11 @@ public final class GroupingEngine: @unchecked Sendable {
     }
 
     func rebuild(personIds: Set<Int64>) throws {
-        for pid in personIds {
+        // Read first: a lookup never finds someone half rebuilt.
+        let rows = try unlocked { try personIds.map { ($0, try loadRows("face.personId = ?", [$0])) } }
+        for (pid, rs) in rows {
             remove(pid)
-            for u in units(try loadRows("face.personId = ?", [pid])).sorted(by: { $0.quality > $1.quality }) { add(u.vector, to: pid, quality: u.quality) }
+            for u in units(rs).sorted(by: { $0.quality > $1.quality }) { add(u.vector, to: pid, quality: u.quality) }
         }
         let list = personIds.map(String.init).joined(separator: ",")
         try addRemote("personId IN (\(list))")
@@ -389,7 +412,7 @@ public final class GroupingEngine: @unchecked Sendable {
 
     func assignPending(mediaIds: [Int64]) throws {
         for mid in mediaIds {
-            let rows = try loadRows("face.mediaId = ? AND face.assignment = 'none'", [mid])
+            let rows = try unlocked { try loadRows("face.mediaId = ? AND face.assignment = 'none'", [mid]) }
             var updates: [(Int64, [Int64])] = []
             for u in units(rows) {
                 if let (pid, margin) = bestPerson(for: u.vector, excluding: u.rejected, centroidBar: settings.assignThreshold,
@@ -547,7 +570,7 @@ public final class GroupingEngine: @unchecked Sendable {
         reclusterWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            stateLock.withLock { _ = try? self.recluster() }
+            locked { _ = try? self.recluster() }
         }
         reclusterWork = work
         let pending = (try? store.db.read { db in
@@ -580,33 +603,39 @@ public final class GroupingEngine: @unchecked Sendable {
 
     /// Returns true when the pool was capped and produced groups, so another pass may find more.
     func recluster(project: Int64) throws -> Bool {
-        let rows = try loadRows("""
-            face.assignment = 'none' AND face.embedding IS NOT NULL
-              AND COALESCE((SELECT projectId FROM source WHERE source.id = media.sourceId), 0) = ?
-            ORDER BY face.id DESC
-            """, [project])
-        // Newest first, so a fresh event is clustered even when older leftovers fill the pool.
-        let pool = Array(units(rows).prefix(settings.maxReclusterUnits))
-        var updates: [(Int64, [Int64])] = []
-        if pool.count >= 2 {
+        // Reading the faces and clustering them, seconds for a big pool, leave the people alone: lookups go ahead.
+        let (rows, pool, groups) = try unlocked { () throws -> ([FaceRow], [Unit], [[Int]]) in
+            let rows = try loadRows("""
+                face.assignment = 'none' AND face.embedding IS NOT NULL
+                  AND COALESCE((SELECT projectId FROM source WHERE source.id = media.sourceId), 0) = ?
+                ORDER BY face.id DESC
+                """, [project])
+            // Newest first, so a fresh event is clustered even when older leftovers fill the pool.
+            let pool = Array(units(rows).prefix(settings.maxReclusterUnits))
+            guard pool.count >= 2 else { return (rows, pool, []) }
             let sim = Clustering.similarityMatrix(pool.map(\.vector))
             let labels = Clustering.averageLinkage(similarity: sim, count: pool.count, threshold: settings.clusterThreshold)
+            var groups: [[Int]] = []
             for (_, members) in Dictionary(grouping: pool.indices, by: { labels[$0] }) {
-                let faceIds = members.flatMap { pool[$0].faceIds }
-                guard faceIds.count >= settings.minGroupFaces else { continue }
+                guard members.reduce(0, { $0 + pool[$1].faceIds.count }) >= settings.minGroupFaces else { continue }
                 if members.allSatisfy({ pool[$0].quality < settings.exemplarMinQuality }) {
                     // Nothing sharp in it: only when its faces agree well beyond the usual bar.
                     var sum: Float = 0, n = 0
                     for i in members { for j in members where j > i { sum += sim[i * pool.count + j]; n += 1 } }
                     guard n > 0, sum / Float(n) >= settings.lowQualityGroupThreshold else { continue }
                 }
-                var person = PersonRecord()
-                try store.db.write { db in try person.insert(db) }
-                for m in members.sorted(by: { pool[$0].quality > pool[$1].quality }) { add(pool[m].vector, to: person.id!, quality: pool[m].quality) }
-                updates.append((person.id!, faceIds))
+                groups.append(members)
             }
-            try write(updates)
+            return (rows, pool, groups)
         }
+        var updates: [(Int64, [Int64])] = []
+        for members in groups {
+            var person = PersonRecord()
+            try store.db.write { db in try person.insert(db) }
+            for m in members.sorted(by: { pool[$0].quality > pool[$1].quality }) { add(pool[m].vector, to: person.id!, quality: pool[m].quality) }
+            updates.append((person.id!, members.flatMap { pool[$0].faceIds }))
+        }
+        try write(updates)
         // Low-quality faces can join people created above.
         try write(lowQualityMatches(rows.filter { !qualifies($0) }))
         return pool.count == settings.maxReclusterUnits && !updates.isEmpty

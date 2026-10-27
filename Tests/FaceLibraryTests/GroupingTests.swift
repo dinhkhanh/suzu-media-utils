@@ -98,6 +98,30 @@ final class GroupingTests: XCTestCase {
         XCTAssertEqual(engine.nearestPeople(to: face(an), limit: 1).first?.personId, ids[0])
         XCTAssertLessThan(Date().timeIntervalSince(t), 1, "answered at once, not after the queued work")
         engine.waitUntilIdle()
+
+        // Nor for a clustering pass under way: it lets go of the people while it reads and clusters.
+        let clustering = DispatchSemaphore(value: 0)
+        engine.work { [engine] in engine!.unlocked { clustering.signal(); Thread.sleep(forTimeInterval: 3) } }
+        clustering.wait()
+        let t2 = Date()
+        XCTAssertEqual(engine.nearestPeople(to: face(an), limit: 1).first?.personId, ids[0])
+        XCTAssertLessThan(Date().timeIntervalSince(t2), 1, "answered while the pass clusters")
+        engine.waitUntilIdle()
+    }
+
+    /// A clustering pass split around its reads and clustering still forms the groups, and a person rebuilt after
+    /// an edit keeps their faces.
+    func testSplitPassesStillGroupAndRebuild() throws {
+        let an = direction()
+        for _ in 0..<6 { try photo(face(an), personId: nil) }
+        engine.start()
+        engine.waitUntilIdle()
+        let pid = try XCTUnwrap(try store.db.read { db in try Int64.fetchOne(db, sql: "SELECT DISTINCT personId FROM face WHERE personId IS NOT NULL") })
+        XCTAssertEqual(try store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM face WHERE personId = ?", arguments: [pid]) }, 6)
+        engine.peopleChanged([pid])
+        engine.waitUntilIdle()
+        XCTAssertEqual(engine.nearestPeople(to: face(an), limit: 1).first?.personId, pid)
+        XCTAssertTrue(engine.nearestPeople(to: face(an), limit: 1).first?.likely ?? false)
     }
 
     /// A face from outside finds every file it is in: grouped with its person or not, a video once (at its best
