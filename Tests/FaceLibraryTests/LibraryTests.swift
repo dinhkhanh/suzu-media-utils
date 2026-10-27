@@ -488,6 +488,86 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(exporter.run(again).done, 0)
     }
 
+    /// Photos and videos in two folders inside the person's folder, or each in a folder of its own; a kind without
+    /// a folder is left out.
+    func testPhotosAndVideosGoWhereTheyAreSent() throws {
+        try makeFile("a.jpg", seed: 1)
+        try makeFile("b.mp4", seed: 2)
+        monitor().scan()
+        let an = try newPerson("An")
+        for m in try media() { _ = try addFace(mediaId: m.id!, personId: an) }
+        let exporter = Exporter(store: store)
+        func targets(_ kinds: Exporter.KindFolders, base: URL? = nil) throws -> [String] {
+            var o = Exporter.Options(); o.kinds = kinds
+            return try exporter.plan(personId: an, name: "An", base: base, options: o).items.map(\.to.path).sorted()
+        }
+        XCTAssertEqual(try targets(.subfolders(photos: "Photos", videos: "Videos")),
+                       [root.appendingPathComponent("An/Photos/a.jpg").path, root.appendingPathComponent("An/Videos/b.mp4").path])
+        XCTAssertEqual(try targets(.subfolders(photos: "Photos", videos: "")), [root.appendingPathComponent("An/Photos/a.jpg").path], "videos left out")
+        let p = tmp.appendingPathComponent("P"), v = tmp.appendingPathComponent("V")
+        XCTAssertEqual(try targets(.folders(photos: p, videos: v)),
+                       [p.appendingPathComponent("An/a.jpg").path, v.appendingPathComponent("An/b.mp4").path])
+        XCTAssertEqual(try targets(.folders(photos: nil, videos: v)), [v.appendingPathComponent("An/b.mp4").path], "photos left out")
+
+        // Move All into the two folders, then again: already in place, nothing moves out of them.
+        var o = Exporter.Options(); o.kinds = .subfolders(photos: "Photos", videos: "Videos")
+        let r = exporter.run(try exporter.planAll(people: [(an, "An")], base: nil, mode: .move, options: o))
+        XCTAssertEqual(r.done, 2, "\(r.failed)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("An/Videos/b.mp4").path))
+        let again = try exporter.planAll(people: [(an, "An")], base: nil, mode: .move, options: o)
+        XCTAssertTrue(again.items.isEmpty)
+        XCTAssertEqual(again.alreadyThere, 2)
+    }
+
+    /// Stop: the file under way finishes, no new one starts, and running it again does the rest.
+    func testACopyCanBeStoppedAndFinishedLater() throws {
+        for i in 0..<6 { try makeFile("s/\(i).jpg", seed: UInt8(i + 1)) }
+        monitor().scan()
+        let an = try newPerson("An")
+        for m in try media() { _ = try addFace(mediaId: m.id!, personId: an) }
+        let exporter = Exporter(store: store)
+        let out = tmp.appendingPathComponent("out")
+        let plan = try exporter.plan(personId: an, name: "An", base: out)
+        var finished = 0
+        let r = exporter.run(plan, workers: 1, isCancelled: { finished >= 2 }) { finished = $0 }
+        XCTAssertTrue(r.cancelled)
+        XCTAssertEqual(r.done, 2)
+        XCTAssertEqual(r.notStarted, 4)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: out.appendingPathComponent("An").path).count, 2, "nothing half-written")
+
+        let rest = exporter.run(try exporter.plan(personId: an, name: "An", base: out), workers: 4)
+        XCTAssertFalse(rest.cancelled)
+        XCTAssertEqual(rest.done, 4)
+        XCTAssertEqual(rest.skippedExisting, 2, "the first two are already there")
+    }
+
+    /// Off a network share the copy is the ordinary one; it never replaces a file.
+    func testCopyOnALocalDiskIsAnOrdinaryCopy() throws {
+        let a = try makeFile("a.jpg", seed: 3)
+        let dest = root.appendingPathComponent("copy.jpg")
+        XCTAssertFalse(try Exporter.copy(a, to: dest))
+        XCTAssertEqual(try Data(contentsOf: dest), try Data(contentsOf: a))
+        try Data("mine".utf8).write(to: dest)
+        XCTAssertThrowsError(try Exporter.copy(a, to: dest))
+        XCTAssertEqual(try Data(contentsOf: dest), Data("mine".utf8))
+    }
+
+    /// On a share (SUZU_SHARE_TEST_DIR, a writable folder on an SMB share), the server copies the file: same bytes,
+    /// the original's date, nothing through this Mac.
+    func testCopyWithinAShareIsDoneByTheServer() throws {
+        guard let dir = ProcessInfo.processInfo.environment["SUZU_SHARE_TEST_DIR"] else { throw XCTSkip("no share to try") }
+        let folder = URL(fileURLWithPath: dir).appendingPathComponent("suzu-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let a = folder.appendingPathComponent("a.bin"), b = folder.appendingPathComponent("b.bin")
+        try Data((0..<(4 << 20)).map { UInt8(truncatingIfNeeded: $0 &* 7) }).write(to: a)
+        Thread.sleep(forTimeInterval: 2)  // a share settles a fresh file's date a moment after it is written
+        XCTAssertTrue(try Exporter.copy(a, to: b), "the server copied it")
+        XCTAssertEqual(try Data(contentsOf: b), try Data(contentsOf: a))
+        func date(_ u: URL) throws -> Double { try (FileManager.default.attributesOfItem(atPath: u.path)[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0 }
+        XCTAssertEqual(try date(b), try date(a), accuracy: 1, "the original's date, not the copy's (to the second: a share keeps less)")
+    }
+
     func makeRealJPEG(_ rel: String, seed: Int) throws -> URL {
         let url = root.appendingPathComponent(rel)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

@@ -34,11 +34,14 @@ struct ExportSheet: View {
     @State private var skipBlurry = false
     @State private var plan: Exporter.Plan?
     @State private var planning = false
-    @State private var running = false
-    @State private var progress = 0
-    @State private var result: Exporter.Result?
     /// Ignore the session picked in the People view and export the whole event.
     @State private var wholeEvent = false
+    /// Photos and videos: 0 together, 1 in two folders inside the person's folder, 2 in two folders picked here.
+    @AppStorage("export.kindLayout") private var kindLayout = 0
+    @AppStorage("export.photosFolder") private var photosChild = "Photos"
+    @AppStorage("export.videosFolder") private var videosChild = "Videos"
+    @State private var photosBase: URL?
+    @State private var videosBase: URL?
 
     init(scope: ExportScope, mode: ExportMode, initialName: String = "") {
         self.scope = scope
@@ -57,7 +60,7 @@ struct ExportSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Text(isAll ? "\(verb) everyone's files to their folders" : "\(verb) to “\(folder.isEmpty ? "…" : folder)” folder")
                 .font(.title2.bold())
-            if result == nil, let s = model.currentSession, !isMedia {
+            if let s = model.currentSession, !isMedia {
                 HStack {
                     Image(systemName: "timer")
                     Text(wholeEvent ? "The whole event" : "Only the “\(model.sessionTitle(s))” session (\(model.sessionTime(s)))")
@@ -67,14 +70,14 @@ struct ExportSheet: View {
                 .padding(8)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.accent.opacity(0.1)))
             }
-            if let result { resultView(result) } else { form }
+            form
         }
         .padding(20)
         }
         .frame(maxHeight: 860)
         .frame(width: editPhotos ? 960 : 620)
         .onAppear { chosen = Set(named.map(\.id)) }
-        .task(id: "\(name)|\(base?.path ?? "")|\(chosen.sorted())|\(editPhotos)|\(recipe.hashValue)|\(writeNames)|\(topN ?? 0)|\(bestOfBurst)|\(skipBlurry)|\(wholeEvent)") { await replan() }
+        .task(id: "\(name)|\(base?.path ?? "")|\(chosen.sorted())|\(editPhotos)|\(recipe.hashValue)|\(writeNames)|\(topN ?? 0)|\(bestOfBurst)|\(skipBlurry)|\(wholeEvent)|\(kindLayout)|\(photosChild)|\(videosChild)|\(photosBase?.path ?? "")|\(videosBase?.path ?? "")") { await replan() }
     }
 
     @ViewBuilder
@@ -84,15 +87,22 @@ struct ExportSheet: View {
         } else {
             TextField(isMedia ? "Folder name" : "Person's name (folder name)", text: $name).textFieldStyle(.roundedBorder)
         }
-        VStack(alignment: .leading, spacing: 6) {
-            Text(isAll ? "Put each person's folder:" : "Put the “\(folder)” folder:").font(.headline)
-            Picker("", selection: Binding(get: { base == nil ? 0 : 1 }, set: { if $0 == 0 { base = nil } else { choose() } })) {
-                Text(isMedia ? "Inside Pictures/SuZu Exports" : "Inside each file's source folder").tag(0)
-                Text(base.map { "Inside \($0.path)" } ?? "Inside another folder…").tag(1)
+        if kindLayout != 2 {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(isAll ? "Put each person's folder:" : "Put the “\(folder)” folder:").font(.headline)
+                Picker("", selection: Binding(get: { base == nil ? 0 : 1 }, set: { if $0 == 0 { base = nil } else { choose() } })) {
+                    Text(isMedia ? "Inside Pictures/SuZu Exports" : "Inside each file's source folder").tag(0)
+                    Text(base.map { "Inside \($0.path)" } ?? "Inside another folder…").tag(1)
+                }
+                .pickerStyle(.radioGroup)
+                .labelsHidden()
             }
-            .pickerStyle(.radioGroup)
-            .labelsHidden()
-            if let example = plan?.items.first {
+        }
+        kindsSection
+        if let plan {
+            // One example of each kind, so the two places can be checked before copying.
+            ForEach([plan.items.first { !MediaTypes.videos.contains($0.from.pathExtension.lowercased()) },
+                     plan.items.first { MediaTypes.videos.contains($0.from.pathExtension.lowercased()) }].compactMap { $0 }, id: \.to) { example in
                 Text("e.g. \(example.to.path)").font(.caption).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
             }
         }
@@ -108,16 +118,14 @@ struct ExportSheet: View {
         extras
         if planning && plan == nil { HStack { ProgressView().controlSize(.small); Text("Counting files…").foregroundStyle(.secondary) } }
         if let plan { summary(plan) }
-        if running {
-            ProgressView(value: Double(progress), total: Double(max(1, plan?.items.count ?? 1)))
-            Text("\(progress) of \(plan?.items.count ?? 0)").font(.caption).foregroundStyle(.secondary)
-        }
         HStack {
+            Text("Runs in the background: its progress and Stop are at the bottom of the sidebar.")
+                .font(.caption).foregroundStyle(.secondary)
             Spacer()
-            Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).disabled(running)
+            Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
             Button(isAll ? "\(verb) All" : verb) { run() }
                 .keyboardShortcut(.defaultAction)
-                .disabled(running || (!isAll && folder.isEmpty) || (plan?.items.isEmpty ?? true))
+                .disabled((!isAll && folder.isEmpty) || (plan?.items.isEmpty ?? true))
         }
     }
 
@@ -130,7 +138,65 @@ struct ExportSheet: View {
         o.skipBlurry = skipBlurry
         o.project = model.currentProject
         o.taken = wholeEvent ? nil : model.sessionRange
+        switch kindLayout {
+        case 1: o.kinds = .subfolders(photos: photosChild, videos: videosChild)
+        case 2: o.kinds = .folders(photos: photosBase, videos: videosBase)
+        default: o.kinds = .together
+        }
         return o
+    }
+
+    /// Photos and videos together, in two folders inside the person's folder, or in two folders of their own; a
+    /// kind without a folder is left out (photos only, videos only).
+    @ViewBuilder
+    var kindsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Photos and videos:").font(.headline)
+            Picker("", selection: $kindLayout) {
+                Text("Together in \(isAll ? "each person's" : "the “\(folder)”") folder").tag(0)
+                Text("In two folders inside it").tag(1)
+                Text("In two folders I choose").tag(2)
+            }
+            .pickerStyle(.radioGroup)
+            .labelsHidden()
+            if kindLayout == 1 {
+                Grid(alignment: .leading, verticalSpacing: 6) {
+                    GridRow {
+                        Text("Photos in")
+                        TextField("Leave empty: no photos", text: $photosChild).textFieldStyle(.roundedBorder).frame(width: 200)
+                    }
+                    GridRow {
+                        Text("Videos in")
+                        TextField("Leave empty: no videos", text: $videosChild).textFieldStyle(.roundedBorder).frame(width: 200)
+                    }
+                }
+                .padding(.leading, 20)
+                Text("e.g. “\(isAll ? "Name" : folder.isEmpty ? "Name" : folder)/\(photosChild.isEmpty ? "…" : photosChild)/”. Leave a name empty to copy only the other kind.")
+                    .font(.caption).foregroundStyle(.secondary).padding(.leading, 20)
+            } else if kindLayout == 2 {
+                Grid(alignment: .leading, verticalSpacing: 6) {
+                    kindFolderRow("Photos", $photosBase, key: "peopleExportPhotos")
+                    kindFolderRow("Videos", $videosBase, key: "peopleExportVideos")
+                }
+                .padding(.leading, 20)
+                Text("\(isAll ? "Each person gets a folder" : "The “\(folder.isEmpty ? "…" : folder)” folder goes") inside each. Choose only one to copy only photos or only videos.")
+                    .font(.caption).foregroundStyle(.secondary).padding(.leading, 20)
+            }
+        }
+    }
+
+    func kindFolderRow(_ title: String, _ url: Binding<URL?>, key: String) -> some View {
+        GridRow {
+            Text(title)
+            Text(url.wrappedValue?.path ?? "Not \(mode == .copy ? "copied" : "moved")")
+                .foregroundStyle(url.wrappedValue == nil ? .secondary : .primary)
+                .lineLimit(1).truncationMode(.middle).frame(maxWidth: 320, alignment: .leading)
+            Button("Choose…") { Panels.chooseFolder(key: key) { url.wrappedValue = $0 } }.controlSize(.small)
+            if url.wrappedValue != nil {
+                Button { url.wrappedValue = nil } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.plain).foregroundStyle(.secondary).help("Leave \(title.lowercased()) out")
+            }
+        }
     }
 
     @ViewBuilder
@@ -210,6 +276,7 @@ struct ExportSheet: View {
             } else {
                 Text("\(plan.photos) photos and \(plan.videos) videos will be \(mode == .copy ? "copied" : "moved").")
             }
+            if let left = leftOut { Text("\(left) are left out: \(kindLayout == 1 ? "no folder name" : "no folder chosen") for them.").foregroundStyle(.secondary) }
             if plan.alreadyThere > 0 { Text("\(plan.alreadyThere) are already in place.").foregroundStyle(.secondary) }
             if !isAll && mode == .move && plan.sharedCount > 0 {
                 Text("\(plan.sharedCount) of them also show other named people. Moving takes them out of their current folder, so they won't be in those people's folders. Use Copy, or Move All from the People view, for group photos.")
@@ -219,26 +286,15 @@ struct ExportSheet: View {
         }
     }
 
-    func resultView(_ r: Exporter.Result) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("\(r.done) files \(mode == .copy ? "copied" : "moved or copied").")
-            if r.skippedExisting > 0 { Text("\(r.skippedExisting) skipped because a file with that name was already there.").foregroundStyle(.secondary) }
-            if !r.failed.isEmpty {
-                Text("\(r.failed.count) failed:").foregroundStyle(.red)
-                ForEach(Array(r.failed.prefix(5).enumerated()), id: \.offset) { _, f in
-                    Text("\(f.0): \(f.1)").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            HStack {
-                if let dir = plan?.items.first?.to.deletingLastPathComponent() {
-                    Button("Show in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([isAll ? dir.deletingLastPathComponent() : dir])
-                    }
-                }
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-            }
+    /// The kinds with no folder ("Photos", "Videos", or both), nil when both have one.
+    var leftOut: String? {
+        let (noPhotos, noVideos): (Bool, Bool)
+        switch kindLayout {
+        case 1: (noPhotos, noVideos) = (photosChild.trimmingCharacters(in: .whitespaces).isEmpty, videosChild.trimmingCharacters(in: .whitespaces).isEmpty)
+        case 2: (noPhotos, noVideos) = (photosBase == nil, videosBase == nil)
+        default: return nil
         }
+        return noPhotos && noVideos ? "Photos and videos" : noPhotos ? "Photos" : noVideos ? "Videos" : nil
     }
 
     func choose() {
@@ -276,20 +332,12 @@ struct ExportSheet: View {
             let trimmed = name.trimmingCharacters(in: .whitespaces)
             if model.people.first(where: { $0.id == id })?.name != trimmed { model.rename(id, to: trimmed) }
         }
-        running = true
-        let exporter = service.exporter
-        let policy = policy
-        let workers = min(6, ToolWork.parallelism)
-        ToolWork.begin()
-        Task.detached(priority: .utility) {
-            let r = exporter.run(plan, policy: policy, workers: workers) { n in
-                if n % 5 == 0 || n == plan.items.count { Task { @MainActor in progress = n } }
-            }
-            await MainActor.run {
-                result = r
-                running = false
-                ToolWork.end()
-            }
-        }
+        // Show in Finder: the person's folder (not the Photos folder inside it); for everyone, the one holding theirs.
+        var shown = plan.items.first?.to.deletingLastPathComponent()
+        if kindLayout == 1 { shown = shown?.deletingLastPathComponent() }
+        if isAll { shown = shown?.deletingLastPathComponent() }
+        model.exports.start(plan, exporter: service.exporter, policy: policy, workers: min(6, ToolWork.parallelism),
+                            target: isAll ? "everyone's folders" : "“\(folder)”", mode: mode, folder: shown)
+        dismiss()
     }
 }

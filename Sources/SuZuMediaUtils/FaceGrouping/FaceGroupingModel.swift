@@ -163,6 +163,8 @@ final class FaceGroupingModel: ObservableObject {
     /// How fast files are being processed. Its own object: it changes every second during ingest, and a change on
     /// the model redraws every screen, where this redraws only the status pill.
     let processing = ProcessingStatus()
+    /// Copies and moves to people's folders running in the background.
+    let exports = PeopleCopies()
     var rate: Double { processing.rate }
     /// A refresh asked for by the user (a name, a merge) goes at once; the ones the database triggers during
     /// ingest wait a few seconds between them, so the screens aren't rebuilt under every click.
@@ -235,6 +237,7 @@ final class FaceGroupingModel: ObservableObject {
         }
         service.teamSync.onChange = { [weak self] in Task { @MainActor in self?.applyTeamStatus() } }
         ToolWork.faces = self
+        exports.model = self
         service.start()
         observe()
         if UserDefaults.standard.bool(forKey: "sharingEnabled") { setSharing(true) }

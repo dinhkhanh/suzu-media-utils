@@ -292,8 +292,12 @@ struct FaceGroupingStatus: View {
     @State private var showActivity = false
 
     var body: some View {
-        // The rate changes every second during ingest; only this pill follows it (see ProcessingStatus).
-        FaceGroupingStatusBody(model: model, processing: model.processing, showActivity: $showActivity)
+        // The rate changes every second during ingest; only this pill follows it (see ProcessingStatus). Background
+        // copies likewise follow their own progress (PeopleCopies).
+        VStack(spacing: 0) {
+            PeopleCopiesView(jobs: model.exports)
+            FaceGroupingStatusBody(model: model, processing: model.processing, showActivity: $showActivity)
+        }
     }
 }
 

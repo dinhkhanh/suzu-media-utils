@@ -1,3 +1,4 @@
+import CShims
 import FaceCore
 import Foundation
 import GRDB
@@ -46,7 +47,33 @@ public struct Exporter: Sendable {
         public var project: Int64?
         /// Only files captured in this time range (a session), seconds since 1970.
         public var taken: ClosedRange<Double>?
+        /// Where photos and videos go; either can be left out.
+        public var kinds = KindFolders.together
         public init() {}
+    }
+
+    /// Where photos and videos go: together in the person's folder, in two folders inside it, or each in a folder
+    /// of its own. A kind with no folder (nil, or an empty name) is left out: photos only, or videos only.
+    public enum KindFolders: Sendable, Equatable {
+        case together
+        /// "<Name>/<photos>/", "<Name>/<videos>/".
+        case subfolders(photos: String?, videos: String?)
+        /// "<photos>/<Name>/", "<videos>/<Name>/".
+        case folders(photos: URL?, videos: URL?)
+    }
+
+    /// The folder `file` goes to, given its person's folder `dir` ("<base>/<Name>"); nil when its kind is left out.
+    static func routed(_ dir: URL, for file: URL, _ kinds: KindFolders) -> URL? {
+        let video = MediaKindHint.isVideo(file)
+        switch kinds {
+        case .together:
+            return dir
+        case let .subfolders(photos, videos):
+            let name = folderName((video ? videos : photos) ?? "")
+            return name.isEmpty ? nil : dir.appendingPathComponent(name, isDirectory: true)
+        case let .folders(photos, videos):
+            return (video ? videos : photos)?.appendingPathComponent(dir.lastPathComponent, isDirectory: true)
+        }
     }
 
     public struct Plan: Sendable {
@@ -68,6 +95,9 @@ public struct Exporter: Sendable {
         public var failed: [(String, String)] = []
         /// Indexes of plan items that are now in place: written, or the same file was already there.
         public var handled: [Int] = []
+        /// Stopped before the end: the files under way finished, `notStarted` were left alone.
+        public var cancelled = false
+        public var notStarted = 0
     }
 
     let store: LibraryStore
@@ -99,7 +129,7 @@ public struct Exporter: Sendable {
             let from = URL(fileURLWithPath: r["path"], isDirectory: false)
             let root = base ?? (r["sourcePath"] as String?).map { URL(fileURLWithPath: $0, isDirectory: true) }
                 ?? from.deletingLastPathComponent()
-            let dir = root.appendingPathComponent(folder, isDirectory: true)
+            guard let dir = Self.routed(root.appendingPathComponent(folder, isDirectory: true), for: from, options.kinds) else { continue }
             if from.deletingLastPathComponent().standardizedFileURL.path == dir.standardizedFileURL.path {
                 plan.alreadyThere += 1
                 continue
@@ -133,17 +163,17 @@ public struct Exporter: Sendable {
             let ordered = group.sorted { ($0["area"] as Double) > ($1["area"] as Double) }  // main subject first
             let from = URL(fileURLWithPath: ordered[0]["path"], isDirectory: false)
             let fromDir = from.deletingLastPathComponent().standardizedFileURL.path
-            func dir(_ r: Row) -> URL {
+            func dir(_ r: Row) -> URL? {
                 let root = base ?? (r["sourcePath"] as String?).map { URL(fileURLWithPath: $0, isDirectory: true) }
                     ?? from.deletingLastPathComponent()
-                return root.appendingPathComponent(Self.folderName(names[r["personId"]]!), isDirectory: true)
+                return Self.routed(root.appendingPathComponent(Self.folderName(names[r["personId"]]!), isDirectory: true), for: from, options.kinds)
             }
             // Already in one of these people's folders (an earlier Move All, or a single person's Move): it stays
             // there and everyone else gets a copy, so a re-run never takes it out of someone's folder.
-            var moveUsed = ordered.contains { dir($0).standardizedFileURL.path == fromDir }
+            var moveUsed = ordered.contains { dir($0)?.standardizedFileURL.path == fromDir }
             for (k, r) in ordered.enumerated() {
                 let name = names[r["personId"]]!
-                let dir = dir(r)
+                guard let dir = dir(r) else { continue }  // its kind left out
                 if fromDir == dir.standardizedFileURL.path {
                     plan.alreadyThere += 1
                     continue
@@ -170,6 +200,7 @@ public struct Exporter: Sendable {
         var plan = Plan()
         for r in rows {
             let from = URL(fileURLWithPath: r["path"], isDirectory: false)
+            guard let dir = Self.routed(dir, for: from, options.kinds) else { continue }
             plan.items.append(Item(mediaId: r["id"], from: from, to: dir.appendingPathComponent(from.lastPathComponent),
                                    alsoHasOtherNamedPeople: false, operation: .copy, personName: folder))
         }
@@ -288,14 +319,18 @@ public struct Exporter: Sendable {
 
     /// Copies and edited exports go `workers` at a time: over a share several streams fill the link where one
     /// doesn't, and a crop or watermark renders while the next file is read. Moves are a name change each and run
-    /// in order. `progress` is called with the number of files finished, from any thread.
-    public func run(_ plan: Plan, policy: CollisionPolicy = .skip, workers: Int = 4, progress: @escaping (Int) -> Void = { _ in }) -> Result {
+    /// in order. `progress` is called with the number of files finished, from any thread. Once `isCancelled`, no
+    /// further file is started; the ones under way finish, so no file is left half-written.
+    public func run(_ plan: Plan, policy: CollisionPolicy = .skip, workers: Int = 4, isCancelled: @escaping () -> Bool = { false },
+                    progress: @escaping (Int) -> Void = { _ in }) -> Result {
         let tally = Tally()
         let group = DispatchGroup()
         let slots = DispatchSemaphore(value: max(1, workers))
         for (i, item) in plan.items.enumerated() {
+            if isCancelled() { break }
             let edit = plan.options.recipe.flatMap { MediaKindHint.isVideo(item.from) ? nil : $0 }
             let work = { [self] in
+                if isCancelled() { return }  // stopped while it waited for a worker
                 let outcome = Swift.Result { try self.perform(item, edit: edit, policy: policy, writeNames: plan.options.writeNames, tally: tally) }
                 tally.lock.withLock {
                     switch outcome {
@@ -316,7 +351,11 @@ public struct Exporter: Sendable {
             }
         }
         group.wait()
-        return tally.lock.withLock { tally.result }
+        return tally.lock.withLock {
+            tally.result.notStarted = plan.items.count - tally.finished
+            tally.result.cancelled = tally.result.notStarted > 0
+            return tally.result
+        }
     }
 
     /// One file: true when written, false when the same name (or the same file) was already there.
@@ -349,11 +388,44 @@ public struct Exporter: Sendable {
                                arguments: [dest.path, try Self.sourceId(for: dest, db: db), item.mediaId])
             }
         case .copy:
-            try fm.copyItem(at: item.from, to: dest)
+            try Self.copy(item.from, to: dest)
             if writeNames { _ = try? Metadata.writePeople(item.people, to: dest) }
             try recordCopy(of: item.mediaId, at: dest)
         }
         return true
+    }
+
+    /// Within one network share the server copies the file itself (SMB server-side copy): a file copied from the
+    /// NAS into another folder on it no longer travels to this Mac and back (over a slow link, minutes for a video
+    /// instead of seconds). Anywhere else, or when the share can't, an ordinary copy. Never replaces a file.
+    /// Returns whether the server copied it.
+    @discardableResult
+    static func copy(_ from: URL, to dest: URL) throws -> Bool {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: dest.path), onOneShare(from, dest.deletingLastPathComponent()) {
+            if suzu_server_copy(from.path, dest.path) == 0 {
+                // Extended attributes and the date, as an ordinary copy keeps them (the share takes the date only
+                // when it is set on its own); the data is there.
+                _ = copyfile(from.path, dest.path, nil, copyfile_flags_t(COPYFILE_XATTR))
+                if let date = try? fm.attributesOfItem(atPath: from.path)[.modificationDate] as? Date {
+                    try? fm.setAttributes([.modificationDate: date], ofItemAtPath: dest.path)
+                }
+                return true
+            }
+            // What a failed attempt may have left, so the ordinary copy can write the file (never a file that
+            // turned up there meanwhile).
+            if errno != EEXIST, fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
+        }
+        try fm.copyItem(at: from, to: dest)
+        return false
+    }
+
+    /// Both on the same network volume (local volumes copy instantly already: APFS clones).
+    static func onOneShare(_ a: URL, _ b: URL) -> Bool {
+        let keys: Set<URLResourceKey> = [.volumeIdentifierKey, .volumeIsLocalKey]
+        guard let va = try? a.resourceValues(forKeys: keys), let vb = try? b.resourceValues(forKeys: keys),
+              va.volumeIsLocal == false, let ia = va.volumeIdentifier, let ib = vb.volumeIdentifier else { return false }
+        return ia.isEqual(ib)
     }
 
     /// Target path, or nil to skip: with `.skip` whenever the name is taken (on disk, or by a file on its way),

@@ -18,7 +18,9 @@ let package = Package(
     targets: [
         .target(name: "FaceCore", swiftSettings: v5),
         .target(name: "MediaKit", dependencies: ["FaceCore"], swiftSettings: v5),
-        .target(name: "FaceLibrary", dependencies: ["FaceCore", "MediaKit", .product(name: "GRDB", package: "GRDB.swift")], swiftSettings: v5),
+        // The one system call Swift can't make (an SMB server-side copy, see Exporter.copy).
+        .target(name: "CShims"),
+        .target(name: "FaceLibrary", dependencies: ["FaceCore", "MediaKit", "CShims", .product(name: "GRDB", package: "GRDB.swift")], swiftSettings: v5),
         .executableTarget(name: "facescan", dependencies: ["FaceCore", "MediaKit"], swiftSettings: v5),
         // AVKit by name: `import AVKit` alone links only its SwiftUI overlay, and a VideoPlayer then crashes looking
         // for AVPlayerView.
