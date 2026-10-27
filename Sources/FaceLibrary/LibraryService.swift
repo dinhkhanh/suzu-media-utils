@@ -410,7 +410,7 @@ public final class LibraryService: @unchecked Sendable {
         return affected
     }
 
-    public func rescan(_ sourceId: Int64) { monitor(sourceId)?.scanSoon() }
+    public func rescan(_ sourceId: Int64) { monitor(sourceId)?.rescan() }
 
     /// Runs `body` while every folder watcher waits, so no scan sees files half-way through being renamed or
     /// relinked (it would take them for deleted and new files and drop their faces). Call it off the main thread.

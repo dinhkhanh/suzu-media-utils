@@ -211,6 +211,43 @@ final class LibraryTests: XCTestCase {
         XCTAssertFalse(try media().contains { $0.path.hasSuffix("late.jpg") }, "a stopped monitor scans nothing")
     }
 
+    /// Files read while the share was dropping are marked unreadable; unchanged, a scan alone never looked at them
+    /// again. Rescan, and the folder coming back online, give them another go.
+    func testUnreadableFilesAreRetriedOnRescanAndWhenTheFolderIsBack() throws {
+        try makeFile("a.jpg", seed: 1)
+        try makeFile("b.jpg", seed: 2)
+        var told = 0
+        let s = try store.db.read { db in try SourceRecord.fetchOne(db, key: sourceId)! }
+        let m = SourceMonitor(source: s, store: store) { newPending, _ in if newPending { told += 1 } }
+        m.scan()
+        func failAll() throws { try store.db.write { db in try db.execute(sql: "UPDATE media SET status = 'failed', error = 'gone'") } }
+        try failAll()
+        told = 0
+        m.scan()
+        XCTAssertTrue(try media().allSatisfy { $0.status == .failed }, "a plain look leaves them")
+
+        m.rescan()
+        m.queue.sync {}
+        XCTAssertTrue(try media().allSatisfy { $0.status == .pending && $0.error == nil })
+        XCTAssertEqual(told, 1, "processing is told")
+
+        try failAll()
+        let away = tmp.appendingPathComponent("away")
+        try FileManager.default.moveItem(at: root, to: away)
+        m.scan()
+        XCTAssertFalse(m.isOnline)
+        try FileManager.default.moveItem(at: away, to: root)
+        m.scan()
+        XCTAssertTrue(m.isOnline)
+        XCTAssertTrue(try media().allSatisfy { $0.status == .pending }, "back online: retried")
+
+        try failAll()
+        try FileManager.default.removeItem(at: root.appendingPathComponent("b.jpg"))
+        m.rescan()
+        m.queue.sync {}
+        XCTAssertEqual(try media().map(\.status), [.pending], "a file that is gone is not retried (the scan drops it)")
+    }
+
     func testRemoveSourceDeletesEverythingInBatches() throws {
         for i in 0..<1200 { try makeFile("r/\(i).jpg", bytes: 64 + i) }
         let service = LibraryServiceStub(store: store)

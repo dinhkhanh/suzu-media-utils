@@ -113,6 +113,34 @@ public final class SourceMonitor: @unchecked Sendable {
         queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.scan() }
     }
 
+    /// Rescan: every folder listed afresh, and another go at the files that could not be read (most often read
+    /// while the share was dropping; unchanged since, a scan alone left them unreadable for good).
+    public func rescan() {
+        guard !cancelled else { return }
+        queue.async { [weak self] in
+            guard let self else { return }
+            dirCache = [:]
+            scan()
+            retryFailed()
+        }
+    }
+
+    /// Files marked unreadable that are there to read go back in the queue. Runs on `queue`.
+    func retryFailed() {
+        guard isOnline, !cancelled else { return }
+        let rows = (try? store.db.read { db in
+            try Row.fetchAll(db, sql: "SELECT id, path FROM media WHERE sourceId = ? AND status = 'failed'", arguments: [sourceId])
+        }) ?? []
+        let ids = rows.filter { FileManager.default.fileExists(atPath: $0["path"]) }.map { $0["id"] as Int64 }
+        guard !ids.isEmpty else { return }
+        for chunk in stride(from: 0, to: ids.count, by: Self.batchSize).map({ ids[$0..<min($0 + Self.batchSize, ids.count)] }) {
+            try? store.db.write { db in
+                try db.execute(sql: "UPDATE media SET status = 'pending', error = NULL WHERE status = 'failed' AND id IN (\(chunk.map(String.init).joined(separator: ",")))")
+            }
+        }
+        onChange(true, [])
+    }
+
     func startFSEvents() {
         var ctx = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(),
                                        retain: nil, release: nil, copyDescription: nil)
@@ -205,7 +233,8 @@ public final class SourceMonitor: @unchecked Sendable {
             isOnline = false  // unmounted or offline: keep everything, look again on the next tick
             return
         }
-        isOnline = true
+        // Back after being offline: what was read while the share was going away gets another go.
+        if !isOnline { isOnline = true; retryFailed() }
         configureWatching()
         isScanning = true
         defer { isScanning = false }
