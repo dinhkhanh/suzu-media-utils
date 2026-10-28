@@ -528,6 +528,23 @@ public final class LibraryStore: @unchecked Sendable {
                 t.column("deleted", .boolean).notNull().defaults(to: false)
             }
         }
+        m.registerMigration("v25-nas-upload") { db in
+            /// Folders on their way to the team NAS over rsync (see NASUploadQueue); the queue survives a quit.
+            try db.create(table: "nasUpload") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("localFolder", .text).notNull()
+                t.column("remotePath", .text).notNull()
+                t.column("title", .text).notNull()
+                t.column("state", .text).notNull().indexed()
+                t.column("attempts", .integer).notNull().defaults(to: 0)
+                t.column("lastError", .text)
+                t.column("nextAttemptAt", .double).notNull().defaults(to: 0)
+                t.column("marker", .text)
+                t.column("deleteLocalWhenDone", .boolean).notNull().defaults(to: false)
+                t.column("createdAt", .double).notNull()
+                t.column("finishedAt", .double)
+            }
+        }
         return m
     }
 }

@@ -10,10 +10,13 @@ VERSION="${VERSION:-0.8.32}"
 SPARKLE_FEED_URL="${SPARKLE_FEED_URL:-https://github.com/dinhkhanh/suzu-media-utils/releases/latest/download/appcast.xml}"
 SPARKLE_PUBLIC_KEY="${SPARKLE_PUBLIC_KEY:-SRLHhBqtlIsBvuqpk/ONBFaAS629idQVYwoebgfGd/E=}"
 swift build -c release --product SuZuMediaUtils
+# The rsync behind "Upload to Team NAS" (NASUpload); macOS's own is openrsync and can't do it. Built once, cached.
+scripts/build-rsync.sh
 APP="dist/$NAME.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks" "$APP/Contents/Helpers"
 cp .build/release/SuZuMediaUtils "$APP/Contents/MacOS/$NAME"
+cp .build/rsync/bin/rsync "$APP/Contents/Helpers/rsync"
 cp -R models/compiled/ArcFaceR50.mlmodelc "$APP/Contents/Resources/"
 # Edit & Export's body-parts model is not in the app (600 MB in every update): the app downloads it once into
 # Application Support (scripts/publish-model.sh puts it on GitHub).
@@ -65,5 +68,6 @@ sign "$FW/Versions/B/XPCServices/Downloader.xpc"
 sign "$FW/Versions/B/Autoupdate"
 sign "$FW/Versions/B/Updater.app"
 sign "$FW"
+sign "$APP/Contents/Helpers/rsync"
 sign "$APP"
 echo "built $APP"

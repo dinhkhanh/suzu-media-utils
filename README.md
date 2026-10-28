@@ -267,9 +267,19 @@ for setting up several Macs). A development build also finds it in `models/compi
 ### Build and run
 
 ```sh
-scripts/build-app.sh          # -> dist/SuZu Media Utils.app (face model, icon and Sparkle bundled)
+scripts/build-app.sh          # -> dist/SuZu Media Utils.app (face model, icon, Sparkle and rsync bundled)
 open "dist/SuZu Media Utils.app"
 swift test                    # library tests (no model needed)
+```
+
+The app ships its own rsync (`Contents/Helpers/rsync`) for uploads to the team NAS over ssh (NASUpload): macOS's
+is openrsync and can't do resumable uploads with progress. `scripts/build-rsync.sh` builds it once from the
+official source into `.build/rsync/bin/rsync` (linked against nothing but libSystem, so it signs and runs
+anywhere); `build-app.sh` calls it. To try an upload without the app:
+
+```sh
+swift run nasupload "~/SuZu Staging/Nam R5 card 1/2026-10-28 14.05" "Event/Nam R5 card 1/2026-10-28 14.05" \
+    --user dinhkhanh --key ~/.ssh/nas_uploader      # --dry prints the rsync command lines instead
 ```
 
 To use it on another Mac, install the `.dmg` from the [latest release](https://github.com/dinhkhanh/suzu-media-utils/releases/latest)

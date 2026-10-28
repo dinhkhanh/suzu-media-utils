@@ -9,6 +9,7 @@ let package = Package(
     products: [
         .library(name: "FaceCore", targets: ["FaceCore"]),
         .executable(name: "facescan", targets: ["facescan"]),
+        .executable(name: "nasupload", targets: ["nasupload"]),
         .executable(name: "SuZuMediaUtils", targets: ["SuZuMediaUtils"]),
     ],
     dependencies: [
@@ -22,6 +23,8 @@ let package = Package(
         .target(name: "CShims"),
         .target(name: "FaceLibrary", dependencies: ["FaceCore", "MediaKit", "CShims", .product(name: "GRDB", package: "GRDB.swift")], swiftSettings: v5),
         .executableTarget(name: "facescan", dependencies: ["FaceCore", "MediaKit"], swiftSettings: v5),
+        // Command-line front of NASUpload, to try an upload against the NAS without the app.
+        .executableTarget(name: "nasupload", dependencies: ["FaceLibrary"], swiftSettings: v5),
         // AVKit by name: `import AVKit` alone links only its SwiftUI overlay, and a VideoPlayer then crashes looking
         // for AVPlayerView.
         .executableTarget(name: "SuZuMediaUtils", dependencies: ["FaceLibrary", "MediaKit", .product(name: "Sparkle", package: "Sparkle")],
