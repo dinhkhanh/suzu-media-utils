@@ -86,7 +86,7 @@ struct TeamNASSettings: View {
                 }
             }
             Toggle("Send anything new in the staging folder by itself", isOn: $nas.autoSend)
-                .help("Each event has a folder in the staging folder; whatever lands in one (a card copy, a folder dragged in, an export) goes to <event> on the NAS once it has been quiet for 20 seconds")
+                .help("The staging folder mirrors the folder on the NAS: whatever lands in it (a card copy, a folder dragged in, an export) goes up under the same name once it has been quiet for 20 seconds")
             Toggle("Delete the staging copy once it is on the NAS and verified", isOn: $nas.deleteStagedWhenDone)
             HStack {
                 Button("Send All Now") { nas.sendAllNow() }
@@ -108,7 +108,7 @@ struct TeamNASSettings: View {
         } header: {
             Text("Uploads")
         } footer: {
-            Text("The staging folder is laid out <event>/<folder>: Copy from Cards puts each card there, and anything else put in an event folder goes up the same way, to <event> on the NAS. Keep the copies until the event is delivered; they are this Mac's backup.")
+            Text("The staging folder mirrors the folder on the NAS: a folder at its top goes to the same name there, files at its top go there too. Copy from Cards puts each card's folder there. Keep the copies until the event is delivered; they are this Mac's backup.")
                 .foregroundStyle(.secondary)
         }
     }

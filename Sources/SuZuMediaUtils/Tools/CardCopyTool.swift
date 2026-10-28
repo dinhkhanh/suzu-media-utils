@@ -20,14 +20,12 @@ struct CardCopyTool: View {
     @AppStorage("cardCopyVideoDestination") private var videoDestinationPath = ""
     /// Copies go to the team NAS: to the staging folder on this Mac first, then up by themselves (TeamNASModel).
     @AppStorage("cardCopyToNAS") private var toNAS = false
-    /// The event's folder on the NAS; the open project's name until something else is typed.
+    /// A sub-folder under the folder on the NAS for this event, when that folder holds several events; empty (the
+    /// usual case: the folder on the NAS is the event's) puts the cards straight into it.
     @AppStorage("cardCopyNASEvent") private var nasEventTyped = ""
     @Environment(\.openSettings) private var openSettings
 
-    var nasEvent: String {
-        let t = nasEventTyped.trimmingCharacters(in: .whitespaces)
-        return t.isEmpty ? (faces.currentProject == nil ? "" : faces.projectName) : t
-    }
+    var nasEvent: String { nasEventTyped.trimmingCharacters(in: .whitespaces) }
     var destination: URL? {
         if toNAS { return faces.nas.stagingFolder(event: nasEvent) }
         return destinationPath.isEmpty ? nil : URL(fileURLWithPath: destinationPath, isDirectory: true)
@@ -185,16 +183,16 @@ struct CardCopyTool: View {
                 Image(systemName: "externaldrive.badge.icloud").foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(a.file.host).fontWeight(.semibold).lineLimit(1).truncationMode(.middle)
-                    Text("\(a.file.basePath)/\(nasEvent.isEmpty ? "Uploads" : nasEvent)/<card>").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    Text("\(a.file.basePath)/\(nasEvent.isEmpty ? "" : nasEvent + "/")<card>").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
                 Spacer(minLength: 4)
             }
             .padding(10)
             .background(RoundedRectangle(cornerRadius: 9).fill(Color.primary.opacity(0.05)))
-            TextField("Event folder on the NAS", text: $nasEventTyped, prompt: Text(faces.currentProject == nil ? "Event" : faces.projectName))
+            TextField("Sub-folder on the NAS (optional)", text: $nasEventTyped, prompt: Text("none: cards go straight into the folder above"))
                 .textFieldStyle(.roundedBorder)
-                .help("The folder under \(a.file.basePath) the cards go into; the open project's name unless you type one")
-            Text("The card is copied to \(faces.nas.stagingFolder.lastPathComponent)/\(nasEvent.isEmpty ? "Uploads" : nasEvent) on this Mac first (minutes), then sent to the NAS by itself: resumed if the connection drops, checked once there, and the team sees each hand-over only when it is complete. Anything else put in that folder goes up the same way. Progress is in the status pill; the staging folder and the uploads are under Settings → Team NAS.")
+                .help("Only when the folder on the NAS holds several events: the event's sub-folder the cards go into")
+            Text("The card is copied to \(faces.nas.stagingFolder.lastPathComponent)\(nasEvent.isEmpty ? "" : "/" + nasEvent) on this Mac first (minutes), then sent to the NAS by itself: resumed if the connection drops, checked once there, and the team sees each hand-over only when it is complete. The staging folder mirrors the folder on the NAS: anything else put in it goes up the same way. Progress is in the status pill; the staging folder and the uploads are under Settings → Team NAS.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         } else {
             HStack(spacing: 10) {
@@ -478,7 +476,7 @@ struct CardRow: View {
         return HStack(spacing: 6) {
             Image(systemName: "arrow.turn.down.right").font(.caption).foregroundStyle(.tertiary)
             if let nasEvent, let destination {
-                Text("Team NAS → \(nasEvent.isEmpty ? "Uploads" : nasEvent)/\(folder) · via \(destination.deletingLastPathComponent().lastPathComponent)/\(destination.lastPathComponent) on this Mac")
+                Text("Team NAS → \(nasEvent.isEmpty ? "" : nasEvent + "/")\(folder) · via \(destination.lastPathComponent) on this Mac")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     .help("Copied to \(destination.appendingPathComponent(folder).path) first, then sent to the NAS by itself")
             } else if let destination {

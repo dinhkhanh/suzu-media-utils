@@ -90,10 +90,11 @@ final class TeamNASModel: ObservableObject {
 
     // MARK: - The staging folder
 
-    /// The event's folder in the staging area: `<staging>/<event>`. Copy from Cards copies into it; anything
-    /// else put there goes up too.
+    /// Where Copy from Cards copies: the staging folder, or `<staging>/<event>` when an event sub-folder is wanted
+    /// (the folder on the NAS holding several events). Either way it mirrors the NAS.
     func stagingFolder(event: String) -> URL {
-        stagingFolder.appendingPathComponent(event.isEmpty ? "Uploads" : event, isDirectory: true)
+        let e = event.trimmingCharacters(in: .whitespaces)
+        return e.isEmpty ? stagingFolder : stagingFolder.appendingPathComponent(e, isDirectory: true)
     }
 
     private func restartWatcher() {
@@ -132,7 +133,7 @@ final class TeamNASModel: ObservableObject {
                     case .done: try? await queue.remove(existing.id!)
                     }
                 }
-                let data = marker ?? (try? JSONEncoder().encode(Marker(event: u.event, folder: u.folder, from: from, sentAt: Date().timeIntervalSince1970)))
+                let data = marker ?? (try? JSONEncoder().encode(Marker(folder: u.folder, from: from, sentAt: Date().timeIntervalSince1970)))
                 _ = try? await queue.enqueue(local: u.local, remotePath: u.remotePath, title: u.title, marker: data,
                                              deleteLocalWhenDone: delete && !u.filesOnly, filesOnly: u.filesOnly)
             }
@@ -140,13 +141,14 @@ final class TeamNASModel: ObservableObject {
         }
     }
 
-    /// A card's hand-over just landed in `<staging>/<event>/<card>/<handover>`: the card's folder goes up (the
-    /// hand-over with it; earlier ones are already there and cost nothing), with a marker naming the card.
+    /// A card's hand-over just landed in `<staging>[/<event>]/<card>/<handover>`: its top-level folder goes up (the
+    /// hand-over with it; what is there already costs nothing), with a marker naming the card.
     func enqueueCard(event: String, card: CardRecord, handover: String?, outcome: CardCopier.Outcome) {
         let cardName = CardCopier.cardFolderName(card)
-        let unit = StagingWatcher.Unit(root: stagingFolder, event: event.isEmpty ? "Uploads" : event, folder: cardName)
-        let marker = Marker(event: unit.event, folder: cardName, from: Host.current().localizedName ?? "Mac", sentAt: Date().timeIntervalSince1970,
-                            card: cardName, cardUuid: card.uuid, handover: handover,
+        let e = event.trimmingCharacters(in: .whitespaces)
+        let unit = StagingWatcher.Unit(root: stagingFolder, folder: e.isEmpty ? cardName : e)
+        let marker = Marker(folder: unit.folder, from: Host.current().localizedName ?? "Mac", sentAt: Date().timeIntervalSince1970,
+                            event: e.isEmpty ? nil : e, card: cardName, cardUuid: card.uuid, handover: handover,
                             files: outcome.copied.count + outcome.skipped.count, bytes: outcome.bytes)
         enqueue([unit], marker: try? JSONEncoder().encode(marker))
         watcher?.markSent(unit)
@@ -155,10 +157,10 @@ final class TeamNASModel: ObservableObject {
     /// `.suzu-upload.json` in the folder on the NAS: where it came from and, for a card, which.
     struct Marker: Codable {
         var format = 1
-        var event: String
         var folder: String?
         var from: String
         var sentAt: Double
+        var event: String?
         var card: String?
         var cardUuid: String?
         var handover: String?

@@ -1,26 +1,25 @@
 import Foundation
 
 /// Watches the staging folder for the team NAS: anything new under it goes up by itself, however it got there, a
-/// card copy, a Finder drag, an export. The folder is laid out `<event>/<folder>/…`: the first level names the
-/// event's folder on the NAS, the second is what travels as a unit (a card's folder, a delivery, anything), and
-/// files dropped straight into an event folder travel too, as that folder's loose files.
+/// card copy, a Finder drag, an export. The staging folder mirrors the folder on the NAS: each folder at its top
+/// (a card's folder, an event's, a delivery, anything) travels as a unit to the same name there, and files dropped
+/// at its top travel too, as its loose files.
 ///
 /// FSEvents say something changed; the watcher then waits for the folder to go quiet (`settle`: a drag or a copy
 /// in progress keeps changing it) before reporting the units that changed, each once. A slow poll stands in for
 /// missed events.
 public final class StagingWatcher: @unchecked Sendable {
-    /// One thing to send: `<event>/<folder>` as a folder, or an event folder's own files (`filesOnly`).
+    /// One thing to send: a top-level folder of the staging folder, or the staging folder's own files (`filesOnly`).
     public struct Unit: Hashable, Sendable {
-        public var event: String
-        /// nil: the event folder's loose files.
+        /// nil: the loose files at the top of the staging folder.
         public var folder: String?
         public var filesOnly: Bool { folder == nil }
-        public var local: URL { folder.map { root(event).appendingPathComponent($0, isDirectory: true) } ?? root(event) }
-        public var remotePath: String { folder.map { "\(event)/\($0)" } ?? event }
-        public var title: String { folder.map { "\($0) · \(event)" } ?? "\(event) (files)" }
+        public var local: URL { folder.map { rootURL.appendingPathComponent($0, isDirectory: true) } ?? rootURL }
+        /// Under the folder on the NAS; "" is that folder itself.
+        public var remotePath: String { folder ?? "" }
+        public var title: String { folder ?? "Loose files" }
         let rootURL: URL
-        func root(_ event: String) -> URL { rootURL.appendingPathComponent(event, isDirectory: true) }
-        public init(root: URL, event: String, folder: String?) { rootURL = root; self.event = event; self.folder = folder }
+        public init(root: URL, folder: String?) { rootURL = root; self.folder = folder }
     }
 
     public let root: URL
@@ -153,23 +152,19 @@ public final class StagingWatcher: @unchecked Sendable {
     func signatures() -> [Unit: Signature] {
         var out: [Unit: Signature] = [:]
         let fm = FileManager.default
-        guard let events = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return out }
-        for e in events where Self.counts(e.lastPathComponent) && ((try? e.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false) {
-            let event = e.lastPathComponent
-            guard let items = try? fm.contentsOfDirectory(at: e, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { continue }
-            var loose = Signature(files: 0, newest: 0, bytes: 0)
-            for i in items where Self.counts(i.lastPathComponent) {
-                if (try? i.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false {
-                    let u = Unit(root: root, event: event, folder: i.lastPathComponent)
-                    out[u] = signature(u)
-                } else if let v = try? i.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) {
-                    loose.files += 1
-                    loose.bytes += Int64(v.fileSize ?? 0)
-                    loose.newest = max(loose.newest, v.contentModificationDate?.timeIntervalSince1970 ?? 0)
-                }
+        guard let items = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return out }
+        var loose = Signature(files: 0, newest: 0, bytes: 0)
+        for i in items where Self.counts(i.lastPathComponent) {
+            if (try? i.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false {
+                let u = Unit(root: root, folder: i.lastPathComponent)
+                out[u] = signature(u)
+            } else if let v = try? i.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) {
+                loose.files += 1
+                loose.bytes += Int64(v.fileSize ?? 0)
+                loose.newest = max(loose.newest, v.contentModificationDate?.timeIntervalSince1970 ?? 0)
             }
-            if loose.files > 0 { out[Unit(root: root, event: event, folder: nil)] = loose }
         }
+        if loose.files > 0 { out[Unit(root: root, folder: nil)] = loose }
         return out
     }
 
