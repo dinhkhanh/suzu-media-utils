@@ -42,6 +42,8 @@ struct TeamNASSettings: View {
                     Spacer()
                     Button("Copy authorized_keys Line") { copy(a.file.authorizedKeysLine) }
                         .help("The line that lets this key run rsync on the NAS, and nothing else, for the NAS user's ~/.ssh/authorized_keys")
+                    Button("Change…") { askAttach = true }
+                        .help("Attach again with another address, user or folder; the team's key stays, so the line on the NAS stays valid")
                     Button("Detach…", role: .destructive) { askDetach = true }
                 }
                 if let r = nas.testResult {
@@ -229,7 +231,13 @@ struct AttachNASSheet: View {
         }
         .padding(20)
         .frame(width: 520)
-        .onAppear { teamId = (faces.currentTeam ?? faces.teams.first)?.id }
+        .onAppear {
+            teamId = (faces.currentTeam ?? faces.teams.first)?.id
+            // Attaching again starts from what is attached, so one field can be changed.
+            if let a = nas.attached {
+                host = a.file.host; port = String(a.file.port); user = a.file.user; basePath = a.file.basePath; teamId = a.team.id
+            }
+        }
     }
 
     var form: some View {
@@ -248,7 +256,7 @@ struct AttachNASSheet: View {
             }
             .formStyle(.columns)
             .textFieldStyle(.roundedBorder)
-            Text("The user needs write access to that folder and SSH turned on (Synology: Control Panel → Terminal & SNMP). Keep the user out of the administrators group if you can.")
+            Text("The folder as the NAS itself sees it, not as the share is mounted here: on a Synology every share is under /volume1, so the share “homes” is /volume1/homes. The user needs write access to it and SSH turned on (Synology: Control Panel → Terminal & SNMP). Keep the user out of the administrators group if you can.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Color.notice).fixedSize(horizontal: false, vertical: true)
@@ -266,7 +274,7 @@ struct AttachNASSheet: View {
     func done(_ r: TeamNASModel.Attached) -> some View {
         Group {
             Text("Attached").font(.title2.bold())
-            Text("\(user)@\(host) is now the team's NAS (\(r.hostKeys) host key\(r.hostKeys == 1 ? "" : "s") pinned). Last step: put this line in the NAS user's ~/.ssh/authorized_keys. It lets the key run rsync and nothing else.")
+            Text("\(user)@\(host) is now the team's NAS (\(r.hostKeys) host key\(r.hostKeys == 1 ? "" : "s") pinned). Last step, unless this line is on the NAS already: put it in the NAS user's ~/.ssh/authorized_keys. It lets the key run rsync and nothing else.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Text(r.authorizedKeysLine)
                 .font(.caption.monospaced()).textSelection(.enabled)

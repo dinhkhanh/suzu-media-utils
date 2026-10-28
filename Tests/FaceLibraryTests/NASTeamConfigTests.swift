@@ -42,8 +42,8 @@ final class NASTeamConfigTests: XCTestCase {
 
         let c = try XCTUnwrap(try NASTeamConfig.connection(teamFolder: team, teamUuid: "t1", support: support))
         XCTAssertEqual(c.host, "vnpt.ddns.suzu.one")
-        XCTAssertEqual(c.user, "uploader")
-        XCTAssertEqual(c.basePath, "/volume1/photo")
+        XCTAssertEqual(c.user, "dinhkhanh")
+        XCTAssertEqual(c.basePath, "/volume1/homes/00 SUZU MEDIA")
         let myKey = try XCTUnwrap(c.identityFile)
         XCTAssertTrue(myKey.hasPrefix(support.appendingPathComponent("t1").path), "this Mac's own copy, not the team folder's")
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: myKey)), key)
@@ -53,6 +53,16 @@ final class NASTeamConfigTests: XCTestCase {
         XCTAssertEqual(dirPerms, 0o700)
         XCTAssertEqual(try String(contentsOf: URL(fileURLWithPath: try XCTUnwrap(c.knownHostsFile)), encoding: .utf8), hosts[0] + "\n")
         XCTAssertTrue(c.sshCommand.contains("StrictHostKeyChecking=yes"))
+    }
+
+    func testTheTeamsKeyIsKeptForAttachingAgain() throws {
+        XCTAssertNil(try NASTeamConfig.existingKey(teamFolder: team))
+        try NASTeamConfig.attach(to: team, connection: .suzu, privateKey: key, publicKey: pub, hostKeys: hosts, by: "A")
+        let k = try XCTUnwrap(try NASTeamConfig.existingKey(teamFolder: team))
+        XCTAssertEqual(k.privateKey, key)
+        XCTAssertEqual(k.publicKey, pub)
+        try NASTeamConfig.detach(from: team)
+        XCTAssertNil(try NASTeamConfig.existingKey(teamFolder: team))
     }
 
     func testANewKeyInTheTeamFolderReplacesTheCopy() throws {

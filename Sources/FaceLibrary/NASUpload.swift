@@ -24,7 +24,7 @@ public struct NASConnection: Codable, Equatable, Sendable {
     }
 
     /// The studio's NAS.
-    public static let suzu = NASConnection(host: "vnpt.ddns.suzu.one", port: 2904, user: "uploader", basePath: "/volume1/photo")
+    public static let suzu = NASConnection(host: "vnpt.ddns.suzu.one", port: 2904, user: "dinhkhanh", basePath: "/volume1/homes/00 SUZU MEDIA")
 
     /// `user@host`.
     public var target: String { "\(user)@\(host)" }
@@ -44,7 +44,9 @@ public struct NASConnection: Codable, Equatable, Sendable {
             parts += ["-i", identityFile, "-o", "IdentitiesOnly=yes"]
         }
         if let knownHostsFile {
-            parts += ["-o", "UserKnownHostsFile=\(knownHostsFile)", "-o", "StrictHostKeyChecking=yes"]
+            // ssh splits UserKnownHostsFile on whitespace (it takes several files); ours is under "Application
+            // Support", so the path goes in ssh's own double quotes.
+            parts += ["-o", "UserKnownHostsFile=\"\(knownHostsFile)\"", "-o", "StrictHostKeyChecking=yes"]
         }
         return parts.map(Self.quoteForRsh).joined(separator: " ")
     }
@@ -103,8 +105,8 @@ public enum RsyncUpload {
         case notWritable(String)
         /// Some files didn't make it (the rest did); rsync's words for the first.
         case someFilesFailed(String)
-        /// The link dropped in the middle.
-        case interrupted
+        /// The link dropped in the middle, or the NAS's rsync stopped; rsync's words for it, when it had any.
+        case interrupted(String)
         case cancelled
         /// The bundled rsync isn't there.
         case rsyncMissing(String)
@@ -119,7 +121,7 @@ public enum RsyncUpload {
             case .diskFull: return "The NAS is full."
             case .notWritable(let s): return "The NAS user can't write there: \(s)"
             case .someFilesFailed(let s): return "Some files couldn't be sent: \(s). The upload will try again."
-            case .interrupted: return "The connection dropped. The upload will carry on from where it stopped."
+            case .interrupted(let s): return s.isEmpty ? "The connection dropped. The upload will carry on from where it stopped." : "The connection dropped (\(s)). The upload will carry on from where it stopped."
             case .cancelled: return "Stopped."
             case .rsyncMissing(let p): return "The app's copy of rsync is missing (\(p))."
             case .other(let code, let m): return m.isEmpty ? "rsync stopped with code \(code)." : m
@@ -228,7 +230,7 @@ public enum RsyncUpload {
         out.fileHandleForReading.readabilityHandler = nil
         err.fileHandleForReading.readabilityHandler = nil
         if cancelled { throw Failure.cancelled }
-        if p.terminationReason == .uncaughtSignal { throw Failure.interrupted }
+        if p.terminationReason == .uncaughtSignal { throw Failure.interrupted("") }
         if p.terminationStatus != 0 { throw classify(code: p.terminationStatus, stderr: stderr.string) }
     }
 
@@ -254,7 +256,7 @@ public enum RsyncUpload {
         }
         switch code {
         case 20: return .cancelled
-        case 10, 12, 30, 35: return .interrupted
+        case 10, 12, 30, 35: return .interrupted(firstRsyncLine(s))
         case 23, 24: return .someFilesFailed(firstRsyncLine(s))
         default: return .other(code: code, message: firstRsyncLine(s))
         }
@@ -367,7 +369,7 @@ extension RsyncUpload {
         p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         var args = ["-p", String(c.port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
         if let k = c.identityFile { args += ["-i", k, "-o", "IdentitiesOnly=yes"] }
-        if let h = c.knownHostsFile { args += ["-o", "UserKnownHostsFile=\(h)", "-o", "StrictHostKeyChecking=yes"] }
+        if let h = c.knownHostsFile { args += ["-o", "UserKnownHostsFile=\"\(h)\"", "-o", "StrictHostKeyChecking=yes"] }
         let quoted = "'" + c.basePath.replacingOccurrences(of: "'", with: "'\\''") + "'"
         args += [c.target, "if [ -d \(quoted) ]; then if [ -w \(quoted) ]; then echo writable; else echo readonly; fi; else echo missing; fi; rsync --version 2>/dev/null | head -1"]
         p.arguments = args
@@ -386,7 +388,11 @@ extension RsyncUpload {
         switch lines.first {
         case "writable": return "Connected as \(c.user). \(c.basePath) is there and writable; the NAS has \(rsyncLine)."
         case "readonly": throw Failure.notWritable("\(c.basePath) is there but \(c.user) can't write to it")
-        default: throw Failure.notWritable("\(c.basePath) is not on the NAS")
+        default:
+            // The path as the NAS sees it: on a Synology every share is under /volume1 (or /volume2…), so
+            // "/homes/Events" is really "/volume1/homes/Events".
+            let hint = c.basePath.hasPrefix("/volume") ? "" : " On a Synology the shares are under /volume1: try /volume1\(c.basePath)."
+            throw Failure.notWritable("\(c.basePath) is not on the NAS.\(hint)")
         }
     }
 }

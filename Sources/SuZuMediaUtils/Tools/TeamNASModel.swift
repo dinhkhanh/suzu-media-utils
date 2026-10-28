@@ -162,8 +162,9 @@ final class TeamNASModel: ObservableObject {
         var hostKeys: Int
     }
 
-    /// Attaches the NAS to `team`: asks the NAS for its host keys, makes a key for the team, writes both to the
-    /// team folder. Off the main thread; `done` gets the line to put on the NAS, or the reason it didn't work.
+    /// Attaches the NAS to `team`: asks the NAS for its host keys, makes a key for the team (or keeps the one the
+    /// team already has, so changing the address, user or folder doesn't mean a new line on the NAS), writes both
+    /// to the team folder. Off the main thread; `done` gets the line for the NAS, or the reason it didn't work.
     func attach(_ c: NASConnection, to team: TeamRecord, done: @escaping (Result<Attached, Error>) -> Void) {
         let folder = URL(fileURLWithPath: team.folder, isDirectory: true)
         let by = Host.current().localizedName ?? NSUserName()
@@ -171,7 +172,12 @@ final class TeamNASModel: ObservableObject {
             let r: Result<Attached, Error>
             do {
                 let hostKeys = try NASTeamConfig.scanHostKeys(host: c.host, port: c.port)
-                let key = try NASTeamConfig.makeKey(comment: "suzu-team-nas")
+                let key: (privateKey: Data, publicKey: String)
+                if let existing = try NASTeamConfig.existingKey(teamFolder: folder) {
+                    key = existing
+                } else {
+                    key = try NASTeamConfig.makeKey(comment: "suzu-team-nas")
+                }
                 try NASTeamConfig.attach(to: folder, connection: c, privateKey: key.privateKey, publicKey: key.publicKey, hostKeys: hostKeys, by: by)
                 let file = try NASTeamConfig.read(teamFolder: folder)!
                 r = .success(Attached(authorizedKeysLine: file.authorizedKeysLine, hostKeys: hostKeys.count))

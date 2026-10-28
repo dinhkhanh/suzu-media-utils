@@ -64,6 +64,13 @@ public enum NASTeamConfig {
         try enc.encode(file).write(to: fileURL(teamFolder), options: .atomic)
     }
 
+    /// The team's key as it is, to attach the NAS again with other details and keep the line on the NAS valid.
+    public static func existingKey(teamFolder: URL) throws -> (privateKey: Data, publicKey: String)? {
+        guard let file = try read(teamFolder: teamFolder), FileManager.default.fileExists(atPath: keyURL(teamFolder).path),
+              !file.publicKey.isEmpty else { return nil }
+        return (try Data(contentsOf: keyURL(teamFolder)), file.publicKey)
+    }
+
     /// Takes the NAS out of the team folder. The Macs forget it on their next look; the NAS keeps accepting the
     /// key until its line goes from authorized_keys.
     public static func detach(from teamFolder: URL) throws {

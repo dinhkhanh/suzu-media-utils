@@ -101,11 +101,12 @@ final class NASUploadTests: XCTestCase {
                        .notWritable("[receiver] mkstemp \"/volume1/photo/.x.CR3.abc\" failed: Permission denied (13)"))
         XCTAssertEqual(RsyncUpload.classify(code: 23, stderr: "rsync: [sender] read errors mapping \"/x/IMG.CR3\": Input/output error (5)\nrsync error: some files/attrs were not transferred (see previous errors) (code 23) at main.c(1338)"),
                        .someFilesFailed("[sender] read errors mapping \"/x/IMG.CR3\": Input/output error (5)"))
-        XCTAssertEqual(RsyncUpload.classify(code: 12, stderr: "rsync: connection unexpectedly closed (1234 bytes received so far) [sender]"), .interrupted)
+        XCTAssertEqual(RsyncUpload.classify(code: 12, stderr: "rsync: connection unexpectedly closed (1234 bytes received so far) [sender]"), .interrupted("connection unexpectedly closed (1234 bytes received so far) [sender]"))
+        XCTAssertEqual(RsyncUpload.classify(code: 12, stderr: "sh: rsync: command not found\nrsync: connection unexpectedly closed (0 bytes received so far) [sender]\nrsync error: error in rsync protocol data stream (code 12) at io.c(231)"), .interrupted("sh: rsync: command not found"))
         XCTAssertEqual(RsyncUpload.classify(code: 20, stderr: ""), .cancelled)
         XCTAssertEqual(RsyncUpload.classify(code: 1, stderr: "rsync: --no-such-option: unknown option"), .other(code: 1, message: "--no-such-option: unknown option"))
         XCTAssertTrue(RsyncUpload.Failure.unreachable.isRetryable)
-        XCTAssertTrue(RsyncUpload.Failure.interrupted.isRetryable)
+        XCTAssertTrue(RsyncUpload.Failure.interrupted("").isRetryable)
         XCTAssertFalse(RsyncUpload.Failure.refusedKey.isRetryable)
         XCTAssertFalse(RsyncUpload.Failure.hostKeyMismatch.isRetryable)
     }
@@ -119,7 +120,8 @@ final class NASUploadTests: XCTestCase {
         // Paths with spaces are double-quoted for rsync's own -e parsing; everything else bare.
         XCTAssertEqual(c.sshCommand, "ssh -p 2904 -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "
                        + "-i \"/Users/me/Library/Application Support/SuZu Media Utils/nas_key\" -o IdentitiesOnly=yes "
-                       + "-o \"UserKnownHostsFile=/Applications/SuZu Media Utils.app/Contents/Resources/nas_known_hosts\" -o StrictHostKeyChecking=yes")
+                       + "-o \"UserKnownHostsFile=\"\"/Applications/SuZu Media Utils.app/Contents/Resources/nas_known_hosts\"\"\" -o StrictHostKeyChecking=yes",
+                       "ssh's own quotes around the file (it splits the option on spaces), doubled for rsync's -e parsing")
         XCTAssertEqual(NASConnection.quoteForRsh("a\"b c"), "\"a\"\"b c\"")
         let a = RsyncUpload.arguments(local: URL(fileURLWithPath: "/tmp/stage/card"), remotePath: "/volume1/photo/E/card", connection: c, pass: .photosFirst)
         XCTAssertEqual(a.suffix(2), ["/tmp/stage/card/", "uploader@vnpt.ddns.suzu.one:/volume1/photo/E/card"])

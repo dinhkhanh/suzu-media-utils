@@ -245,6 +245,7 @@ public actor NASUploadQueue {
                 }
                 var j = job; j.lastError = f.message; j.attempts += 1
                 status.phase = f == .unreachable && !online ? .waitingForNetwork : .waiting(j, until: Date(timeIntervalSince1970: at), reason: f.message)
+
             } else {
                 write { db in
                     try db.execute(sql: "UPDATE nasUpload SET state = 'failed', lastError = ? WHERE id = ?", arguments: [f.message, id])
