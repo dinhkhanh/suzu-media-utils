@@ -278,9 +278,15 @@ official source into `.build/rsync/bin/rsync` (linked against nothing but libSys
 anywhere); `build-app.sh` calls it. To try an upload without the app:
 
 ```sh
+swift run nasupload attach "/Volumes/homes/SuZu Team" --user uploader   # once: the NAS's address, host key and a
+    # new key go into the team sync folder (nas/), and it prints the authorized_keys line to put on the NAS
 swift run nasupload "~/SuZu Staging/Nam R5 card 1/2026-10-28 14.05" "Event/Nam R5 card 1/2026-10-28 14.05" \
-    --user dinhkhanh --key ~/.ssh/nas_uploader      # --dry prints the rsync command lines instead
+    --team "/Volumes/homes/SuZu Team"               # with the team's NAS and key; --dry prints the command lines
 ```
+
+The key in the team folder is the team's: every Mac that reaches the folder uploads with it, and each keeps a
+private copy with the permissions ssh wants (NASTeamConfig). On the NAS the line carries `restrict`, so the key
+runs rsync and nothing else. `nasupload show <team folder>` prints what is attached, `detach` takes it out.
 
 To use it on another Mac, install the `.dmg` from the [latest release](https://github.com/dinhkhanh/suzu-media-utils/releases/latest)
 (drag to Applications; `brew install ffmpeg` there for web video formats). Installed apps check for updates once a
