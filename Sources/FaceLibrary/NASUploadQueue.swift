@@ -27,6 +27,8 @@ public struct NASUploadJob: Codable, FetchableRecord, MutablePersistableRecord, 
     public var marker: String?
     /// Remove the local folder once it is on the NAS and verified.
     public var deleteLocalWhenDone: Bool
+    /// Only the folder's own files, not its folders (an event folder's loose files; see StagingWatcher).
+    public var filesOnly: Bool
     public var createdAt: Double
     public var finishedAt: Double?
 
@@ -93,10 +95,10 @@ public actor NASUploadQueue {
 
     /// Adds a folder; the queue sends it when its turn comes. `remotePath` is under the connection's base path.
     @discardableResult
-    public func enqueue(local: URL, remotePath: String, title: String, marker: Data? = nil, deleteLocalWhenDone: Bool = false) throws -> NASUploadJob {
+    public func enqueue(local: URL, remotePath: String, title: String, marker: Data? = nil, deleteLocalWhenDone: Bool = false, filesOnly: Bool = false) throws -> NASUploadJob {
         var job = NASUploadJob(localFolder: local.standardizedFileURL.path, remotePath: remotePath, title: title, state: .queued, attempts: 0,
                                lastError: nil, nextAttemptAt: 0, marker: marker.map { String(decoding: $0, as: UTF8.self) },
-                               deleteLocalWhenDone: deleteLocalWhenDone, createdAt: Date().timeIntervalSince1970, finishedAt: nil)
+                               deleteLocalWhenDone: deleteLocalWhenDone, filesOnly: filesOnly, createdAt: Date().timeIntervalSince1970, finishedAt: nil)
         try store.db.write { db in try job.insert(db) }
         wakeUp()
         refresh()
@@ -206,7 +208,7 @@ public actor NASUploadQueue {
         let result: Result<Void, Error> = await withCheckedContinuation { c in
             let t = Thread {
                 do {
-                    try RsyncUpload.upload(local, to: remote, connection: conn, rsync: rsync, passes: passes,
+                    try RsyncUpload.upload(local, to: remote, connection: conn, rsync: rsync, passes: passes, filesOnly: job.filesOnly,
                                            progress: { progressSink.put($0) }, isCancelled: { flag.value })
                     if let marker = job.marker {
                         try Self.leaveMarker(marker, in: remote, connection: conn, rsync: rsync)
@@ -226,7 +228,7 @@ public actor NASUploadQueue {
             write { db in
                 try db.execute(sql: "UPDATE nasUpload SET state = 'done', finishedAt = ?, lastError = NULL WHERE id = ?", arguments: [Date().timeIntervalSince1970, id])
             }
-            if job.deleteLocalWhenDone { try? FileManager.default.removeItem(at: local) }
+            if job.deleteLocalWhenDone, !job.filesOnly { try? FileManager.default.removeItem(at: local) }
             status.phase = .idle
         case .failure(let e):
             let f = (e as? RsyncUpload.Failure) ?? .other(code: -1, message: e.localizedDescription)

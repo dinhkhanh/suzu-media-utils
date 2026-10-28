@@ -164,7 +164,7 @@ public enum RsyncUpload {
     static let partialDir = ".rsync-partial"
 
     /// The rsync command line for one pass of `local` (a folder; its contents go into `remotePath` on the NAS).
-    public static func arguments(local: URL, remotePath: String, connection: NASConnection, pass: Pass) -> [String] {
+    public static func arguments(local: URL, remotePath: String, connection: NASConnection, pass: Pass, filesOnly: Bool = false) -> [String] {
         // -rlt rather than -a: no -p/-o/-g, which on a Synology share with ACLs fail with "Operation not permitted"
         // (exit 23) and would mark every upload as partly failed; the share's own permissions apply instead.
         // The folder is made on the NAS by the remote shell rather than by --mkpath, which a Synology's older rsync
@@ -175,6 +175,8 @@ public enum RsyncUpload {
                     "--info=progress2", "--no-inc-recursive", "--out-format=\(namePrefix)%n",
                     "--exclude=.DS_Store", "--exclude=.copying-*", "--exclude=\(partialDir)",
                     "-e", connection.sshCommand]
+        // The folder's own files, none of its folders (they travel as units of their own): first rule wins.
+        if filesOnly { args.append("--exclude=*/") }
         switch pass {
         case .photosFirst:
             args += ["--include=*/"]
@@ -194,13 +196,13 @@ public enum RsyncUpload {
     /// Sends `local`'s contents to `remotePath` on the NAS, pass after pass. Throws the first failure; what landed
     /// before it stays on the NAS and the next run carries on from there.
     public static func upload(_ local: URL, to remotePath: String, connection: NASConnection, rsync: URL = bundledRsync,
-                              passes: [Pass] = Pass.cardFolder,
+                              passes: [Pass] = Pass.cardFolder, filesOnly: Bool = false,
                               progress: @escaping @Sendable (Progress) -> Void = { _ in },
                               isCancelled: @escaping @Sendable () -> Bool = { false }) throws {
         guard FileManager.default.isExecutableFile(atPath: rsync.path) else { throw Failure.rsyncMissing(rsync.path) }
         for pass in passes {
             if isCancelled() { throw Failure.cancelled }
-            try run(rsync, arguments: arguments(local: local, remotePath: remotePath, connection: connection, pass: pass),
+            try run(rsync, arguments: arguments(local: local, remotePath: remotePath, connection: connection, pass: pass, filesOnly: filesOnly),
                     pass: pass, progress: progress, isCancelled: isCancelled)
         }
     }

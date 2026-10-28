@@ -29,7 +29,7 @@ struct CardCopyTool: View {
         return t.isEmpty ? (faces.currentProject == nil ? "" : faces.projectName) : t
     }
     var destination: URL? {
-        if toNAS { return faces.nas.stagingFolder }
+        if toNAS { return faces.nas.stagingFolder(event: nasEvent) }
         return destinationPath.isEmpty ? nil : URL(fileURLWithPath: destinationPath, isDirectory: true)
     }
     var videoDestination: URL? { !toNAS && splitVideos && !videoDestinationPath.isEmpty ? URL(fileURLWithPath: videoDestinationPath, isDirectory: true) : nil }
@@ -194,7 +194,7 @@ struct CardCopyTool: View {
             TextField("Event folder on the NAS", text: $nasEventTyped, prompt: Text(faces.currentProject == nil ? "Event" : faces.projectName))
                 .textFieldStyle(.roundedBorder)
                 .help("The folder under \(a.file.basePath) the cards go into; the open project's name unless you type one")
-            Text("The card is copied to \(faces.nas.stagingFolder.lastPathComponent) on this Mac first (minutes), then sent to the NAS by itself: resumed if the connection drops, checked once there, and the team sees each hand-over only when it is complete. Progress is in the status pill; the staging folder and the uploads are under Settings → Team NAS.")
+            Text("The card is copied to \(faces.nas.stagingFolder.lastPathComponent)/\(nasEvent.isEmpty ? "Uploads" : nasEvent) on this Mac first (minutes), then sent to the NAS by itself: resumed if the connection drops, checked once there, and the team sees each hand-over only when it is complete. Anything else put in that folder goes up the same way. Progress is in the status pill; the staging folder and the uploads are under Settings → Team NAS.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         } else {
             HStack(spacing: 10) {
@@ -249,8 +249,7 @@ struct CardCopyTool: View {
             // What landed goes up, even after an interruption: the rest follows on the next copy, into the same
             // hand-over folder, and the upload picks up what is new there.
             if toNAS, let plan = card.plan, !outcome.copied.isEmpty || !outcome.skipped.isEmpty {
-                faces.nas.enqueue(folder: outcome.folder, event: event, card: plan.card,
-                                  handover: perHandover ? outcome.folder.lastPathComponent : nil, outcome: outcome)
+                faces.nas.enqueueCard(event: event, card: plan.card, handover: perHandover ? outcome.folder.lastPathComponent : nil, outcome: outcome)
             }
         }
     }
@@ -479,7 +478,7 @@ struct CardRow: View {
         return HStack(spacing: 6) {
             Image(systemName: "arrow.turn.down.right").font(.caption).foregroundStyle(.tertiary)
             if let nasEvent, let destination {
-                Text("Team NAS → \(nasEvent.isEmpty ? "Uploads" : nasEvent)/\(folder) · via \(destination.lastPathComponent) on this Mac")
+                Text("Team NAS → \(nasEvent.isEmpty ? "Uploads" : nasEvent)/\(folder) · via \(destination.deletingLastPathComponent().lastPathComponent)/\(destination.lastPathComponent) on this Mac")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     .help("Copied to \(destination.appendingPathComponent(folder).path) first, then sent to the NAS by itself")
             } else if let destination {

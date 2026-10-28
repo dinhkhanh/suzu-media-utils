@@ -146,6 +146,8 @@ final class NASUploadTests: XCTestCase {
         XCTAssertEqual(a[a.firstIndex(of: "-e")! + 1], c.sshCommand)
         let v = RsyncUpload.arguments(local: URL(fileURLWithPath: "/tmp/stage/card/"), remotePath: "/x", connection: c, pass: .verify)
         XCTAssertTrue(v.contains("--checksum"))
+        let loose = RsyncUpload.arguments(local: URL(fileURLWithPath: "/tmp/stage/Wedding"), remotePath: "/x/Wedding", connection: c, pass: .photosFirst, filesOnly: true)
+        XCTAssertLessThan(loose.firstIndex(of: "--exclude=*/")!, loose.firstIndex(of: "--include=*/")!, "an event folder's own files only: its folders are units of their own")
         XCTAssertFalse(v.contains("--include=*/"))
         XCTAssertEqual(RsyncUpload.arguments(local: URL(fileURLWithPath: "/tmp/stage/card/"), remotePath: "/x", connection: c, pass: .everything).filter { $0.hasPrefix("--include") }, [])
     }

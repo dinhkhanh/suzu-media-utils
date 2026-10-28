@@ -16,8 +16,12 @@ final class TeamNASModel: ObservableObject {
     @Published var testResult: (ok: Bool, text: String)?
     /// Where cards are copied before they go to the NAS; the copy stays until the upload is verified (and after,
     /// unless `deleteStagedWhenDone`).
-    @AppStorage("nasStagingFolder") var stagingPath = ""
+    @AppStorage("nasStagingFolder") var stagingPath = "" { didSet { restartWatcher() } }
     @AppStorage("nasDeleteStagedWhenDone") var deleteStagedWhenDone = false
+    /// Anything new under the staging folder goes up by itself (StagingWatcher); off: only what Copy from Cards
+    /// puts there, and Send All Now.
+    @AppStorage("nasAutoSend") var autoSend = true { didSet { restartWatcher() } }
+    private var watcher: StagingWatcher?
 
     private var queue: NASUploadQueue?
     private var store: LibraryStore?
@@ -32,12 +36,14 @@ final class TeamNASModel: ObservableObject {
         return FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0].appendingPathComponent("SuZu Staging", isDirectory: true)
     }
 
-    /// Called once the library is open: the queue starts and picks up where it was.
+    /// Called once the library is open: the queue starts and picks up where it was, and the staging folder is
+    /// watched.
     func attach(store: LibraryStore, teams: [TeamRecord]) {
         self.store = store
         let q = NASUploadQueue(store: store, connection: { [connection] in connection.value })
         queue = q
         teamsChanged(teams)
+        restartWatcher()
         Task {
             await q.setOnChange { [weak self] s in Task { @MainActor in self?.status = s; self?.reloadJobs() } }
             await q.start()
@@ -82,43 +88,82 @@ final class TeamNASModel: ObservableObject {
         Task { let j = (try? await queue.jobs()) ?? []; await MainActor.run { if j != self.jobs { self.jobs = j } } }
     }
 
+    // MARK: - The staging folder
+
+    /// The event's folder in the staging area: `<staging>/<event>`. Copy from Cards copies into it; anything
+    /// else put there goes up too.
+    func stagingFolder(event: String) -> URL {
+        stagingFolder.appendingPathComponent(event.isEmpty ? "Uploads" : event, isDirectory: true)
+    }
+
+    private func restartWatcher() {
+        watcher?.stop()
+        watcher = nil
+        guard queue != nil, autoSend else { return }
+        let w = StagingWatcher(root: stagingFolder) { [weak self] units in
+            Task { @MainActor in self?.enqueue(units) }
+        }
+        w.start()
+        watcher = w
+    }
+
+    /// Everything under the staging folder goes up now, sent or not (rsync sends only what is new).
+    func sendAllNow() {
+        if let watcher { watcher.reportAll(); return }
+        let w = StagingWatcher(root: stagingFolder) { [weak self] units in Task { @MainActor in self?.enqueue(units) } }
+        w.reportAll()
+    }
+
     // MARK: - Uploads
 
-    /// Puts a hand-over's folder (in the staging area) in the queue, to land at `<event>/<card>/<handover>` on the
-    /// NAS. A folder already queued or on its way is left alone; one already sent goes again (more files landed).
-    func enqueue(folder: URL, event: String, card: CardRecord, handover: String?, outcome: CardCopier.Outcome) {
+    /// Puts units of the staging folder in the queue, each to land at `<event>/<folder>` on the NAS. A unit already
+    /// queued or on its way is left alone; one already sent goes again (more files landed; rsync sends the new ones).
+    func enqueue(_ units: [StagingWatcher.Unit], marker: Data? = nil) {
         guard let queue else { return }
-        let cardName = CardCopier.cardFolderName(card)
-        var remote = (event.isEmpty ? "Uploads" : event) + "/" + cardName
-        if let handover { remote += "/" + handover }
-        let title = handover.map { "\(cardName) · \($0)" } ?? cardName
-        let marker = Marker(card: cardName, cardUuid: card.uuid, event: event, handover: handover, from: Host.current().localizedName ?? "Mac",
-                            files: outcome.copied.count + outcome.skipped.count, bytes: outcome.bytes, copiedAt: Date().timeIntervalSince1970)
-        let data = try? JSONEncoder().encode(marker)
         let delete = deleteStagedWhenDone
+        let from = Host.current().localizedName ?? "Mac"
         Task {
-            if let existing = try? await queue.jobs().first(where: { $0.localFolder == folder.standardizedFileURL.path }) {
-                switch existing.state {
-                case .queued, .uploading: return
-                case .failed: try? await queue.retry(existing.id!); return
-                case .done: try? await queue.remove(existing.id!)
+            for u in units {
+                let path = u.local.standardizedFileURL.path
+                if let existing = try? await queue.jobs().first(where: { $0.localFolder == path && $0.filesOnly == u.filesOnly }) {
+                    switch existing.state {
+                    case .queued, .uploading: continue
+                    case .failed: try? await queue.retry(existing.id!); continue
+                    case .done: try? await queue.remove(existing.id!)
+                    }
                 }
+                let data = marker ?? (try? JSONEncoder().encode(Marker(event: u.event, folder: u.folder, from: from, sentAt: Date().timeIntervalSince1970)))
+                _ = try? await queue.enqueue(local: u.local, remotePath: u.remotePath, title: u.title, marker: data,
+                                             deleteLocalWhenDone: delete && !u.filesOnly, filesOnly: u.filesOnly)
             }
-            _ = try? await queue.enqueue(local: folder, remotePath: remote, title: title, marker: data, deleteLocalWhenDone: delete)
             await MainActor.run { self.reloadJobs() }
         }
     }
 
+    /// A card's hand-over just landed in `<staging>/<event>/<card>/<handover>`: the card's folder goes up (the
+    /// hand-over with it; earlier ones are already there and cost nothing), with a marker naming the card.
+    func enqueueCard(event: String, card: CardRecord, handover: String?, outcome: CardCopier.Outcome) {
+        let cardName = CardCopier.cardFolderName(card)
+        let unit = StagingWatcher.Unit(root: stagingFolder, event: event.isEmpty ? "Uploads" : event, folder: cardName)
+        let marker = Marker(event: unit.event, folder: cardName, from: Host.current().localizedName ?? "Mac", sentAt: Date().timeIntervalSince1970,
+                            card: cardName, cardUuid: card.uuid, handover: handover,
+                            files: outcome.copied.count + outcome.skipped.count, bytes: outcome.bytes)
+        enqueue([unit], marker: try? JSONEncoder().encode(marker))
+        watcher?.markSent(unit)
+    }
+
+    /// `.suzu-upload.json` in the folder on the NAS: where it came from and, for a card, which.
     struct Marker: Codable {
         var format = 1
-        var card: String
-        var cardUuid: String
         var event: String
-        var handover: String?
+        var folder: String?
         var from: String
-        var files: Int
-        var bytes: Int64
-        var copiedAt: Double
+        var sentAt: Double
+        var card: String?
+        var cardUuid: String?
+        var handover: String?
+        var files: Int?
+        var bytes: Int64?
     }
 
     func retry(_ job: NASUploadJob) { guard let id = job.id, let queue else { return }; Task { try? await queue.retry(id); reloadJobs() } }

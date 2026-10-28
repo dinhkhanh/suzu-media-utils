@@ -545,6 +545,10 @@ public final class LibraryStore: @unchecked Sendable {
                 t.column("finishedAt", .double)
             }
         }
+        m.registerMigration("v26-nas-upload-files-only") { db in
+            /// An event folder's loose files as a unit of their own (StagingWatcher).
+            try db.alter(table: "nasUpload") { t in t.add(column: "filesOnly", .boolean).notNull().defaults(to: false) }
+        }
         return m
     }
 }

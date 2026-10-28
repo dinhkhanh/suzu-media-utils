@@ -85,7 +85,14 @@ struct TeamNASSettings: View {
                     Button("Show") { NSWorkspace.shared.activateFileViewerSelecting([nas.stagingFolder]) }.controlSize(.small)
                 }
             }
+            Toggle("Send anything new in the staging folder by itself", isOn: $nas.autoSend)
+                .help("Each event has a folder in the staging folder; whatever lands in one (a card copy, a folder dragged in, an export) goes to <event> on the NAS once it has been quiet for 20 seconds")
             Toggle("Delete the staging copy once it is on the NAS and verified", isOn: $nas.deleteStagedWhenDone)
+            HStack {
+                Button("Send All Now") { nas.sendAllNow() }
+                    .help("Every folder under the staging folder goes up now; what is already on the NAS costs nothing")
+                Spacer()
+            }
             if !nas.jobs.isEmpty {
                 ForEach(nas.jobs) { job in UploadRow(job: job, nas: nas) }
                 HStack {
@@ -101,7 +108,7 @@ struct TeamNASSettings: View {
         } header: {
             Text("Uploads")
         } footer: {
-            Text("Cards are copied to the staging folder first, at card speed, then sent from there. Keep the copy until the event is delivered; it is this Mac's backup of the card.")
+            Text("The staging folder is laid out <event>/<folder>: Copy from Cards puts each card there, and anything else put in an event folder goes up the same way, to <event> on the NAS. Keep the copies until the event is delivered; they are this Mac's backup.")
                 .foregroundStyle(.secondary)
         }
     }
