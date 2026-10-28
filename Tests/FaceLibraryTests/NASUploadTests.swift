@@ -104,6 +104,8 @@ final class NASUploadTests: XCTestCase {
         XCTAssertEqual(RsyncUpload.classify(code: 12, stderr: "rsync: connection unexpectedly closed (1234 bytes received so far) [sender]"), .interrupted("connection unexpectedly closed (1234 bytes received so far) [sender]"))
         XCTAssertEqual(RsyncUpload.classify(code: 12, stderr: "sh: rsync: command not found\nrsync: connection unexpectedly closed (0 bytes received so far) [sender]\nrsync error: error in rsync protocol data stream (code 12) at io.c(231)"), .interrupted("sh: rsync: command not found"))
         XCTAssertEqual(RsyncUpload.classify(code: 20, stderr: ""), .cancelled)
+        XCTAssertEqual(RsyncUpload.classify(code: 12, stderr: "rsync error: rsync service is no running (code 43) at io.c(254) [Receiver=3.1.2]\nrsync: connection unexpectedly closed (0 bytes received so far) [sender]"), .rsyncServiceOff)
+        XCTAssertFalse(RsyncUpload.Failure.rsyncServiceOff.isRetryable)
         XCTAssertEqual(RsyncUpload.classify(code: 1, stderr: "rsync: --no-such-option: unknown option"), .other(code: 1, message: "--no-such-option: unknown option"))
         XCTAssertTrue(RsyncUpload.Failure.unreachable.isRetryable)
         XCTAssertTrue(RsyncUpload.Failure.interrupted("").isRetryable)

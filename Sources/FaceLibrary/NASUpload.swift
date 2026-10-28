@@ -110,6 +110,8 @@ public enum RsyncUpload {
         case cancelled
         /// The bundled rsync isn't there.
         case rsyncMissing(String)
+        /// A Synology's rsync refuses to serve until its rsync service is on (exit 43, "rsync service is no running").
+        case rsyncServiceOff
         case other(code: Int32, message: String)
 
         /// In the user's words, for the status pill and the Team NAS pane.
@@ -124,6 +126,7 @@ public enum RsyncUpload {
             case .interrupted(let s): return s.isEmpty ? "The connection dropped. The upload will carry on from where it stopped." : "The connection dropped (\(s)). The upload will carry on from where it stopped."
             case .cancelled: return "Stopped."
             case .rsyncMissing(let p): return "The app's copy of rsync is missing (\(p))."
+            case .rsyncServiceOff: return "The NAS's rsync service is off. On a Synology: Control Panel → File Services → rsync → Enable rsync service."
             case .other(let code, let m): return m.isEmpty ? "rsync stopped with code \(code)." : m
             }
         }
@@ -132,7 +135,7 @@ public enum RsyncUpload {
         public var isRetryable: Bool {
             switch self {
             case .unreachable, .diskFull, .someFilesFailed, .interrupted: return true
-            case .refusedKey, .hostKeyMismatch, .notWritable, .cancelled, .rsyncMissing, .other: return false
+            case .refusedKey, .hostKeyMismatch, .notWritable, .cancelled, .rsyncMissing, .rsyncServiceOff, .other: return false
             }
         }
     }
@@ -247,6 +250,7 @@ public enum RsyncUpload {
             return .refusedKey
         }
         if s.contains("No space left on device") { return .diskFull }
+        if s.contains("rsync service is no") { return .rsyncServiceOff }
         if code == 255 || s.contains("Could not resolve hostname") || s.contains("Connection refused") || s.contains("Connection timed out")
             || s.contains("Network is unreachable") || s.contains("No route to host") || s.contains("Operation timed out") || s.contains("Connection closed by") {
             return .unreachable
@@ -371,7 +375,10 @@ extension RsyncUpload {
         if let k = c.identityFile { args += ["-i", k, "-o", "IdentitiesOnly=yes"] }
         if let h = c.knownHostsFile { args += ["-o", "UserKnownHostsFile=\"\(h)\"", "-o", "StrictHostKeyChecking=yes"] }
         let quoted = "'" + c.basePath.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        args += [c.target, "if [ -d \(quoted) ]; then if [ -w \(quoted) ]; then echo writable; else echo readonly; fi; else echo missing; fi; rsync --version 2>/dev/null | head -1"]
+        // rsync --version answers even when a Synology's rsync service is off; only a --server run tells (exit 43,
+        // "rsync service is no running"), so one is started with nothing on its stdin: on, it ends at once (the
+        // protocol stream is empty); off, it says so.
+        args += [c.target, "if [ -d \(quoted) ]; then if [ -w \(quoted) ]; then echo writable; else echo readonly; fi; else echo missing; fi; rsync --version 2>/dev/null | head -1; rsync --server -nltre.iLsfx . \(quoted) < /dev/null 2>&1 | grep -ai 'service is no' >/dev/null && echo serviceoff; true"]
         p.arguments = args
         let out = Pipe(), err = Pipe()
         p.standardOutput = out
@@ -385,6 +392,7 @@ extension RsyncUpload {
         let lines = o.split(whereSeparator: \.isNewline).map(String.init)
         let rsyncLine = lines.first { $0.hasPrefix("rsync") }.map { $0.split(separator: " ").prefix(3).joined(separator: " ") }
         guard let rsyncLine else { throw Failure.other(code: 0, message: "The NAS answered, but has no rsync. Enable the rsync service on it (Synology: File Services → rsync).") }
+        if lines.contains("serviceoff") { throw Failure.rsyncServiceOff }
         switch lines.first {
         case "writable": return "Connected as \(c.user). \(c.basePath) is there and writable; the NAS has \(rsyncLine)."
         case "readonly": throw Failure.notWritable("\(c.basePath) is there but \(c.user) can't write to it")
