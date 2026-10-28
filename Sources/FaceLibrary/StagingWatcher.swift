@@ -80,6 +80,9 @@ public final class StagingWatcher: @unchecked Sendable {
         }
     }
 
+    /// When the unit's newest file was written (0: no files).
+    public func lastChange(_ unit: Unit) -> Date { Date(timeIntervalSince1970: signature(unit).newest) }
+
     /// A unit went up: what it looks like now is the known state.
     public func markSent(_ unit: Unit) {
         queue.async { [self] in seen[unit] = signature(unit) }

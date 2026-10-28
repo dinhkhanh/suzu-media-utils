@@ -21,6 +21,28 @@ final class TeamNASModel: ObservableObject {
     /// Anything new under the staging folder goes up by itself (StagingWatcher); off: only what Copy from Cards
     /// puts there, and Send All Now.
     @AppStorage("nasAutoSend") var autoSend = true { didSet { restartWatcher() } }
+    /// When a new folder goes: as soon as it is quiet; once this Mac has processed its files and the rules have
+    /// moved them where they go (the folder is then sent as arranged, not twice); or only when told.
+    enum SendWhen: String, CaseIterable, Identifiable {
+        case whenQuiet, whenProcessed, manual
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .whenQuiet: "As soon as it is quiet"
+            case .whenProcessed: "After this Mac has processed it"
+            case .manual: "Only when I click Send"
+            }
+        }
+    }
+    @AppStorage("nasSendWhen") var sendWhen = SendWhen.whenQuiet { didSet { considerHeld() } }
+    /// Folders waiting to go (`whenProcessed`, `manual`), oldest first.
+    @Published private(set) var held: [StagingWatcher.Unit] = []
+    private var heldMarkers: [StagingWatcher.Unit: Data] = [:]
+    /// Faces still being processed, rules still copying, exports running: the folders are not done being arranged.
+    var isMacBusy: () -> Bool = { false }
+    /// After processing, the rules' moves must have stopped for this long before a folder goes.
+    static let settledAfterProcessing: TimeInterval = 60
+    private var holdTimer: Timer?
     private var watcher: StagingWatcher?
 
     private var queue: NASUploadQueue?
@@ -102,7 +124,7 @@ final class TeamNASModel: ObservableObject {
         watcher = nil
         guard queue != nil, autoSend else { return }
         let w = StagingWatcher(root: stagingFolder) { [weak self] units in
-            Task { @MainActor in self?.enqueue(units) }
+            Task { @MainActor in self?.receive(units) }
         }
         w.start()
         watcher = w
@@ -110,9 +132,54 @@ final class TeamNASModel: ObservableObject {
 
     /// Everything under the staging folder goes up now, sent or not (rsync sends only what is new).
     func sendAllNow() {
+        held = []
         if let watcher { watcher.reportAll(); return }
         let w = StagingWatcher(root: stagingFolder) { [weak self] units in Task { @MainActor in self?.enqueue(units) } }
         w.reportAll()
+    }
+
+    /// Units the watcher found quiet: sent, or held for later, as `sendWhen` says.
+    private func receive(_ units: [StagingWatcher.Unit], marker: Data? = nil) {
+        switch sendWhen {
+        case .whenQuiet:
+            enqueue(units, marker: marker)
+        case .whenProcessed, .manual:
+            for u in units where !held.contains(u) { held.append(u) }
+            if let marker { for u in units { heldMarkers[u] = marker } }
+            considerHeld()
+        }
+    }
+
+    /// Held folders go once this Mac is done with them (`whenProcessed`): nothing left to process, no export
+    /// running, and no file written for a minute (the rules' moves have stopped). Looked at every 15 s meanwhile.
+    private func considerHeld() {
+        holdTimer?.invalidate()
+        holdTimer = nil
+        guard !held.isEmpty else { return }
+        if sendWhen == .whenQuiet { sendHeld(held); return }
+        if sendWhen == .whenProcessed, !isMacBusy(), let watcher {
+            let ready = held.filter { Date().timeIntervalSince(watcher.lastChange($0)) >= Self.settledAfterProcessing }
+            if !ready.isEmpty { sendHeld(ready) }
+        }
+        guard !held.isEmpty, sendWhen == .whenProcessed else { return }
+        holdTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in Task { @MainActor in self?.considerHeld() } }
+    }
+
+    /// A held folder goes now.
+    func sendHeld(_ units: [StagingWatcher.Unit]) {
+        for u in units {
+            held.removeAll { $0 == u }
+            enqueue([u], marker: heldMarkers.removeValue(forKey: u))
+        }
+    }
+
+    func sendAllHeld() { sendHeld(held) }
+
+    /// A held folder is not going (it stays in the staging folder; Send All Now or a later change brings it back).
+    func dropHeld(_ unit: StagingWatcher.Unit) {
+        held.removeAll { $0 == unit }
+        heldMarkers[unit] = nil
+        watcher?.markSent(unit)
     }
 
     // MARK: - Uploads
@@ -150,7 +217,7 @@ final class TeamNASModel: ObservableObject {
         let marker = Marker(folder: unit.folder, from: Host.current().localizedName ?? "Mac", sentAt: Date().timeIntervalSince1970,
                             event: e.isEmpty ? nil : e, card: cardName, cardUuid: card.uuid, handover: handover,
                             files: outcome.copied.count + outcome.skipped.count, bytes: outcome.bytes)
-        enqueue([unit], marker: try? JSONEncoder().encode(marker))
+        receive([unit], marker: try? JSONEncoder().encode(marker))
         watcher?.markSent(unit)
     }
 

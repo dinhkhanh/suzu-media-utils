@@ -87,6 +87,24 @@ struct TeamNASSettings: View {
             }
             Toggle("Send anything new in the staging folder by itself", isOn: $nas.autoSend)
                 .help("The staging folder mirrors the folder on the NAS: whatever lands in it (a card copy, a folder dragged in, an export) goes up under the same name once it has been quiet for 20 seconds")
+            Picker("Send a new folder", selection: $nas.sendWhen) {
+                ForEach(TeamNASModel.SendWhen.allCases) { Text($0.title).tag($0) }
+            }
+            .help("After this Mac has processed it: the folder waits until its faces are processed, the rules have moved files where they go and nothing has changed for a minute, so the NAS gets it arranged, once. Only when I click Send: it waits here for you.")
+            if !nas.held.isEmpty {
+                ForEach(nas.held, id: \.self) { u in
+                    HStack {
+                        Image(systemName: "pause.circle").foregroundStyle(.secondary)
+                        Text(u.title).fontWeight(.medium)
+                        Spacer()
+                        Text(nas.sendWhen == .manual ? "waiting for you" : "waiting for processing").font(.caption).foregroundStyle(.secondary)
+                        Button("Send") { nas.sendHeld([u]) }.controlSize(.small)
+                        Button { nas.dropHeld(u) } label: { Image(systemName: "xmark.circle") }.buttonStyle(.plain).foregroundStyle(.secondary)
+                            .help("Not now: it stays in the staging folder and is not sent until it changes again or Send All Now")
+                    }
+                }
+                HStack { Spacer(); Button("Send All Waiting") { nas.sendAllHeld() } }
+            }
             Toggle("Delete the staging copy once it is on the NAS and verified", isOn: $nas.deleteStagedWhenDone)
             HStack {
                 Button("Send All Now") { nas.sendAllNow() }

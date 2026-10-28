@@ -241,6 +241,10 @@ final class FaceGroupingModel: ObservableObject {
         service.teamSync.onChange = { [weak self] in Task { @MainActor in self?.applyTeamStatus() } }
         ToolWork.faces = self
         exports.model = self
+        nas.isMacBusy = { [weak self] in
+            guard let self else { return false }
+            return stats.pending > 0 || (self.service?.processor.queuedCount ?? 0) > 0 || exports.jobs.contains { $0.started && $0.result == nil }
+        }
         nas.attach(store: service.store, teams: teams)
         service.start()
         observe()

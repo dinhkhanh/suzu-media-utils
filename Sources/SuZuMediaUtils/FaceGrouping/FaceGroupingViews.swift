@@ -398,6 +398,11 @@ struct FaceGroupingStatusBody: View {
                 Image(systemName: "clock").font(.caption).foregroundStyle(.secondary)
                 Text("\(nas.status.queued) upload\(nas.status.queued == 1 ? "" : "s") waiting").font(.caption).foregroundStyle(.secondary)
             }
+        case .idle where !nas.held.isEmpty:
+            HStack(spacing: 5) {
+                Image(systemName: "pause.circle").font(.caption).foregroundStyle(.secondary)
+                Text("\(nas.held.count) folder\(nas.held.count == 1 ? "" : "s") to send \(nas.sendWhen == .manual ? "when you say" : "after processing")").font(.caption).foregroundStyle(.secondary)
+            }
         default:
             EmptyView()
         }
