@@ -6,7 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 NAME="SuZu Media Utils"
-VERSION="${VERSION:-0.8.33}"
+VERSION="${VERSION:-0.8.34}"
 SPARKLE_FEED_URL="${SPARKLE_FEED_URL:-https://github.com/dinhkhanh/suzu-media-utils/releases/latest/download/appcast.xml}"
 SPARKLE_PUBLIC_KEY="${SPARKLE_PUBLIC_KEY:-SRLHhBqtlIsBvuqpk/ONBFaAS629idQVYwoebgfGd/E=}"
 swift build -c release --product SuZuMediaUtils

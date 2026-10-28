@@ -177,6 +177,8 @@ final class FaceGroupingModel: ObservableObject {
     /// Projects shared with other Macs through a folder (see TeamSync), and how the sharing is going.
     @Published var teams: [TeamRecord] = []
     @Published var teamStatus: [Int64: TeamSync.TeamStatus] = [:]
+    /// The team NAS and the uploads to it (Settings → Team NAS, Copy from Cards → Team NAS).
+    let nas = TeamNASModel()
     @Published var askShareTeam = false
     @Published var askJoinTeam = false
     /// The open project's team, if it is shared.
@@ -239,6 +241,7 @@ final class FaceGroupingModel: ObservableObject {
         service.teamSync.onChange = { [weak self] in Task { @MainActor in self?.applyTeamStatus() } }
         ToolWork.faces = self
         exports.model = self
+        nas.attach(store: service.store, teams: teams)
         service.start()
         observe()
         if UserDefaults.standard.bool(forKey: "sharingEnabled") { setSharing(true) }
@@ -309,7 +312,7 @@ final class FaceGroupingModel: ObservableObject {
                 // The project changed while reading: the next tick reads the new one.
                 guard project == self.currentProject, range == self.sessionRange else { self.dirty = true; return }
                 if let (people, sources, stats, albums, rules, projects, known, sessions, teams, overview, groups) = result {
-                    if teams != self.teams { self.teams = teams; self.applyTeamStatus() }
+                    if teams != self.teams { self.teams = teams; self.applyTeamStatus(); self.nas.teamsChanged(teams) }
                     if sessions != self.sessions {
                         if sessions.count > self.sessions.count, !self.sessions.isEmpty, let s = sessions.last {
                             self.log("Session \(self.sessionTitle(s)) started", icon: "clock")

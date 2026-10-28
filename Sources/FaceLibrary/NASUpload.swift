@@ -358,3 +358,35 @@ public enum RsyncUpload {
         var string: String { lock.lock(); defer { lock.unlock() }; return String(decoding: data, as: UTF8.self) }
     }
 }
+
+extension RsyncUpload {
+    /// Tries the connection without sending anything: ssh in with the key and look at the base path. Returns a
+    /// sentence for the Team NAS pane, or throws a `Failure` with one.
+    public static func testConnection(_ c: NASConnection) throws -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        var args = ["-p", String(c.port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
+        if let k = c.identityFile { args += ["-i", k, "-o", "IdentitiesOnly=yes"] }
+        if let h = c.knownHostsFile { args += ["-o", "UserKnownHostsFile=\(h)", "-o", "StrictHostKeyChecking=yes"] }
+        let quoted = "'" + c.basePath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        args += [c.target, "if [ -d \(quoted) ]; then if [ -w \(quoted) ]; then echo writable; else echo readonly; fi; else echo missing; fi; rsync --version 2>/dev/null | head -1"]
+        p.arguments = args
+        let out = Pipe(), err = Pipe()
+        p.standardOutput = out
+        p.standardError = err
+        p.standardInput = FileHandle.nullDevice
+        try p.run()
+        let o = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let e = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { throw classify(code: p.terminationStatus == 255 ? 255 : p.terminationStatus, stderr: e) }
+        let lines = o.split(whereSeparator: \.isNewline).map(String.init)
+        let rsyncLine = lines.first { $0.hasPrefix("rsync") }.map { $0.split(separator: " ").prefix(3).joined(separator: " ") }
+        guard let rsyncLine else { throw Failure.other(code: 0, message: "The NAS answered, but has no rsync. Enable the rsync service on it (Synology: File Services → rsync).") }
+        switch lines.first {
+        case "writable": return "Connected as \(c.user). \(c.basePath) is there and writable; the NAS has \(rsyncLine)."
+        case "readonly": throw Failure.notWritable("\(c.basePath) is there but \(c.user) can't write to it")
+        default: throw Failure.notWritable("\(c.basePath) is not on the NAS")
+        }
+    }
+}

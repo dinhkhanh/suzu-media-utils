@@ -67,6 +67,8 @@ struct SuZuMediaUtilsApp: App {
                     .tabItem { Label("Watermarks", systemImage: "seal") }
                 SharingSettings()
                     .tabItem { Label("Sharing", systemImage: "network") }
+                TeamNASSettings(nas: faces.nas)
+                    .tabItem { Label("Team NAS", systemImage: "externaldrive.badge.icloud") }
                 UpdateSettings()
                     .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
             }

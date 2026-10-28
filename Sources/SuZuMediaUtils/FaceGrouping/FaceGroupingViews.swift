@@ -296,7 +296,7 @@ struct FaceGroupingStatus: View {
         // copies likewise follow their own progress (PeopleCopies).
         VStack(spacing: 0) {
             PeopleCopiesView(jobs: model.exports)
-            FaceGroupingStatusBody(model: model, processing: model.processing, showActivity: $showActivity)
+            FaceGroupingStatusBody(model: model, processing: model.processing, nas: model.nas, showActivity: $showActivity)
         }
     }
 }
@@ -304,6 +304,7 @@ struct FaceGroupingStatus: View {
 struct FaceGroupingStatusBody: View {
     @ObservedObject var model: FaceGroupingModel
     @ObservedObject var processing: ProcessingStatus
+    @ObservedObject var nas: TeamNASModel
     @Binding var showActivity: Bool
 
     /// Title, detail (right-aligned), and a progress fraction (nil: busy without a known end; -1: no bar).
@@ -351,6 +352,7 @@ struct FaceGroupingStatusBody: View {
                     ProgressView().progressViewStyle(.linear).controlSize(.small)
                 }
                 teamLine
+                nasLine
             }
             .padding(.horizontal, 12).padding(.vertical, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -361,6 +363,40 @@ struct FaceGroupingStatusBody: View {
         .padding(.horizontal, 10).padding(.bottom, 10).padding(.top, 4)
         .help("What the library is doing. Click for tonight's activity.")
         .popover(isPresented: $showActivity, arrowEdge: .top) { ActivityPopover() }
+    }
+
+    /// The upload to the team NAS under way, or why it waits (see TeamNASModel).
+    @ViewBuilder var nasLine: some View {
+        switch nas.status.phase {
+        case .uploading(let job, let p):
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.up.circle.fill").font(.caption).foregroundStyle(Color.accent)
+                    Text("Uploading \(job.title)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text([p.percent > 0 ? "\(p.percent)%" : nil, p.remaining.map(TeamNASModel.timeLeft)].compactMap { $0 }.joined(separator: " · "))
+                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                }
+                ProgressView(value: Double(p.percent), total: 100).progressViewStyle(.linear).controlSize(.small)
+            }
+        case .waiting(let job, _, _):
+            HStack(spacing: 5) {
+                Circle().fill(Color.notice).frame(width: 7, height: 7)
+                Text("Upload of \(job.title) will try again").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        case .waitingForNetwork:
+            HStack(spacing: 5) {
+                Circle().fill(Color.notice).frame(width: 7, height: 7)
+                Text("Upload waits for the network").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        case .idle where nas.status.queued > 0:
+            HStack(spacing: 5) {
+                Image(systemName: "clock").font(.caption).foregroundStyle(.secondary)
+                Text("\(nas.status.queued) upload\(nas.status.queued == 1 ? "" : "s") waiting").font(.caption).foregroundStyle(.secondary)
+            }
+        default:
+            EmptyView()
+        }
     }
 
     @ViewBuilder var teamLine: some View {

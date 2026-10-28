@@ -18,14 +18,29 @@ struct CardCopyTool: View {
     @AppStorage("cardCopyAddToProject") private var addToProject = true
     @AppStorage("cardCopySplitVideos") private var splitVideos = false
     @AppStorage("cardCopyVideoDestination") private var videoDestinationPath = ""
+    /// Copies go to the team NAS: to the staging folder on this Mac first, then up by themselves (TeamNASModel).
+    @AppStorage("cardCopyToNAS") private var toNAS = false
+    /// The event's folder on the NAS; the open project's name until something else is typed.
+    @AppStorage("cardCopyNASEvent") private var nasEventTyped = ""
+    @Environment(\.openSettings) private var openSettings
 
-    var destination: URL? { destinationPath.isEmpty ? nil : URL(fileURLWithPath: destinationPath, isDirectory: true) }
-    var videoDestination: URL? { splitVideos && !videoDestinationPath.isEmpty ? URL(fileURLWithPath: videoDestinationPath, isDirectory: true) : nil }
+    var nasEvent: String {
+        let t = nasEventTyped.trimmingCharacters(in: .whitespaces)
+        return t.isEmpty ? (faces.currentProject == nil ? "" : faces.projectName) : t
+    }
+    var destination: URL? {
+        if toNAS { return faces.nas.stagingFolder }
+        return destinationPath.isEmpty ? nil : URL(fileURLWithPath: destinationPath, isDirectory: true)
+    }
+    var videoDestination: URL? { !toNAS && splitVideos && !videoDestinationPath.isEmpty ? URL(fileURLWithPath: videoDestinationPath, isDirectory: true) : nil }
     /// Where this card's photos go: its own place when it has one (several cards copy side by side to different
-    /// disks at full speed), else the folder above.
-    func destination(for card: CardCopyModel.Card) -> URL? { model.ownDestination(card.id) ?? destination }
-    /// Both places chosen for this card (videos' too, when they have their own).
-    func ready(_ card: CardCopyModel.Card) -> Bool { destination(for: card) != nil && (!splitVideos || videoDestination != nil) }
+    /// disks at full speed), else the folder above. On the way to the NAS, always the staging folder.
+    func destination(for card: CardCopyModel.Card) -> URL? { toNAS ? destination : (model.ownDestination(card.id) ?? destination) }
+    /// Both places chosen for this card (videos' too, when they have their own); for the NAS, a NAS attached.
+    func ready(_ card: CardCopyModel.Card) -> Bool {
+        if toNAS { return faces.nas.isConnected }
+        return destination(for: card) != nil && (!splitVideos || videoDestination != nil)
+    }
 
     var withNew: [CardCopyModel.Card] { model.cards.filter { c in !c.copying && !c.planning && !c.gone && ready(c) && (c.plan.map { !$0.new.isEmpty } ?? false) } }
     var copying: Int { model.cards.count(where: \.copying) }
@@ -41,7 +56,8 @@ struct CardCopyTool: View {
                         let free = destination(for: card).flatMap { CardCopier.freeSpace(at: $0) }
                         CardRow(card: card, model: model, canCopy: ready(card), free: free,
                                 videoFree: videoDestination.flatMap { CardCopier.freeSpace(at: $0) } ?? free,
-                                destination: destination(for: card), videoDestination: videoDestination) { copy(card) }
+                                destination: destination(for: card), videoDestination: videoDestination,
+                                nasEvent: toNAS ? (faces.nas.isConnected ? nasEvent : nil) : nil) { copy(card) }
                     }
                     let others = model.known.filter { k in !model.cards.contains { $0.identity.uuid == k.card.uuid } }
                     if !others.isEmpty {
@@ -121,15 +137,25 @@ struct CardCopyTool: View {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 8) {
                     SectionLabel("Destination")
-                    DestinationBox(title: splitVideos ? "Photos" : "Photos & videos", url: Binding(get: { destination }, set: { destinationPath = $0?.path ?? "" }))
-                    LabeledSwitch("Videos go to their own folder", isOn: $splitVideos,
-                                  help: "Photos to one place, videos to another (an editor's drive, say); a clip's XML goes with the clip")
-                    if splitVideos {
-                        DestinationBox(title: "Videos", url: Binding(get: { videoDestinationPath.isEmpty ? nil : URL(fileURLWithPath: videoDestinationPath, isDirectory: true) },
-                                                                 set: { videoDestinationPath = $0?.path ?? "" }))
+                    Picker("", selection: $toNAS) {
+                        Text("A folder").tag(false)
+                        Text("Team NAS").tag(true)
                     }
-                    Text("Each card gets its own folder here, named after the card. A card can go somewhere else instead — its panel has a Change… button and remembers it for next time, so cards copying to different disks run side by side at full speed.")
-                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .pickerStyle(.segmented).labelsHidden()
+                    .help("A folder: this Mac, a drive or a share. Team NAS: copied to this Mac first, then sent to the team's NAS by itself, from anywhere.")
+                    if toNAS {
+                        nasBox
+                    } else {
+                        DestinationBox(title: splitVideos ? "Photos" : "Photos & videos", url: Binding(get: { destination }, set: { destinationPath = $0?.path ?? "" }))
+                        LabeledSwitch("Videos go to their own folder", isOn: $splitVideos,
+                                      help: "Photos to one place, videos to another (an editor's drive, say); a clip's XML goes with the clip")
+                        if splitVideos {
+                            DestinationBox(title: "Videos", url: Binding(get: { videoDestinationPath.isEmpty ? nil : URL(fileURLWithPath: videoDestinationPath, isDirectory: true) },
+                                                                     set: { videoDestinationPath = $0?.path ?? "" }))
+                        }
+                        Text("Each card gets its own folder here, named after the card. A card can go somewhere else instead — its panel has a Change… button and remembers it for next time, so cards copying to different disks run side by side at full speed.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 VStack(alignment: .leading, spacing: 10) {
                     SectionLabel("Options")
@@ -150,6 +176,41 @@ struct CardCopyTool: View {
         }
         .frame(width: 320)
         .background(Color.primary.opacity(0.025))
+    }
+
+    /// The Team NAS as a destination: the NAS, the event's folder on it, and where the staging copy sits.
+    @ViewBuilder var nasBox: some View {
+        if let a = faces.nas.attached {
+            HStack(spacing: 10) {
+                Image(systemName: "externaldrive.badge.icloud").foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(a.file.host).fontWeight(.semibold).lineLimit(1).truncationMode(.middle)
+                    Text("\(a.file.basePath)/\(nasEvent.isEmpty ? "Uploads" : nasEvent)/<card>").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+                Spacer(minLength: 4)
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 9).fill(Color.primary.opacity(0.05)))
+            TextField("Event folder on the NAS", text: $nasEventTyped, prompt: Text(faces.currentProject == nil ? "Event" : faces.projectName))
+                .textFieldStyle(.roundedBorder)
+                .help("The folder under \(a.file.basePath) the cards go into; the open project's name unless you type one")
+            Text("The card is copied to \(faces.nas.stagingFolder.lastPathComponent) on this Mac first (minutes), then sent to the NAS by itself: resumed if the connection drops, checked once there, and the team sees each hand-over only when it is complete. Progress is in the status pill; the staging folder and the uploads are under Settings → Team NAS.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        } else {
+            HStack(spacing: 10) {
+                Image(systemName: "externaldrive.badge.xmark").foregroundStyle(Color.notice)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("No NAS attached").fontWeight(.semibold).foregroundStyle(Color.notice)
+                    Text(faces.teams.isEmpty ? "Join a team first; the NAS comes with it" : "Settings → Team NAS → Attach a NAS…").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 4)
+                if !faces.teams.isEmpty {
+                    Button("Settings…") { openSettings() }.controlSize(.small)
+                }
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 9).fill(Color.primary.opacity(0.05)))
+        }
     }
 
     func copy(_ card: CardCopyModel.Card) {
@@ -179,10 +240,17 @@ struct CardCopyTool: View {
                 o.onCopied = { landed in service.fileLanded(landed) }
             }
         }
+        let toNAS = toNAS, event = nasEvent, perHandover = perHandover
         model.copy(card.id, options: o, store: store) { outcome in
             if let project, !outcome.copied.isEmpty || !outcome.skipped.isEmpty {
                 faces.addCopiedFolder(outcome.cardFolder, project: project)
                 if let v = outcome.videoCardFolder { faces.addCopiedFolder(v, project: project) }
+            }
+            // What landed goes up, even after an interruption: the rest follows on the next copy, into the same
+            // hand-over folder, and the upload picks up what is new there.
+            if toNAS, let plan = card.plan, !outcome.copied.isEmpty || !outcome.skipped.isEmpty {
+                faces.nas.enqueue(folder: outcome.folder, event: event, card: plan.card,
+                                  handover: perHandover ? outcome.folder.lastPathComponent : nil, outcome: outcome)
             }
         }
     }
@@ -222,12 +290,15 @@ struct CardRow: View {
     let videoFree: Int64?
     let destination: URL?
     let videoDestination: URL?
+    /// On the way to the team NAS: the event's folder there (the copy lands in `destination`, the staging folder,
+    /// first).
+    let nasEvent: String?
     let copy: () -> Void
     @State private var label: String
     @EnvironmentObject var faces: FaceGroupingModel
 
     init(card: CardCopyModel.Card, model: CardCopyModel, canCopy: Bool, free: Int64?, videoFree: Int64?,
-         destination: URL?, videoDestination: URL?, copy: @escaping () -> Void) {
+         destination: URL?, videoDestination: URL?, nasEvent: String? = nil, copy: @escaping () -> Void) {
         self.card = card
         self.model = model
         self.canCopy = canCopy
@@ -235,6 +306,7 @@ struct CardRow: View {
         self.videoFree = videoFree
         self.destination = destination
         self.videoDestination = videoDestination
+        self.nasEvent = nasEvent
         self.copy = copy
         _label = State(initialValue: card.plan?.card.label ?? "")
     }
@@ -406,14 +478,18 @@ struct CardRow: View {
         let folder = CardCopier.cardFolderName(p.card)
         return HStack(spacing: 6) {
             Image(systemName: "arrow.turn.down.right").font(.caption).foregroundStyle(.tertiary)
-            if let destination {
+            if let nasEvent, let destination {
+                Text("Team NAS → \(nasEvent.isEmpty ? "Uploads" : nasEvent)/\(folder) · via \(destination.lastPathComponent) on this Mac")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    .help("Copied to \(destination.appendingPathComponent(folder).path) first, then sent to the NAS by itself")
+            } else if let destination {
                 Text("Photos → \(destination.lastPathComponent)/\(folder)" + (videoDestination.map { " · Videos → \($0.lastPathComponent)/\(folder)" } ?? ""))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     .help(destination.appendingPathComponent(folder).path)
             } else {
                 Text("Choose a destination folder on the right").font(.caption).foregroundStyle(Color.notice)
             }
-            destinationMenu
+            if nasEvent == nil { destinationMenu }
         }
     }
 
