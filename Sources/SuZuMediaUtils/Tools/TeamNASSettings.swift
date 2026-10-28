@@ -54,7 +54,7 @@ struct TeamNASSettings: View {
             } header: {
                 Text("Team NAS")
             } footer: {
-                Text("Every Mac of the team uploads with this key; nothing to set up on a teammate's Mac. Uploads go over ssh on this one port, with the key only — the NAS's shared folders stay off the internet.")
+                Text("Every Mac of the team uploads with this key. Uploads go over ssh on this one port; the NAS's shared folders stay off the internet.")
                     .foregroundStyle(.secondary)
             }
         } else {
@@ -256,7 +256,7 @@ struct AttachNASSheet: View {
             }
             .formStyle(.columns)
             .textFieldStyle(.roundedBorder)
-            Text("The folder as the NAS itself sees it, not as the share is mounted here: on a Synology every share is under /volume1, so the share “homes” is /volume1/homes. The user needs write access to it and SSH turned on (Synology: Control Panel → Terminal & SNMP). Keep the user out of the administrators group if you can.")
+            Text("The folder as the NAS itself sees it, not as the share is mounted here: on a Synology every share is under /volume1, so the share “homes” is /volume1/homes. The NAS's rsync only writes where DSM's shared-folder permissions give the user Read/Write (Control Panel → Shared Folder → Permissions); the user's own home, /volume1/homes/<user>, always works. SSH must be on (Control Panel → Terminal & SNMP).")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Color.notice).fixedSize(horizontal: false, vertical: true)

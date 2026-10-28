@@ -64,6 +64,7 @@ while !args.isEmpty {
         print("""
         usage: nasupload <local folder> <remote path> [--team FOLDER | --user U --key FILE] [--host H] [--port N] [--base P] [--known-hosts FILE] [--rsync FILE] [--pass P]... [--dry]
                nasupload attach <team folder> [--host H] [--port N] [--user U] [--base P] [--key FILE]
+               nasupload test --team FOLDER [--base P]
                nasupload show <team folder>
                nasupload detach <team folder>
         """)
@@ -117,6 +118,18 @@ case "attach":
 
     Every Mac of the team now uploads with this key; nobody needs to type anything.
     """)
+
+case "test":
+    // The app's Test Connection, from the command line: ssh in with the team's key, look at the folder, and dry-run
+    // the NAS's rsync against it (a Synology refuses folders DSM's permissions don't allow).
+    guard let teamFolder else { fail("nasupload test needs --team FOLDER") }
+    do {
+        guard var c = try NASTeamConfig.connection(teamFolder: teamFolder, teamUuid: teamFolder.lastPathComponent) else {
+            fail("no NAS attached to the team in \(teamFolder.path)")
+        }
+        if conn.basePath != NASConnection.suzu.basePath { c.basePath = conn.basePath }
+        print(try RsyncUpload.testConnection(c, rsync: rsync ?? RsyncUpload.bundledRsync))
+    } catch let f as RsyncUpload.Failure { fail(f.message) } catch { fail(error.localizedDescription) }
 
 case "show":
     let folder = teamFolderArg()

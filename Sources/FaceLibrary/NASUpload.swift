@@ -29,11 +29,16 @@ public struct NASConnection: Codable, Equatable, Sendable {
     /// `user@host`.
     public var target: String { "\(user)@\(host)" }
 
-    /// `path` under `basePath` (an absolute `path` is used as is).
+    /// `path` under `basePath` (an absolute `path` is used as is), in the form the NAS stores names in.
     public func remotePath(_ path: String) -> String {
-        if path.hasPrefix("/") { return path }
-        return (basePath as NSString).appendingPathComponent(path)
+        if path.hasPrefix("/") { return Self.nasForm(path) }
+        return Self.nasForm((basePath as NSString).appendingPathComponent(path))
     }
+
+    /// A name the way a Linux NAS keeps it: precomposed Unicode (NFC). A Mac writes "Ị" as I plus a combining
+    /// dot (NFD), and that is what a path typed or pasted here carries; sent as is, it names a different folder
+    /// on the NAS, which mkdir then creates next to the real one, looking the same.
+    public static func nasForm(_ s: String) -> String { s.precomposedStringWithCanonicalMapping }
 
     /// The remote shell for rsync's -e: never asks (BatchMode), gives up on a dead link within a minute instead of
     /// hanging for hours, pins the host key when there is one.
@@ -103,6 +108,9 @@ public enum RsyncUpload {
         case diskFull
         /// The NAS user can't write there.
         case notWritable(String)
+        /// A Synology's rsync checks the destination against DSM's shared-folder permissions, not the file system's,
+        /// and when they say no it closes the connection without a word (the reason is in the NAS's own log).
+        case refusedFolder(String)
         /// Some files didn't make it (the rest did); rsync's words for the first.
         case someFilesFailed(String)
         /// The link dropped in the middle, or the NAS's rsync stopped; rsync's words for it, when it had any.
@@ -110,7 +118,8 @@ public enum RsyncUpload {
         case cancelled
         /// The bundled rsync isn't there.
         case rsyncMissing(String)
-        /// A Synology's rsync refuses to serve until its rsync service is on (exit 43, "rsync service is no running").
+        /// A Synology's rsync refuses to serve (exit 43, "rsync service is no running") until its rsync service is on
+        /// and the user holds the rsync application privilege; it says the same for both.
         case rsyncServiceOff
         case other(code: Int32, message: String)
 
@@ -122,11 +131,12 @@ public enum RsyncUpload {
             case .hostKeyMismatch: return "Another machine answers to the NAS's address. Nothing was sent; ask Khanh to check the NAS."
             case .diskFull: return "The NAS is full."
             case .notWritable(let s): return "The NAS user can't write there: \(s)"
+            case .refusedFolder(let p): return "The NAS's rsync refuses to write to \(p) for this user. On a Synology the folder must be inside a shared folder the user has Read/Write on (Control Panel → Shared Folder → Permissions); the user's own home always works."
             case .someFilesFailed(let s): return "Some files couldn't be sent: \(s). The upload will try again."
             case .interrupted(let s): return s.isEmpty ? "The connection dropped. The upload will carry on from where it stopped." : "The connection dropped (\(s)). The upload will carry on from where it stopped."
             case .cancelled: return "Stopped."
             case .rsyncMissing(let p): return "The app's copy of rsync is missing (\(p))."
-            case .rsyncServiceOff: return "The NAS's rsync service is off. On a Synology: Control Panel → File Services → rsync → Enable rsync service."
+            case .rsyncServiceOff: return "The NAS refuses rsync for this user. On a Synology, two settings: Control Panel → File Services → rsync → Enable rsync service, and Control Panel → User & Group → the user → Edit → Applications → rsync → Allow."
             case .other(let code, let m): return m.isEmpty ? "rsync stopped with code \(code)." : m
             }
         }
@@ -135,7 +145,7 @@ public enum RsyncUpload {
         public var isRetryable: Bool {
             switch self {
             case .unreachable, .diskFull, .someFilesFailed, .interrupted: return true
-            case .refusedKey, .hostKeyMismatch, .notWritable, .cancelled, .rsyncMissing, .rsyncServiceOff, .other: return false
+            case .refusedKey, .hostKeyMismatch, .notWritable, .refusedFolder, .cancelled, .rsyncMissing, .rsyncServiceOff, .other: return false
             }
         }
     }
@@ -159,6 +169,7 @@ public enum RsyncUpload {
         // (exit 23) and would mark every upload as partly failed; the share's own permissions apply instead.
         // The folder is made on the NAS by the remote shell rather than by --mkpath, which a Synology's older rsync
         // doesn't know. The path is single-quoted for that shell.
+        let remotePath = NASConnection.nasForm(remotePath)
         let mkdir = "mkdir -p '" + remotePath.replacingOccurrences(of: "'", with: "'\\''") + "' && rsync"
         var args = ["-rlt", "--partial", "--partial-dir=\(partialDir)", "--secluded-args", "--rsync-path=\(mkdir)",
                     "--info=progress2", "--no-inc-recursive", "--out-format=\(namePrefix)%n",
@@ -194,52 +205,51 @@ public enum RsyncUpload {
         }
     }
 
-    /// One rsync; its stdout feeds `progress`, its stderr the failure.
+    /// One rsync; its stdout feeds `progress`, its stderr the failure. Started with RawProcess, not Foundation's
+    /// Process, so the NAS gets folder names byte for byte (Process would decompose the Vietnamese ones).
     static func run(_ rsync: URL, arguments: [String], pass: Pass,
                     progress: @escaping @Sendable (Progress) -> Void, isCancelled: @escaping @Sendable () -> Bool) throws {
-        let p = Process()
-        p.executableURL = rsync
-        p.arguments = arguments
         var env = ProcessInfo.processInfo.environment
         env["LC_ALL"] = "C"
-        p.environment = env
-        let out = Pipe(), err = Pipe()
-        p.standardOutput = out
-        p.standardError = err
-        p.standardInput = FileHandle.nullDevice
         let reader = OutputReader(pass: pass, progress: progress)
-        out.fileHandleForReading.readabilityHandler = { h in
+        let stderr = Collector()
+        let child: RawProcess.Child
+        do { child = try RawProcess.spawn(rsync.path, arguments: arguments, environment: env) } catch { throw Failure.rsyncMissing(rsync.path) }
+        child.stdout.readabilityHandler = { h in
             let d = h.availableData
             if d.isEmpty { h.readabilityHandler = nil } else { reader.feed(d) }
         }
-        let stderr = Collector()
-        err.fileHandleForReading.readabilityHandler = { h in
+        child.stderr.readabilityHandler = { h in
             let d = h.availableData
             if d.isEmpty { h.readabilityHandler = nil } else { stderr.append(d) }
         }
-        do { try p.run() } catch { throw Failure.rsyncMissing(rsync.path) }
         var cancelled = false
-        while p.isRunning {
+        var exit: RawProcess.Exit
+        while true {
+            if let e = RawProcess.poll(child) { exit = e; break }
             if !cancelled, isCancelled() {
                 cancelled = true
-                p.terminate()
+                RawProcess.terminate(child)
             }
             Thread.sleep(forTimeInterval: 0.2)
         }
-        p.waitUntilExit()
         // Whatever is still in the pipes after exit.
-        reader.feed(out.fileHandleForReading.readDataToEndOfFile())
-        stderr.append(err.fileHandleForReading.readDataToEndOfFile())
-        out.fileHandleForReading.readabilityHandler = nil
-        err.fileHandleForReading.readabilityHandler = nil
+        child.stdout.readabilityHandler = nil
+        child.stderr.readabilityHandler = nil
+        reader.feed(child.stdout.readDataToEndOfFile())
+        stderr.append(child.stderr.readDataToEndOfFile())
         if cancelled { throw Failure.cancelled }
-        if p.terminationReason == .uncaughtSignal { throw Failure.interrupted("") }
-        if p.terminationStatus != 0 { throw classify(code: p.terminationStatus, stderr: stderr.string) }
+        if exit.signaled { throw Failure.interrupted("") }
+        if exit.status != 0 { throw classify(code: exit.status, stderr: stderr.string, remotePath: arguments.last.map { $0.split(separator: ":", maxSplits: 1).last.map(String.init) ?? $0 }) }
     }
 
     /// rsync's exit code and words, in ours.
-    public static func classify(code: Int32, stderr: String) -> Failure {
+    public static func classify(code: Int32, stderr: String, remotePath: String? = nil) -> Failure {
         let s = stderr
+        // Synology: the server ends the session before the first byte when DSM's permissions say no.
+        if code == 12, let remotePath, s.contains("closed (0 bytes received so far)"), !s.contains("ssh:"), !s.contains("Permission denied (") {
+            return .refusedFolder(remotePath)
+        }
         if s.contains("Host key verification failed") || s.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") || s.contains("No ED25519 host key is known") || s.contains("host key for") && s.contains("has changed") {
             return .hostKeyMismatch
         }
@@ -368,33 +378,34 @@ public enum RsyncUpload {
 extension RsyncUpload {
     /// Tries the connection without sending anything: ssh in with the key and look at the base path. Returns a
     /// sentence for the Team NAS pane, or throws a `Failure` with one.
-    public static func testConnection(_ c: NASConnection) throws -> String {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+    public static func testConnection(_ c: NASConnection, rsync: URL = bundledRsync) throws -> String {
         var args = ["-p", String(c.port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
         if let k = c.identityFile { args += ["-i", k, "-o", "IdentitiesOnly=yes"] }
         if let h = c.knownHostsFile { args += ["-o", "UserKnownHostsFile=\"\(h)\"", "-o", "StrictHostKeyChecking=yes"] }
-        let quoted = "'" + c.basePath.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        // rsync --version answers even when a Synology's rsync service is off; only a --server run tells (exit 43,
-        // "rsync service is no running"), so one is started with nothing on its stdin: on, it ends at once (the
-        // protocol stream is empty); off, it says so.
-        args += [c.target, "if [ -d \(quoted) ]; then if [ -w \(quoted) ]; then echo writable; else echo readonly; fi; else echo missing; fi; rsync --version 2>/dev/null | head -1; rsync --server -nltre.iLsfx . \(quoted) < /dev/null 2>&1 | grep -ai 'service is no' >/dev/null && echo serviceoff; true"]
-        p.arguments = args
-        let out = Pipe(), err = Pipe()
-        p.standardOutput = out
-        p.standardError = err
-        p.standardInput = FileHandle.nullDevice
-        try p.run()
-        let o = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        let e = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else { throw classify(code: p.terminationStatus == 255 ? 255 : p.terminationStatus, stderr: e) }
+        let base = NASConnection.nasForm(c.basePath)
+        let quoted = "'" + base.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        args += [c.target, "if [ -d \(quoted) ]; then if [ -w \(quoted) ]; then echo writable; else echo readonly; fi; else echo missing; fi; rsync --version 2>/dev/null | head -1"]
+        let child = try RawProcess.spawn("/usr/bin/ssh", arguments: args)
+        let o = String(decoding: child.stdout.readDataToEndOfFile(), as: UTF8.self)
+        let e = String(decoding: child.stderr.readDataToEndOfFile(), as: UTF8.self)
+        let exit = RawProcess.wait(child)
+        guard exit.status == 0, !exit.signaled else { throw classify(code: exit.signaled ? 255 : exit.status, stderr: e) }
         let lines = o.split(whereSeparator: \.isNewline).map(String.init)
         let rsyncLine = lines.first { $0.hasPrefix("rsync") }.map { $0.split(separator: " ").prefix(3).joined(separator: " ") }
         guard let rsyncLine else { throw Failure.other(code: 0, message: "The NAS answered, but has no rsync. Enable the rsync service on it (Synology: File Services → rsync).") }
-        if lines.contains("serviceoff") { throw Failure.rsyncServiceOff }
         switch lines.first {
-        case "writable": return "Connected as \(c.user). \(c.basePath) is there and writable; the NAS has \(rsyncLine)."
+        case "writable":
+            // What the NAS's own rsync says about the folder: a Synology checks DSM's shared-folder permissions,
+            // which the shell's -w knows nothing about, and refuses silently. A dry run of nothing tells.
+            if FileManager.default.isExecutableFile(atPath: rsync.path) {
+                let empty = FileManager.default.temporaryDirectory.appendingPathComponent("suzu-empty-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: empty) }
+                var a = arguments(local: empty, remotePath: c.basePath, connection: c, pass: .everything)
+                a.insert("--dry-run", at: 0)
+                try run(rsync, arguments: a, pass: .everything, progress: { _ in }, isCancelled: { false })
+            }
+            return "Connected as \(c.user). \(c.basePath) is there and writable; the NAS has \(rsyncLine)."
         case "readonly": throw Failure.notWritable("\(c.basePath) is there but \(c.user) can't write to it")
         default:
             // The path as the NAS sees it: on a Synology every share is under /volume1 (or /volume2…), so

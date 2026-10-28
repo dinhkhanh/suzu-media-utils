@@ -104,6 +104,10 @@ final class NASUploadTests: XCTestCase {
         XCTAssertEqual(RsyncUpload.classify(code: 12, stderr: "rsync: connection unexpectedly closed (1234 bytes received so far) [sender]"), .interrupted("connection unexpectedly closed (1234 bytes received so far) [sender]"))
         XCTAssertEqual(RsyncUpload.classify(code: 12, stderr: "sh: rsync: command not found\nrsync: connection unexpectedly closed (0 bytes received so far) [sender]\nrsync error: error in rsync protocol data stream (code 12) at io.c(231)"), .interrupted("sh: rsync: command not found"))
         XCTAssertEqual(RsyncUpload.classify(code: 20, stderr: ""), .cancelled)
+        XCTAssertEqual(RsyncUpload.classify(code: 12, stderr: "rsync: connection unexpectedly closed (0 bytes received so far) [sender]\nrsync error: error in rsync protocol data stream (code 12) at io.c(303) [sender=3.5.1]", remotePath: "/volume1/homes/Events"),
+                       .refusedFolder("/volume1/homes/Events"), "a Synology saying no to the folder, silently")
+        XCTAssertEqual(RsyncUpload.classify(code: 12, stderr: "ssh: connect to host nas port 2904: Connection refused\nrsync: connection unexpectedly closed (0 bytes received so far) [sender]", remotePath: "/x"), .unreachable)
+        XCTAssertFalse(RsyncUpload.Failure.refusedFolder("/x").isRetryable)
         XCTAssertEqual(RsyncUpload.classify(code: 12, stderr: "rsync error: rsync service is no running (code 43) at io.c(254) [Receiver=3.1.2]\nrsync: connection unexpectedly closed (0 bytes received so far) [sender]"), .rsyncServiceOff)
         XCTAssertFalse(RsyncUpload.Failure.rsyncServiceOff.isRetryable)
         XCTAssertEqual(RsyncUpload.classify(code: 1, stderr: "rsync: --no-such-option: unknown option"), .other(code: 1, message: "--no-such-option: unknown option"))
@@ -119,6 +123,11 @@ final class NASUploadTests: XCTestCase {
                               knownHostsFile: "/Applications/SuZu Media Utils.app/Contents/Resources/nas_known_hosts")
         XCTAssertEqual(c.remotePath("Event/Nam R5 card 1"), "/volume1/photo/Event/Nam R5 card 1")
         XCTAssertEqual(c.remotePath("/volume2/other"), "/volume2/other")
+        // A Vietnamese name as a Mac types it (I + combining dot below) goes to the NAS precomposed, as it keeps names.
+        let nfd = "16 - CHI\u{0323} EM 3"
+        XCTAssertEqual(Array(c.remotePath(nfd).unicodeScalars.suffix(10).map { $0.value }).contains(0x1ECA), true)
+        XCTAssertEqual(c.remotePath(nfd), "/volume1/photo/16 - CHỊ EM 3")
+        XCTAssertTrue(RsyncUpload.arguments(local: URL(fileURLWithPath: "/tmp/x"), remotePath: "/v/" + nfd, connection: c, pass: .everything).last!.hasSuffix("/v/16 - CHỊ EM 3"))
         // Paths with spaces are double-quoted for rsync's own -e parsing; everything else bare.
         XCTAssertEqual(c.sshCommand, "ssh -p 2904 -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "
                        + "-i \"/Users/me/Library/Application Support/SuZu Media Utils/nas_key\" -o IdentitiesOnly=yes "
@@ -139,6 +148,21 @@ final class NASUploadTests: XCTestCase {
         XCTAssertTrue(v.contains("--checksum"))
         XCTAssertFalse(v.contains("--include=*/"))
         XCTAssertEqual(RsyncUpload.arguments(local: URL(fileURLWithPath: "/tmp/stage/card/"), remotePath: "/x", connection: c, pass: .everything).filter { $0.hasPrefix("--include") }, [])
+    }
+
+    /// Swift compares strings by canonical equivalence, so only the bytes prove it: "Ị" typed on a Mac (I + U+0323)
+    /// reaches the NAS as U+1ECA, the one form it keeps.
+    func testVietnameseNamesGoPrecomposed() {
+        let nfd = "16 - CHI\u{0323} EM 3"
+        let hex = Array(NASConnection.nasForm(nfd).utf8).map { String(format: "%02x", $0) }.joined()
+        XCTAssertTrue(hex.contains("e1bb8a"))
+        XCTAssertFalse(hex.contains("49cca3"))
+        let c = NASConnection(host: "h", user: "u", basePath: "/volume1/" + nfd)
+        let sent = RsyncUpload.arguments(local: URL(fileURLWithPath: "/tmp/x"), remotePath: c.remotePath("card"), connection: c, pass: .everything)
+        let remote = Array(sent.last!.utf8).map { String(format: "%02x", $0) }.joined()
+        XCTAssertTrue(remote.contains("e1bb8a") && !remote.contains("49cca3"), "the destination")
+        let mkdir = Array(sent.first { $0.hasPrefix("--rsync-path=") }!.utf8).map { String(format: "%02x", $0) }.joined()
+        XCTAssertTrue(mkdir.contains("e1bb8a") && !mkdir.contains("49cca3"), "and the mkdir before it")
     }
 
     func testBackoffGrowsThenHolds() {
