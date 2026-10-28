@@ -11,6 +11,11 @@ public final class LibraryService: @unchecked Sendable {
     public var exporter: Exporter { Exporter(store: store) }
     let lock = NSLock()
     var monitors: [Int64: SourceMonitor] = [:]
+    /// The project open in the window (nil: all of them, every folder watched alike), and how often the photo &
+    /// video folders of the other projects are looked at while quiet (nil: not until their project is opened).
+    /// Known-people folders belong to every project. See `watch(openProject:othersEvery:)`.
+    var openProject: Int64?
+    var othersEvery: Double? = SourceMonitor.slowPoll
     var maintenance: DispatchSourceTimer?
     let maintenanceQueue = DispatchQueue(label: "maintenance", qos: .background)
     var burstsDirty = true
@@ -118,7 +123,30 @@ public final class LibraryService: @unchecked Sendable {
             }
         }
         lock.withLock { monitors[s.id!] = m }
+        m.setIdlePoll(idlePoll(project: s.projectId, kind: s.kind))
         m.start()
+    }
+
+    /// Watches the open project's folders (and the known-people folders) closely, the other projects' at
+    /// `othersEvery`. Called again when a folder moves to another project.
+    public func watch(openProject: Int64?, othersEvery: Double?) {
+        let rows = (try? store.db.read { db in
+            try Row.fetchAll(db, sql: "SELECT id, projectId, kind FROM source WHERE removedAt IS NULL")
+        }) ?? []
+        lock.withLock { self.openProject = openProject; self.othersEvery = othersEvery }
+        for r in rows {
+            monitor(r["id"])?.setIdlePoll(idlePoll(project: r["projectId"], kind: SourceKind(rawValue: r["kind"]) ?? .media))
+        }
+    }
+
+    func idlePoll(project: Int64?, kind: SourceKind) -> Double? {
+        let (open, others) = lock.withLock { (openProject, othersEvery) }
+        return Self.idlePoll(project: project, kind: kind, open: open, others: others)
+    }
+
+    static func idlePoll(project: Int64?, kind: SourceKind, open: Int64?, others: Double?) -> Double? {
+        guard let open, kind == .media, let project, project != open else { return SourceMonitor.slowPoll }
+        return others
     }
 
     public func monitor(_ sourceId: Int64) -> SourceMonitor? { lock.withLock { monitors[sourceId] } }

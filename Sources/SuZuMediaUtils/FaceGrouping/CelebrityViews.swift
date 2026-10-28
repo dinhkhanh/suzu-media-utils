@@ -2,6 +2,7 @@ import FaceLibrary
 import SwiftUI
 
 struct FaceGroupingSettings: View {
+    @EnvironmentObject var model: FaceGroupingModel
     @State private var accessKeyId = AWSSettings.credentials?.accessKeyId ?? ""
     @State private var secret = AWSSettings.credentials?.secretAccessKey ?? ""
     @State private var region = AWSSettings.region
@@ -19,8 +20,27 @@ struct FaceGroupingSettings: View {
         ("eu-central-1", "Europe (Frankfurt)"),
     ]
 
+    /// Settings → Face Grouping → Other projects' folders: seconds between looks, 0 = only while open.
+    static let otherProjectsPaces: [(Double, String)] = [
+        (SourceMonitor.slowPoll, "Every 30 seconds, like the open project"),
+        (300, "Every 5 minutes"),
+        (900, "Every 15 minutes"),
+        (3600, "Every hour"),
+        (0, "Only while their project is open"),
+    ]
+
     var body: some View {
         Form {
+            Section {
+                Picker("Look for new files", selection: $model.otherProjectsEvery) {
+                    ForEach(Self.otherProjectsPaces, id: \.0) { Text($0.1).tag($0.0) }
+                }
+            } header: {
+                Text("Other projects' folders")
+            } footer: {
+                Text("The open project's folders and the known-people folders are always watched. Less often means less work for the NAS; new photos in another project get their faces later. When this Mac processes faces for the team, a teammate's new photos in a project you don't have open wait for it too. Opening a project looks at its folders at once.")
+                    .foregroundStyle(.secondary)
+            }
             Section {
                 TextField("Access Key ID", text: $accessKeyId, prompt: Text("AKIA…"))
                 SecureField("Secret Access Key", text: $secret)

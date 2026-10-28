@@ -5,6 +5,7 @@ import FaceLibrary
 import Foundation
 import GRDB
 import MediaKit
+import SwiftUI
 
 struct PersonSummary: Identifiable, Hashable {
     var id: Int64
@@ -130,8 +131,16 @@ final class FaceGroupingModel: ObservableObject {
             sessions = []
             sessionAnchor = nil
             server?.show(project: currentProject, title: projectName)
+            applyWatching()
             refresh()
         }
+    }
+    /// Settings → Face Grouping: how often the other projects' photo & video folders are looked at for new files,
+    /// in seconds (`SourceMonitor.slowPoll`: like the open project's; 0: not until their project is opened).
+    @AppStorage("otherProjectsEvery") var otherProjectsEvery = SourceMonitor.slowPoll { didSet { applyWatching() } }
+
+    private func applyWatching() {
+        service?.watch(openProject: currentProject, othersEvery: otherProjectsEvery > 0 ? otherProjectsEvery : nil)
     }
     /// The open project split into sessions at gaps in capture time (opening, matches, awards…).
     @Published var sessions: [EventSession] = []
@@ -197,6 +206,9 @@ final class FaceGroupingModel: ObservableObject {
     @Published var activity: [ActivityItem] = []
     /// Folders being removed in the background; hidden from the sidebar right away.
     @Published var removing: Set<Int64> = []
+    /// Folders whose look is finding files the library didn't have (shown as "Scanning…"): only those are logged
+    /// when it ends. Every folder of every project is looked at again every 30 s, which is not news.
+    private var finding: Set<Int64> = []
     private var cancellables: Set<AnyCancellable> = []
     private var regionObserver: AnyDatabaseCancellable?
     private var dirty = true
@@ -246,6 +258,7 @@ final class FaceGroupingModel: ObservableObject {
             return stats.pending > 0 || (self.service?.processor.queuedCount ?? 0) > 0 || exports.jobs.contains { $0.started && $0.result == nil }
         }
         nas.attach(store: service.store, teams: teams)
+        applyWatching()
         service.start()
         observe()
         if UserDefaults.standard.bool(forKey: "sharingEnabled") { setSharing(true) }
@@ -369,12 +382,16 @@ final class FaceGroupingModel: ObservableObject {
             return s
         }
         if updated != sources {
+            if Dictionary(updated.map { ($0.id, $0.projectId) }, uniquingKeysWith: { a, _ in a })
+                != Dictionary(sources.map { ($0.id, $0.projectId) }, uniquingKeysWith: { a, _ in a }) { applyWatching() }
             for s in updated {
+                if s.scanning && s.found > s.files { finding.insert(s.id) }
                 guard let old = sources.first(where: { $0.id == s.id }) else { continue }
                 if old.rescanning && !s.rescanning {
+                    finding.remove(s.id)
                     log("Rescanned \(s.name) · \(s.found.formatted()) files"
                         + (s.retried > 0 ? " · \(s.retried.formatted()) that couldn't be read are read again" : ""), icon: "arrow.clockwise")
-                } else if old.scanning && !s.scanning && !s.rescanning {
+                } else if old.scanning && !s.scanning && !s.rescanning, finding.remove(s.id) != nil {
                     log("Finished scanning \(s.name) · \(s.found.formatted()) files found", icon: "folder")
                 }
                 if old.online && !s.online { log("\(s.name) went offline", icon: "externaldrive.badge.xmark") }

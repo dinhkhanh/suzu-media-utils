@@ -15,6 +15,7 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | Tất cả dự án | Xem gộp mọi dự án cùng lúc. |
 | Nguồn NAS / ổ ngoài / ổ trong | Thêm thư mục từ NAS (SMB), ổ cứng ngoài hoặc ổ máy; NAS kiểm tra mỗi 5 giây, ổ trong theo dõi tức thì. |
 | Theo dõi file mới | File mới chép vào được xử lý ngay khi chép xong; file đang chép dở sẽ được chờ. |
+| Thư mục của dự án khác | Settings → Face Grouping → Other projects' folders: thư mục ảnh/video của các dự án không mở được kiểm tra mỗi 30 giây (như dự án đang mở), 5 phút, 15 phút, mỗi giờ, hoặc chỉ khi mở dự án đó. Thư mục dự án đang mở và thư mục Known People luôn được theo dõi; mở dự án là kiểm tra ngay. Nhật ký Activity chỉ ghi "Finished scanning" khi thật sự tìm thấy file mới. |
 | Chuyển thư mục giữa dự án | Chuột phải thư mục → Move to Project, không cần quét lại. |
 | Chống trùng thư mục | Một thư mục chỉ thuộc một dự án; từ chối thư mục lồng nhau (tránh đếm file hai lần). |
 | Theo dõi theo nội dung | Đổi tên, di chuyển trong Finder hoặc chép trùng không làm mất tên người và không xử lý lại. |

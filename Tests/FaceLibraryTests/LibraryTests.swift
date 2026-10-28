@@ -66,6 +66,44 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(m.pollInterval, SourceMonitor.slowPoll)
     }
 
+    /// A folder of a project that isn't open is looked at at its own pace when quiet, or not at all; opening the
+    /// project looks at once and brings the open project's pace back.
+    func testAnotherProjectsFolderIsLookedAtAtItsOwnPaceOrNotAtAll() throws {
+        try makeFile("a.jpg")
+        let m = monitor()
+        m.setIdlePoll(nil)
+        m.start()
+        defer { m.stop() }
+        m.queue.sync {}
+        XCTAssertEqual(try media().count, 0, "not looked at while its project is closed")
+        XCTAssertNil(m.pollInterval)
+
+        m.setIdlePoll(SourceMonitor.slowPoll)
+        m.queue.sync {}
+        XCTAssertEqual(try media().map(\.url.lastPathComponent), ["a.jpg"], "opening the project looks at once")
+        m.queue.sync { for _ in 0..<SourceMonitor.quietPassesBeforeSlow { m.scan() } }
+        XCTAssertEqual(m.pollInterval, SourceMonitor.slowPoll)
+
+        m.setIdlePoll(300)
+        m.queue.sync {}
+        XCTAssertEqual(m.pollInterval, 300, "closed again: every 5 minutes")
+        XCTAssertFalse(m.followsEvents, "FSEvents wait for the next look")
+        m.expectFiles()
+        m.queue.sync {}
+        XCTAssertEqual(m.pollInterval, SourceMonitor.fastPoll, "a card copying in is still followed closely")
+        m.queue.sync { for _ in 0..<SourceMonitor.quietPassesBeforeSlow { m.pace(busy: false) } }
+        XCTAssertEqual(m.pollInterval, 300, "and the folder's own pace comes back once it is quiet")
+    }
+
+    /// The open project's folders and the known-people folders keep the open pace; other projects' take the setting.
+    func testOnlyOtherProjectsFoldersTakeTheirPace() throws {
+        XCTAssertEqual(LibraryService.idlePoll(project: 1, kind: .media, open: 1, others: nil), SourceMonitor.slowPoll)
+        XCTAssertEqual(LibraryService.idlePoll(project: 2, kind: .media, open: 1, others: nil), nil)
+        XCTAssertEqual(LibraryService.idlePoll(project: 2, kind: .media, open: 1, others: 900), 900)
+        XCTAssertEqual(LibraryService.idlePoll(project: nil, kind: .reference, open: 1, others: nil), SourceMonitor.slowPoll)
+        XCTAssertEqual(LibraryService.idlePoll(project: 2, kind: .media, open: nil, others: nil), SourceMonitor.slowPoll, "All Projects")
+    }
+
     func media() throws -> [MediaRecord] {
         try store.db.read { db in try MediaRecord.fetchAll(db, sql: "SELECT * FROM media ORDER BY path") }
     }

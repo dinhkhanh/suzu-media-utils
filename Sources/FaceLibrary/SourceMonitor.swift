@@ -7,7 +7,8 @@ import GRDB
 ///
 /// Local volumes are watched with FSEvents. Network volumes (SMB/AFP/NFS) get no FSEvents, so they are polled: every
 /// 30 s when nothing is happening, every 5 s while files are arriving (a card copying in, a look that found new
-/// files) and for a short while after; each poll only re-lists folders whose modification time changed.
+/// files) and for a short while after; each poll only re-lists folders whose modification time changed. A folder of a
+/// project that isn't open can be looked at less often, or not at all until it is opened (`setIdlePoll`).
 public final class SourceMonitor: @unchecked Sendable {
     public let sourceId: Int64
     public let root: URL
@@ -49,8 +50,15 @@ public final class SourceMonitor: @unchecked Sendable {
     public static let slowPoll: Double = 30
     public static let fastPoll: Double = 5
     public static let quietPassesBeforeSlow = 6
-    public private(set) var pollInterval: Double = 5
+    /// The time between looks now: every 5 s until the folder's volume is known (a NAS not mounted yet is picked up
+    /// as soon as it appears), then the pace; nil: not looked at.
+    public private(set) var pollInterval: Double? = 5
     var quietPasses = 0
+    /// Between looks while nothing is happening: `slowPoll`, or what Settings → Face Grouping says for a folder of a
+    /// project that isn't open; nil: not looked at (until its project is opened, a card copies in, or a Rescan).
+    public private(set) var idlePoll: Double? = SourceMonitor.slowPoll
+    /// FSEvents only start looks at the open project's pace: a folder looked at less often waits for its turn.
+    var followsEvents: Bool { idlePoll == Self.slowPoll }
 
     public init(source: SourceRecord, store: LibraryStore,
                 onChange: @escaping (_ newPending: Bool, _ affectedPeople: Set<Int64>) -> Void) {
@@ -63,12 +71,41 @@ public final class SourceMonitor: @unchecked Sendable {
 
     public func start() {
         let t = DispatchSource.makeTimerSource(queue: queue)
-        // Every 5 s until the folder's volume is known (a NAS not mounted yet is picked up as soon as it appears).
-        t.schedule(deadline: .now() + 5, repeating: 5)
         t.setEventHandler { [weak self] in self?.scan() }
         t.resume()
         timer = t
-        queue.async { [weak self] in self?.scan() }
+        queue.async { [weak self] in
+            guard let self else { return }
+            reschedule()
+            if idlePoll != nil { scan() }
+        }
+    }
+
+    /// How often the folder is looked at while nothing is happening (nil: not at all). Looked at once right away
+    /// when that is sooner than before: its project was opened, and what came in meanwhile shows up at once.
+    public func setIdlePoll(_ poll: Double?) {
+        queue.async { [weak self] in
+            guard let self, poll != idlePoll else { return }
+            let sooner = (poll ?? .infinity) < (idlePoll ?? .infinity)
+            idlePoll = poll
+            if !watchConfigured {
+                pollInterval = poll == nil ? nil : 5
+            } else if pollInterval != Self.fastPoll {
+                pollInterval = poll  // files arriving keep the fast pace until quiet
+            }
+            reschedule()
+            if sooner, timer != nil { scan() }
+        }
+    }
+
+    /// Points the timer at the next look, `pollInterval` from now.
+    func reschedule() {
+        guard let timer else { return }
+        if let every = pollInterval {
+            timer.schedule(deadline: .now() + every, repeating: every)
+        } else {
+            timer.schedule(deadline: .distantFuture, repeating: .never)
+        }
     }
 
     /// Network volumes get no FSEvents: the poll is the watcher. Local ones use FSEvents, with the poll as a safety
@@ -78,13 +115,14 @@ public final class SourceMonitor: @unchecked Sendable {
         watchConfigured = true
         isNetwork = (try? root.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal == false
         if !isNetwork { startFSEvents() }
-        setPoll(Self.slowPoll)
+        pollInterval = idlePoll
+        reschedule()
     }
 
-    func setPoll(_ interval: Double) {
+    func setPoll(_ interval: Double?) {
         guard watchConfigured, interval != pollInterval else { return }
         pollInterval = interval
-        timer?.schedule(deadline: .now() + interval, repeating: interval)
+        reschedule()
     }
 
     /// Files are on their way into this folder (a card copying in): look every few seconds until they stop coming.
@@ -94,6 +132,8 @@ public final class SourceMonitor: @unchecked Sendable {
 
     func speedUp() {
         quietPasses = 0
+        // A folder not looked at yet (its project closed since launch) has no pace to speed up: the look starts it.
+        if !watchConfigured, idlePoll == nil, timer != nil { scan() }
         setPoll(Self.fastPoll)
     }
 
@@ -102,7 +142,7 @@ public final class SourceMonitor: @unchecked Sendable {
         if busy { speedUp(); return }
         guard pollInterval == Self.fastPoll else { return }
         quietPasses += 1
-        if quietPasses >= Self.quietPassesBeforeSlow { setPoll(Self.slowPoll) }
+        if quietPasses >= Self.quietPassesBeforeSlow { setPoll(idlePoll) }
     }
 
     public func stop() {
@@ -167,7 +207,7 @@ public final class SourceMonitor: @unchecked Sendable {
 
     /// Coalesces bursts of FSEvents into one scan (runs on `queue`).
     func scheduleScanOnce() {
-        guard !scanScheduled else { return }
+        guard followsEvents, !scanScheduled else { return }
         scanScheduled = true
         queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.scanScheduled = false
