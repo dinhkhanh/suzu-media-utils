@@ -374,10 +374,14 @@ struct FaceGroupingStatusBody: View {
                     Image(systemName: "arrow.up.circle.fill").font(.caption).foregroundStyle(Color.accent)
                     Text("Uploading \(job.title)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     Spacer(minLength: 4)
-                    Text([p.percent > 0 ? "\(p.percent)%" : nil, p.remaining.map(TeamNASModel.timeLeft)].compactMap { $0 }.joined(separator: " · "))
+                    Text(TeamNASModel.progressDetail(p))
                         .font(.caption).foregroundStyle(.secondary).monospacedDigit()
                 }
-                ProgressView(value: Double(p.percent), total: 100).progressViewStyle(.linear).controlSize(.small)
+                if p.pass == .verify {
+                    ProgressView().progressViewStyle(.linear).controlSize(.small)
+                } else {
+                    ProgressView(value: Double(p.percent), total: 100).progressViewStyle(.linear).controlSize(.small)
+                }
             }
         case .waiting(let job, _, _):
             HStack(spacing: 5) {

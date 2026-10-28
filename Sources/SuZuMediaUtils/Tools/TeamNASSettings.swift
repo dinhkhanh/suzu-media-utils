@@ -184,24 +184,34 @@ struct UploadRow: View {
     }
 
     func progressLine(_ p: RsyncUpload.Progress) -> String {
-        var parts = [passName(p.pass), "\(p.percent)%"]
-        if p.bytesPerSecond > 0 { parts.append("\(Int64(p.bytesPerSecond).formatted(.byteCount(style: .file)))/s") }
-        if let r = p.remaining, r > 0 { parts.append(TeamNASModel.timeLeft(r)) }
-        if let n = p.filesLeft, n > 0 { parts.append("\(n) files to go") }
+        var parts = [TeamNASModel.progressDetail(p)]
+        if p.pass != .verify, p.percent < 100, p.bytesPerSecond > 0 { parts.append("\(Int64(p.bytesPerSecond).formatted(.byteCount(style: .file)))/s") }
+        if p.pass != .verify, let n = p.filesLeft, n > 0 { parts.append("\(n) files to go") }
         if !p.current.isEmpty { parts.append(p.current) }
         return parts.joined(separator: " · ")
-    }
-
-    func passName(_ p: RsyncUpload.Pass) -> String {
-        switch p {
-        case .photosFirst: "Photos first"
-        case .everything: "Everything"
-        case .verify: "Checking"
-        }
     }
 }
 
 extension TeamNASModel {
+    /// What the status pill and the upload list say after the title: the pass, the percent and the time left while
+    /// bytes are moving; "checking" during the checksum pass, where rsync's percent and time mean nothing (nothing
+    /// is sent, and its estimate runs on).
+    static func progressDetail(_ p: RsyncUpload.Progress) -> String {
+        switch p.pass {
+        case .verify: return "checking"
+        case .photosFirst, .everything:
+            var parts: [String] = []
+            if p.pass == .photosFirst { parts.append("photos first") }
+            if p.percent < 100 {
+                parts.append("\(p.percent)%")
+                if let r = p.remaining, r > 0, p.bytesPerSecond > 0 { parts.append(timeLeft(r)) }
+            } else {
+                parts.append("finishing")
+            }
+            return parts.joined(separator: " · ")
+        }
+    }
+
     /// "1 h 20 min left", "45 s left".
     static func timeLeft(_ s: TimeInterval) -> String {
         if s < 90 { return "\(Int(s.rounded())) s left" }
