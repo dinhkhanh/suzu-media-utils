@@ -932,7 +932,8 @@ public final class TeamSync: @unchecked Sendable {
                 }
             }
         }
-        if !affected.isEmpty { engine.peopleChanged(affected) }
+        // Teammates' edits (faces rejected or moved there) teach these people the same as edits made here.
+        if !affected.isEmpty { engine.corrected(from: affected, to: affected) }
         if !remoteChanged.isEmpty { engine.remoteChanged(remoteChanged) }
         if lock.withLock({ let c = sourcesChanged; sourcesChanged = false; return c }) { onSourcesChanged?() }
         return changed

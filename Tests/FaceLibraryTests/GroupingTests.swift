@@ -320,6 +320,83 @@ final class GroupingTests: XCTestCase {
         XCTAssertEqual(handPlaced, 4)
     }
 
+    /// Two look-alikes grouped as one person. "Not this person" on a few of the other's faces teaches the person:
+    /// the rest of those faces leave too, their own faces stay, a new face of the look-alike stays away and is not
+    /// a likely match, and the group the look-alike's faces then form is not merged back.
+    func testFacesTakenFromAPersonTakeTheirLookAlikesAlong() throws {
+        let a = direction(), b = look(a, direction(), amount: 1.2)  // ~0.64 to a: alike enough to be grouped together
+        let anh = try store.db.write { db in var p = PersonRecord(name: "Anh"); try p.insert(db); return p.id! }
+        let aFaces = try (0..<6).map { _ in try photo(face(a), personId: anh) }
+        let bFaces = try (0..<5).map { _ in try photo(face(b), personId: anh) }
+        try engine.rebuildAll()
+        XCTAssertTrue(engine.nearestPeople(to: face(b), limit: 1).first?.likely ?? false, "before: the look-alike passes for Anh")
+
+        // "Not Anh" on two of the look-alike's faces (as LibraryService.reject writes it).
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE face SET personId = NULL, assignment = 'user', rejectedPersonId = ? WHERE id IN (\(bFaces[0]), \(bFaces[1]))",
+                           arguments: [anh])
+        }
+        try engine.rebuild(personIds: [anh])
+        XCTAssertEqual(engine.people[anh]?.counterRows.count, 2, "the rejected faces stand against Anh")
+        try engine.review(from: [anh], to: [])
+        XCTAssertEqual(try aFaces.map { try person(of: $0) }, Array(repeating: anh, count: 6), "Anh's own faces stay")
+        XCTAssertEqual(try bFaces.map { try person(of: $0) }, Array(repeating: nil, count: 5), "the look-alike's faces all left")
+        let waiting = try store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM face WHERE assignment = 'none'") }
+        XCTAssertEqual(waiting, 3, "the three the app had placed wait to be grouped again")
+
+        // A new face of the look-alike is neither placed with Anh nor shown as likely to be Anh.
+        let fresh = try photo(face(b))
+        let mid = try store.db.read { db in try FaceRecord.fetchOne(db, key: fresh)!.mediaId }
+        try engine.assignPending(mediaIds: [mid])
+        XCTAssertNil(try person(of: fresh))
+        XCTAssertFalse(engine.nearestPeople(to: face(b), limit: 1).first?.likely ?? true)
+        XCTAssertTrue(engine.nearestPeople(to: face(a), limit: 1).first?.likely ?? false, "Anh is still found")
+
+        // Grouped, the look-alike's faces are their own person, kept apart from Anh.
+        try engine.recluster()
+        let other = try XCTUnwrap(try person(of: fresh))
+        XCTAssertNotEqual(other, anh)
+        XCTAssertEqual(try bFaces.dropFirst(2).map { try person(of: $0) }, Array(repeating: other, count: 3))
+        XCTAssertEqual(try personCount(), 2)
+    }
+
+    /// Two look-alikes grouped as one person. Moving a few of the other's faces to their own name teaches both:
+    /// the rest of those faces follow, and a new face of theirs goes to them. Through the service's path
+    /// (`corrected`), as "Move to…" runs it.
+    func testFacesMovedToANameTakeTheirLookAlikesAlong() throws {
+        let a = direction(), b = look(a, direction(), amount: 1.2)
+        let (anh, binh) = try store.db.write { db -> (Int64, Int64) in
+            var p = PersonRecord(name: "Anh"), q = PersonRecord(name: "Bình")
+            try p.insert(db); try q.insert(db)
+            return (p.id!, q.id!)
+        }
+        let aFaces = try (0..<6).map { _ in try photo(face(a), personId: anh) }
+        let bFaces = try (0..<5).map { _ in try photo(face(b), personId: anh) }
+        engine.start()
+        engine.waitUntilIdle()
+        // "Move to Bình" on two of them (as LibraryService.assign writes it).
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE face SET personId = ?, assignment = 'user', rejectedPersonId = ? WHERE id IN (\(bFaces[0]), \(bFaces[1]))",
+                           arguments: [binh, anh])
+        }
+        engine.corrected(from: [anh], to: [binh])
+        engine.waitUntilIdle()
+        XCTAssertEqual(try aFaces.map { try person(of: $0) }, Array(repeating: anh, count: 6))
+        XCTAssertEqual(try bFaces.map { try person(of: $0) }, Array(repeating: binh, count: 5), "the rest of the look-alike's faces followed")
+        XCTAssertEqual(engine.people[binh]?.confirmedRows.count, 2, "the moved faces are Bình's confirmed faces")
+        XCTAssertEqual(engine.people[anh]?.counterRows.count, 2, "and stand against Anh")
+        XCTAssertEqual(try store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM face WHERE assignment = 'user'") }, 2, "only the two placed by hand are locked")
+
+        let fresh = try photo(face(b)), own = try photo(face(a))
+        let mids = try store.db.read { db in try [fresh, own].map { try FaceRecord.fetchOne(db, key: $0)!.mediaId } }
+        try engine.assignPending(mediaIds: mids)
+        XCTAssertEqual(try person(of: fresh), binh)
+        XCTAssertEqual(try person(of: own), anh)
+        XCTAssertEqual(try personCount(), 2, "not merged back: each looks like what the user took from the other")
+        try engine.consolidate()
+        XCTAssertEqual(try personCount(), 2)
+    }
+
     /// Exemplars cover a person's looks: near-duplicates of a look are not kept, a new look is.
     func testExemplarsCoverLooks() throws {
         let a = direction(), glasses = direction()

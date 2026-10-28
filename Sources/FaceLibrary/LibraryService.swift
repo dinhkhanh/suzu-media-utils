@@ -553,11 +553,15 @@ public final class LibraryService: @unchecked Sendable {
         let others = ids.filter { $0 != target }
         guard !others.isEmpty else { return }
         try store.db.write { db in try PersonNames.merge(others, into: target, db: db) }
-        engine.peopleChanged(Set(ids))
+        // The user's call that these are one person: the merged person is rebuilt with what both were taught, and
+        // its faces, the waiting faces and the other groups are looked at against it.
+        engine.corrected(from: Set(ids).union([target]), to: [target])
         teamSync.pushSoon()
     }
 
-    /// "Not this person": the faces leave the person and are never auto-assigned back to them.
+    /// "Not this person": the faces leave the person and are never auto-assigned back to them. The person learns
+    /// from it: faces that look like these more than like them leave too, and later ones stay away
+    /// (`GroupingEngine.corrected`).
     public func reject(faceIds: [Int64], from personId: Int64) throws {
         let ids = faceIds.map(String.init).joined(separator: ",")
         try store.db.write { db in
@@ -567,7 +571,7 @@ public final class LibraryService: @unchecked Sendable {
                 """, arguments: [personId])
             try db.execute(sql: "INSERT OR IGNORE INTO faceEditPublish (faceId) SELECT id FROM face WHERE id IN (\(ids))")
         }
-        engine.peopleChanged([personId])
+        engine.corrected(from: [personId])
         deleteEmptyPeople()
         teamSync.pushSoon()
     }
@@ -603,19 +607,23 @@ public final class LibraryService: @unchecked Sendable {
     }
 
     /// Puts faces (and, for videos, nothing else) under a person and locks them there. A face moved out of another
-    /// person is also marked as not theirs, so the two are never merged back together automatically.
+    /// person is also marked as not theirs, so the two are never merged back together automatically; a face
+    /// brought back to the person it was taken from is theirs again. Both people learn from it: faces left behind
+    /// that look like the moved ones more than like the person they are with follow them, and waiting faces that
+    /// look like them join the person they went to (`GroupingEngine.corrected`).
     public func assign(faceIds: [Int64], to personId: Int64) throws {
         let previous = try store.db.write { db -> Set<Int64> in
             let ids = faceIds.map(String.init).joined(separator: ",")
             let prev = Set(try Int64.fetchAll(db, sql: "SELECT DISTINCT personId FROM face WHERE id IN (\(ids)) AND personId IS NOT NULL"))
             try db.execute(sql: """
-                UPDATE face SET rejectedPersonId = CASE WHEN personId IS NOT NULL AND personId != ? THEN personId ELSE rejectedPersonId END,
+                UPDATE face SET rejectedPersonId = CASE WHEN personId IS NOT NULL AND personId != ? THEN personId
+                                                        WHEN rejectedPersonId = ? THEN NULL ELSE rejectedPersonId END,
                     personId = ?, assignment = 'user' WHERE id IN (\(ids))
-                """, arguments: [personId, personId])
+                """, arguments: [personId, personId, personId])
             try db.execute(sql: "INSERT OR IGNORE INTO faceEditPublish (faceId) SELECT id FROM face WHERE id IN (\(ids))")
             return prev
         }
-        engine.peopleChanged(previous.union([personId]))
+        engine.corrected(from: previous.subtracting([personId]), to: [personId])
         deleteEmptyPeople()
         teamSync.pushSoon()
     }

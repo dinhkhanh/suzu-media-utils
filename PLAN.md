@@ -934,3 +934,36 @@ the preview, regular size, on a dark disc, and takes no clicks.
   softness (blur) and grow/shrink (morphology) of the mask. "Show mask" tints the shaped mask red on the preview.
 - **Whites / Blacks**: one curve each, `0.25·w·x³` at the top and `0.2·b·(1−x)³` at the bottom, so the midtones
   barely move.
+
+
+## v0.8.40 (2026-10-29): the people learn from every edit
+
+- **The problem**: two look-alikes (celebrities, say) grouped as one person. "Not this person" and "Move to…"
+  only moved the selected faces and rebuilt the two people from what was left; the other look-alike faces stayed,
+  the next photo of the look-alike joined the person again, and the new group the moved faces formed could be
+  merged back.
+- **What the user teaches** (`GroupingEngine`): each person keeps, besides the mean and the exemplars, their
+  *confirmed* faces (placed with them by hand: "Move to…", "New Person…", first in line as exemplars whatever their
+  quality) and their *counter* faces (taken from them: "Not this person", or moved to someone else), both diverse
+  and capped like exemplars, in two more `Rows`. A person with no face left keeps what they were taught.
+- **Held off** (`heldOff`): a face is kept from a person when it resembles one of their counter faces at least
+  `counterThreshold` (0.45) and more, by `counterMargin` (0.05), than it resembles the person (its mean similarity
+  to them or its similarity to a confirmed face, whichever is higher). In `bestPerson` (assignment, low-quality
+  matches), `nearestPeople` (Find by Photo: not "likely"), and `consolidate` (`heldApart`: a group whose mean
+  looks like what the user took from the other is not merged into it; the mean against a counter face is the
+  group's mean similarity to it, the same measure as the link).
+- **Review** (`review`, from `corrected`): after an edit the faces the app had placed with the people the faces
+  left are weighed again, each without its own weight in the person (`leaveOneOut`: mean of the others, nearest
+  exemplars but itself). One held off goes to whoever takes it at the usual bars, else waits to be grouped again;
+  one that fits the person the user's faces went to clearly better (margin + 0.05) goes there. Faces placed by
+  hand stay. Up to four rounds, since every round sharpens both people; then waiting faces are matched again
+  (`assignAllPending`) and groups consolidated.
+- **Every manual change goes through `corrected`**: `reject`, `assign` (so `newPerson` too), `merge`, and
+  teammates' face edits arriving in `TeamSync`. `assign` clears the rejection of a face brought back to the person
+  it was taken from, and `PersonNames.merge` clears rejections that a merge turns onto the face's own person, so a
+  face is never its own person's counter face.
+- Numbers on the synthetic look-alike (0.64 to the person, faces 0.73 to each other, 0.47 across): the look-alike's
+  faces in the mixed person score 0.57 to it and 0.73 to the counter faces, the person's own 0.60 and 0.47.
+- Tests: `GroupingTests` (faces taken from a person take their look-alikes along, a new one stays away and is not
+  likely, the group they form stays apart; faces moved to a name take their look-alikes along, a new one joins
+  the name, through `corrected`).

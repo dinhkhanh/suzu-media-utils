@@ -55,12 +55,15 @@ extension GroupingEngine {
                 if s > t.0 { t = (s, t.0) } else if s > t.1 { t.1 = s }
                 top[pid] = t
             }
+            let against = counterTops(v), support = confirmedTops(v)
             var out: [(personId: Int64, similarity: Float, likely: Bool)] = []
             for (pid, p) in people where p.count > 0 {
                 let centroid = c[p.meanRow]
                 let nearest: Float
                 if let t = top[pid] { nearest = p.exemplarRows.count == 1 ? t.0 : (t.0 + t.1) / 2 } else { nearest = centroid }
-                let likely = centroid >= settings.assignThreshold || nearest >= settings.nearestThreshold
+                // Not likely when it looks like a face the user took from them (see GroupingEngine.heldOff).
+                let likely = (centroid >= settings.assignThreshold || nearest >= settings.nearestThreshold)
+                    && !heldOff(pid, centroid: centroid, support: support, against: against)
                 out.append((pid, max(centroid, nearest), likely))
             }
             var ranked = Array(out.sorted { $0.similarity > $1.similarity }.prefix(limit))

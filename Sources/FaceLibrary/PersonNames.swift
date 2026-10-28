@@ -44,6 +44,8 @@ public enum PersonNames {
         try PersonMemory.merge(others, into: target, db: db)
         try PersonGroups.merge(others, into: target, db: db)
         try db.execute(sql: "UPDATE face SET rejectedPersonId = ? WHERE rejectedPersonId IN (\(list))", arguments: [target])
+        // A face taken from one of them and placed with the other: the user's later word (the merge) wins.
+        try db.execute(sql: "UPDATE face SET rejectedPersonId = NULL WHERE rejectedPersonId = personId AND personId = ?", arguments: [target])
         try db.execute(sql: "UPDATE person SET coverFaceId = (SELECT coverFaceId FROM person WHERE id IN (\(list)) AND coverFaceId IS NOT NULL LIMIT 1) WHERE id = ? AND coverFaceId IS NULL", arguments: [target])
         // Rules follow the person instead of being deleted with them (the foreign key cascades).
         try db.execute(sql: "UPDATE deliveryRule SET personId = ? WHERE personId IN (\(list))", arguments: [target])

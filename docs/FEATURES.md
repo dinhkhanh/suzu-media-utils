@@ -41,7 +41,7 @@ hàng loạt. Chạy hoàn toàn trên máy (trừ tra cứu người nổi ti�
 | "Đây là…" (This Is…) | Gộp một nhóm vào một người đã có tên, ở dự án này hoặc dự án khác. |
 | Đặt tên ngay trên lưới | Bấm vào tên để sửa, Enter để lưu và chuyển sang nhóm chưa có tên tiếp theo. |
 | Gộp nhóm | Chọn nhiều nhóm (⌘-click) rồi gộp làm một. |
-| Sửa nhầm lẫn | "Không phải người này" (không tự gán lại), "Chuyển sang…" người khác hoặc người mới. |
+| Sửa nhầm lẫn | "Không phải người này" (không tự gán lại), "Chuyển sang…" người khác hoặc người mới. Mỗi lần sửa, app học: các mặt giống mặt vừa bỏ hơn giống người đó cũng rời đi (theo sang người mới nếu khớp), ảnh mới của người giống sẽ không gán nhầm lại, hai người đã tách không bị gộp lại. |
 | Khuôn mặt chưa gán | Danh sách khuôn mặt rõ nét chưa thuộc nhóm nào để đặt tên thủ công. Phía trên là "Seen twice": các cặp mặt giống nhau mới gặp hai lần (nhóm cần ba), một bấm là thành người. Chuột phải lên khuôn mặt (hoặc ⌘-click chọn nhiều): "New Person…" để đặt tên người mới, "Move to" để chuyển vào người đã có tên. |
 | Thư mục người quen (Known People) | Thư mục `<Tên>/<ảnh>` giúp tự đặt tên các nhóm khớp, không cần mạng. |
 | Gợi ý tên người nổi tiếng | Tra cứu nhóm chưa tên qua Amazon Rekognition (tùy chọn, chỉ gửi ảnh cắt khuôn mặt). |

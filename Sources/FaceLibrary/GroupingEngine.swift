@@ -34,6 +34,11 @@ public struct GroupingSettings: Sendable {
     /// they cover the person's looks (angles, make-up, glasses, hats) rather than repeat the most common one.
     public var maxExemplars = 32
     public var exemplarNovelty: Float = 0.80
+    /// What the user's edits teach. A face is held off a person when it resembles a face the user took from them
+    /// ("Not this person", "Move to…") at least `counterThreshold`, and more than it resembles the person (its mean
+    /// similarity to them, or a face the user placed with them, whichever is higher) by `counterMargin`.
+    public var counterThreshold: Float = 0.45
+    public var counterMargin: Float = 0.05
     public init() {}
 }
 
@@ -48,6 +53,12 @@ public struct GroupingSettings: Sendable {
 /// group) and up to `maxExemplars` diverse unit vectors. A face joins when either the centroid or its two nearest
 /// exemplars are similar enough. The centroid is strict with people photographed in many ways; the exemplars catch
 /// the shots that only resemble some of their earlier ones.
+///
+/// The user's edits teach it. Faces the user placed with a person ("Move to…", "New Person…") are their confirmed
+/// faces, first in line as exemplars; faces the user took from a person ("Not this person", or moved to someone
+/// else) are their counter faces, what they do not look like. A face that resembles a counter face more than the
+/// person is held off them (`heldOff`): two look-alikes told apart on a few faces stay apart on the rest, and after
+/// every such edit the faces the app had placed with those people are looked at again (`review`).
 public final class GroupingEngine: @unchecked Sendable {
     public let store: LibraryStore
     public var settings = GroupingSettings()
@@ -62,6 +73,8 @@ public final class GroupingEngine: @unchecked Sendable {
     var people: [Int64: Person] = [:]
     var means = Rows()
     var exemplars = Rows()
+    var confirmed = Rows()
+    var counters = Rows()
     /// People that gained units or were created since the last consolidation: the only ones worth comparing.
     var touched: Set<Int64> = []
     /// Projects whose faces another Mac groups (shared processing): their waiting faces are left alone here, and
@@ -78,6 +91,10 @@ public final class GroupingEngine: @unchecked Sendable {
         var meanRow: Int
         /// Rows in `exemplars` of this person's diverse unit vectors, see `GroupingSettings.maxExemplars`.
         var exemplarRows: [Int] = []
+        /// Rows in `confirmed`: faces the user placed with this person.
+        var confirmedRows: [Int] = []
+        /// Rows in `counters`: faces the user took from this person.
+        var counterRows: [Int] = []
     }
 
     /// Every person's mean, and every exemplar, as rows of 512 floats so one BLAS call scores a face against all
@@ -121,6 +138,8 @@ public final class GroupingEngine: @unchecked Sendable {
         var vector: [Float]
         var rejected: Set<Int64>
         var quality: Double
+        /// Placed by the user.
+        var user: Bool
     }
 
     struct FaceRow {
@@ -271,8 +290,15 @@ public final class GroupingEngine: @unchecked Sendable {
             for r in rs { for (i, v) in r.face.vector!.enumerated() { sum[i] += v } }
             return Unit(faceIds: rs.map { $0.face.id! }, vector: Vector.normalized(sum),
                         rejected: Set(rs.compactMap(\.face.rejectedPersonId)),
-                        quality: rs.map { $0.face.quality ?? 0 }.max() ?? 0)
+                        quality: rs.map { $0.face.quality ?? 0 }.max() ?? 0,
+                        user: rs.contains { $0.face.assignment == .user })
         }
+    }
+
+    /// The order units join a person: the user's placements first (they are the person, whatever their quality),
+    /// then the best faces, so they are the exemplars when a person has more than fit.
+    func ranked(_ us: [Unit]) -> [Unit] {
+        us.sorted { ($0.user ? 1 : 0, $0.quality) > ($1.user ? 1 : 0, $1.quality) }
     }
 
     // MARK: - Matching
@@ -299,9 +325,11 @@ public final class GroupingEngine: @unchecked Sendable {
             if s > t.0 { t = (s, t.0) } else if s > t.1 { t.1 = s }
             top[pid] = t
         }
+        let against = counterTops(v), support = confirmedTops(v)
         var best: (Int64, Float)?
         for (pid, p) in people where p.count > 0 && !excluding.contains(pid) {
             let centroid = c[p.meanRow]
+            if heldOff(pid, centroid: centroid, support: support, against: against) { continue }
             let nearest: Float
             if let t = top[pid] { nearest = p.exemplarRows.count == 1 ? t.0 : (t.0 + t.1) / 2 } else { nearest = centroid }
             let margin = max(centroid - centroidBar, nearest - nearestBar)
@@ -326,16 +354,68 @@ public final class GroupingEngine: @unchecked Sendable {
         p.exemplarRows.append(exemplars.append(v, pid))
     }
 
+    /// What the user taught about a person: a face they placed with them (`confirmed`) or took from them
+    /// (`counters`). Kept like exemplars: diverse, capped. A person with no face left still keeps them.
+    func addTaught(_ v: [Float], to pid: Int64, confirmed yes: Bool) {
+        var p = people[pid] ?? Person(sum: [Float](repeating: 0, count: 512), count: 0, meanRow: means.append([Float](repeating: 0, count: 512), pid))
+        let rows = yes ? p.confirmedRows : p.counterRows
+        if rows.count < settings.maxExemplars,
+           rows.allSatisfy({ Vector.dot(v, (yes ? confirmed : counters).vector($0)) < settings.exemplarNovelty }) {
+            if yes { p.confirmedRows.append(confirmed.append(v, pid)) } else { p.counterRows.append(counters.append(v, pid)) }
+        }
+        people[pid] = p
+    }
+
+    /// Faces the user placed with people, and faces they took from people, as read from the database.
+    func addTaught(_ rows: [FaceRow]) {
+        for (pid, rs) in Dictionary(grouping: rows.filter { $0.face.personId != $0.face.rejectedPersonId }, by: { $0.face.rejectedPersonId ?? -1 }) where pid >= 0 {
+            for u in units(rs).sorted(by: { $0.quality > $1.quality }) { addTaught(u.vector, to: pid, confirmed: false) }
+        }
+        for (pid, rs) in Dictionary(grouping: rows.filter { $0.face.personId != nil }, by: { $0.face.personId! }) {
+            for u in units(rs).sorted(by: { $0.quality > $1.quality }) where u.user { addTaught(u.vector, to: pid, confirmed: true) }
+        }
+    }
+
+    /// Faces the user placed with or took from these people (every one when `condition` is "1").
+    static func taughtCondition(_ condition: String) -> String {
+        "face.assignment = 'user' AND (face.personId IN (\(condition)) OR face.rejectedPersonId IN (\(condition)))"
+    }
+
+    /// For each person, how much `v` resembles the face the user took from them it is most like.
+    func counterTops(_ v: [Float]) -> [Int64: Float] { tops(counters, v) }
+    /// For each person, how much `v` resembles the face the user placed with them it is most like.
+    func confirmedTops(_ v: [Float]) -> [Int64: Float] { tops(confirmed, v) }
+
+    func tops(_ rows: Rows, _ v: [Float]) -> [Int64: Float] {
+        guard rows.count > 0 else { return [:] }
+        let k = rows.similarities(v)
+        var top: [Int64: Float] = [:]
+        for (row, pid) in rows.owner.enumerated() where pid >= 0 { top[pid] = max(top[pid] ?? -1, k[row]) }
+        return top
+    }
+
+    /// Whether a face looks more like what the user took from the person than like the person: at least
+    /// `counterThreshold` to one of those faces, and clearer by `counterMargin` than its mean similarity to the
+    /// person or its similarity to a face the user placed with them.
+    func heldOff(_ pid: Int64, centroid: Float, support: [Int64: Float], against: [Int64: Float]) -> Bool {
+        guard let t = against[pid] else { return false }
+        return t >= settings.counterThreshold && t > max(centroid, support[pid] ?? -1) + settings.counterMargin
+    }
+
     /// Forgets a person's vectors (their rows stay dead until a compaction).
     func remove(_ pid: Int64) {
         guard let p = people.removeValue(forKey: pid) else { return }
         means.kill(p.meanRow)
         for row in p.exemplarRows { exemplars.kill(row) }
+        for row in p.confirmedRows { confirmed.kill(row) }
+        for row in p.counterRows { counters.kill(row) }
         if exemplars.dead > 1024 && exemplars.dead * 2 > exemplars.count || means.dead > 1024 && means.dead * 2 > means.count {
-            let em = exemplars.compact(), mm = means.compact()
+            let em = exemplars.compact(), mm = means.compact(), cm = confirmed.compact(), km = counters.compact()
             for (id, var q) in people {
                 q.meanRow = mm[q.meanRow]
                 q.exemplarRows = q.exemplarRows.map { em[$0] }
+                q.confirmedRows = q.confirmedRows.map { cm[$0] }
+                q.counterRows = q.counterRows.map { km[$0] }
                 people[id] = q
             }
         }
@@ -347,24 +427,39 @@ public final class GroupingEngine: @unchecked Sendable {
         people = [:]
         means = Rows()
         exemplars = Rows()
+        confirmed = Rows()
+        counters = Rows()
         touched = []
-        let rows = try unlocked { try loadRows("face.personId IS NOT NULL") }
-        for (pid, rs) in Dictionary(grouping: rows, by: { $0.face.personId! }) {
-            // Best faces first, so they are the exemplars when a person has more than fit.
-            for u in units(rs).sorted(by: { $0.quality > $1.quality }) { add(u.vector, to: pid, quality: u.quality) }
+        let (rows, taught) = try unlocked {
+            (try loadRows("face.personId IS NOT NULL"),
+             try loadRows("face.assignment = 'user' AND (face.personId IS NOT NULL OR face.rejectedPersonId IS NOT NULL)"))
         }
+        for (pid, rs) in Dictionary(grouping: rows, by: { $0.face.personId! }) {
+            for u in ranked(units(rs)) { add(u.vector, to: pid, quality: u.quality) }
+        }
+        addTaught(taught)
         try addRemote("1")
         try addMemory("1")
     }
 
     func rebuild(personIds: Set<Int64>) throws {
+        guard !personIds.isEmpty else { return }
+        let list = personIds.map(String.init).joined(separator: ",")
         // Read first: a lookup never finds someone half rebuilt.
-        let rows = try unlocked { try personIds.map { ($0, try loadRows("face.personId = ?", [$0])) } }
+        let (rows, taught) = try unlocked {
+            (try personIds.map { ($0, try loadRows("face.personId = ?", [$0])) }, try loadRows(Self.taughtCondition(list)))
+        }
         for (pid, rs) in rows {
             remove(pid)
-            for u in units(rs).sorted(by: { $0.quality > $1.quality }) { add(u.vector, to: pid, quality: u.quality) }
+            for u in ranked(units(rs)) { add(u.vector, to: pid, quality: u.quality) }
         }
-        let list = personIds.map(String.init).joined(separator: ",")
+        // Only what these people were taught: a face they placed with someone else is that person's.
+        addTaught(taught.map { r in
+            var r = r
+            if let p = r.face.personId, !personIds.contains(p) { r.face.personId = nil }
+            if let q = r.face.rejectedPersonId, !personIds.contains(q) { r.face.rejectedPersonId = nil }
+            return r
+        })
         try addRemote("personId IN (\(list))")
         try addMemory("personId IN (\(list))")
     }
@@ -522,6 +617,7 @@ public final class GroupingEngine: @unchecked Sendable {
             guard a != b, let pa = people[a], let pb = people[b] else { continue }
             if named(a) && named(b) { continue }  // two named people: the user's decision
             if kept.contains(Pair(a, b)) || kept.contains(Pair(b, a)) { continue }
+            if heldApart(pa, a, pb, b) { continue }
             guard samePerson(pa, pb) else { continue }
             // The named one survives; else the larger; else the older (lower id, the one the user has seen longer).
             let (from, into): (Int64, Int64)
@@ -566,9 +662,103 @@ public final class GroupingEngine: @unchecked Sendable {
         return matched >= 2 && matched * 2 >= small.exemplarRows.count
     }
 
+    /// One group looks like what the user took from the other more than like it: not the same person. (The mean
+    /// of a group against a counter face is the group's mean similarity to it, the same measure as the link.)
+    func heldApart(_ a: Person, _ ida: Int64, _ b: Person, _ idb: Int64) -> Bool {
+        let link = Vector.dot(a.sum, b.sum) / Float(a.count * b.count)
+        for (p, idp, q) in [(a, ida, b), (b, idb, a)] where !p.counterRows.isEmpty {
+            let m = q.sum.map { $0 / Float(q.count) }
+            var against: Float = -1, support: Float = -1
+            for row in p.counterRows { against = max(against, Vector.dot(m, counters.vector(row))) }
+            for row in p.confirmedRows { support = max(support, Vector.dot(m, confirmed.vector(row))) }
+            if heldOff(idp, centroid: link, support: [idp: support], against: [idp: against]) { return true }
+        }
+        return false
+    }
+
     struct Pair: Hashable {
         let a: Int64, b: Int64
         init(_ a: Int64, _ b: Int64) { self.a = a; self.b = b }
+    }
+
+    // MARK: - Learning from the user's edits
+
+    /// The user told faces apart ("Not this person", "Move to…", "New Person…", or a teammate's such edit
+    /// arriving): the people are rebuilt with what they were taught, the faces the app had placed with the people
+    /// the faces left (`from`) are looked at again, waiting faces are matched again (the people the faces went to,
+    /// `to`, may take some now) and groups consolidated.
+    public func corrected(from: Set<Int64>, to: Set<Int64> = []) {
+        work { [self] in
+            try? rebuild(personIds: from.union(to))
+            try? review(from: from, to: to)
+            try? assignAllPending()
+            try? consolidate()
+            scheduleRecluster()
+        }
+    }
+
+    /// Looks again at the faces the app placed with `from`, each weighed without itself in the person: one that
+    /// looks more like the faces the user took from the person than like the person goes to whoever fits it, else
+    /// waits to be grouped again; one that fits a person the user's faces went to (`to`) clearly better goes
+    /// there. Faces placed by hand stay. Repeats while faces move, since each round sharpens the people.
+    func review(from: Set<Int64>, to: Set<Int64>) throws {
+        var pending = from
+        for _ in 0..<4 where !pending.isEmpty {
+            let list = pending.map(String.init).joined(separator: ",")
+            let rows = try unlocked { try loadRows("face.personId IN (\(list)) AND face.assignment = 'auto' AND face.embedding IS NOT NULL") }
+            let owner = Dictionary(rows.map { ($0.face.id!, $0.face.personId!) }, uniquingKeysWith: { a, _ in a })
+            var moves: [(Int64, [Int64])] = [], released: [Int64] = []
+            var changed: Set<Int64> = []
+            func leave(_ ids: [Int64], _ pid: Int64, to other: (Int64, Float)?) {
+                if let other, other.1 >= 0 { moves.append((other.0, ids)); changed.insert(other.0) } else { released += ids }
+                changed.insert(pid)
+            }
+            for u in units(rows) {
+                guard let pid = owner[u.faceIds[0]], let p = people[pid] else { continue }
+                let own = leaveOneOut(u.vector, p)
+                let other = bestPerson(for: u.vector, excluding: u.rejected.union([pid]),
+                                       centroidBar: settings.assignThreshold, nearestBar: settings.nearestThreshold)
+                if heldOff(pid, centroid: own.centroid, support: confirmedTops(u.vector), against: counterTops(u.vector)) {
+                    leave(u.faceIds, pid, to: other)
+                } else if let other, to.contains(other.0), other.1 >= 0,
+                          other.1 > max(own.centroid - settings.assignThreshold, own.nearest - settings.nearestThreshold) + settings.counterMargin {
+                    leave(u.faceIds, pid, to: other)
+                }
+            }
+            // Low-quality faces (matched, never counted) only when held off: to whoever takes them at their bars.
+            for r in rows where !qualifies(r) {
+                let v = r.face.vector!, pid = r.face.personId!
+                guard let p = people[pid], p.count > 0,
+                      heldOff(pid, centroid: Vector.dot(v, p.sum) / Float(p.count), support: confirmedTops(v), against: counterTops(v))
+                else { continue }
+                let excl = Set([pid] + (r.face.rejectedPersonId.map { [$0] } ?? []))
+                leave([r.face.id!], pid, to: bestPerson(for: v, excluding: excl, centroidBar: settings.lowQualityAssignThreshold,
+                                                        nearestBar: settings.lowQualityNearestThreshold))
+            }
+            guard !changed.isEmpty else { return }
+            try write(moves)
+            if !released.isEmpty {
+                try store.db.write { db in
+                    try db.execute(sql: "UPDATE face SET personId = NULL, assignment = 'none' WHERE id IN (\(released.map(String.init).joined(separator: ",")))")
+                }
+            }
+            try rebuild(personIds: changed)
+            pending = changed.intersection(from)
+        }
+    }
+
+    /// `scores` for a unit that is in the person, without itself: its mean similarity to the others, and its two
+    /// nearest exemplars but itself.
+    func leaveOneOut(_ v: [Float], _ p: Person) -> (centroid: Float, nearest: Float) {
+        let c = p.count > 1 ? (Vector.dot(v, p.sum) - 1) / Float(p.count - 1) : -1
+        var top1: Float = -1, top2: Float = -1
+        for row in p.exemplarRows {
+            let s = Vector.dot(v, exemplars.vector(row))
+            if s > 0.9999 { continue }
+            if s > top1 { top2 = top1; top1 = s } else if s > top2 { top2 = s }
+        }
+        if top1 < 0 { return (c, c) }
+        return (c, top2 < 0 ? top1 : (top1 + top2) / 2)
     }
 
     // MARK: - Clustering the pending pool
