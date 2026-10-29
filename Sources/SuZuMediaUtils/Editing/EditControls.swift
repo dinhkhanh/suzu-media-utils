@@ -874,6 +874,18 @@ struct RetouchControls: View {
                      : retouch?.isActive == true ? "The preview shows the retouch once this photo's masks are found; exports retouch every photo."
                      : "Find this photo's masks to retouch skin and change its people's parts.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                // The dials below wait for masks, but a retouch set earlier (this screen remembers it) still goes into
+                // every export, at a couple of seconds a photo: it can be turned off from here.
+                if retouch?.isActive == true {
+                    HStack(alignment: .firstTextBaseline) {
+                        Label("Retouch is on: exports find each photo's masks first (about 2 s a photo).", systemImage: "wand.and.stars")
+                            .font(.caption).foregroundStyle(Color.notice).fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 4)
+                        Button("Turn Off Retouch") { retouch = nil; overlay.part = nil }
+                            .controlSize(.small)
+                            .help("Take away the skin retouch and every mask's dials (smooth, brighten, whiten, face skin, body skin, lips, clothes); the healing brush stays")
+                    }
+                }
             }
             Divider().padding(.vertical, 2)
         }
