@@ -62,24 +62,30 @@ public enum PersonGroups {
         let newest = try Int64.fetchOne(db, sql: "SELECT id FROM project ORDER BY createdAt DESC LIMIT 1")
         for g in try Row.fetchAll(db, sql: "SELECT id, uuid, name, sortOrder, createdAt, updatedAt FROM personGroup WHERE projectId IS NULL") {
             let id: Int64 = g["id"], uuid: String = g["uuid"]
-            let members = try Row.fetchAll(db, sql: """
-                SELECT DISTINCT gm.personId, gm.at, s.projectId FROM personGroupMember gm
+            var projects = Set(try Int64.fetchAll(db, sql: """
+                SELECT DISTINCT s.projectId FROM personGroupMember gm
                 JOIN face f ON f.personId = gm.personId JOIN media m ON m.id = f.mediaId JOIN source s ON s.id = m.sourceId
                 WHERE gm.groupId = ? AND s.kind = 'media' AND s.projectId IS NOT NULL
-                """, arguments: [id])
-            var projects = Set(members.map { $0["projectId"] as Int64 })
-            if projects.isEmpty, let newest { projects = [newest] }
+                """, arguments: [id]))
+            // No one on it appears in a project: the newest project gets it, with everyone on it.
+            var everyone = false
+            if projects.isEmpty, let newest { projects = [newest]; everyone = true }
             for p in projects {
                 let puuid: String = try String.fetchOne(db, sql: "SELECT uuid FROM project WHERE id = ?", arguments: [p]) ?? "\(p)"
+                let copyUuid = "\(uuid):\(puuid)"
                 try db.execute(sql: """
                     INSERT OR IGNORE INTO personGroup (name, sortOrder, createdAt, uuid, updatedAt, projectId) VALUES (?, ?, ?, ?, ?, ?)
-                    """, arguments: [g["name"] as String, g["sortOrder"] as Int, g["createdAt"] as Date, "\(uuid):\(puuid)", g["updatedAt"] as Double, p])
-                let copy = db.lastInsertedRowID
-                for m in members where (m["projectId"] as Int64) == p {
-                    try db.execute(sql: "INSERT OR IGNORE INTO personGroupMember (groupId, personId, at) VALUES (?, ?, ?)",
-                                   arguments: [copy, m["personId"] as Int64, m["at"] as Double])
-                }
+                    """, arguments: [g["name"] as String, g["sortOrder"] as Int, g["createdAt"] as Date, copyUuid, g["updatedAt"] as Double, p])
+                guard let copy = try Int64.fetchOne(db, sql: "SELECT id FROM personGroup WHERE uuid = ?", arguments: [copyUuid]) else { continue }
+                try db.execute(sql: """
+                    INSERT OR IGNORE INTO personGroupMember (groupId, personId, at)
+                    SELECT ?, gm.personId, gm.at FROM personGroupMember gm WHERE gm.groupId = ?
+                      AND (? OR EXISTS (SELECT 1 FROM face f JOIN media m ON m.id = f.mediaId JOIN source s ON s.id = m.sourceId
+                                        WHERE f.personId = gm.personId AND s.kind = 'media' AND s.projectId = ?))
+                    """, arguments: [copy, id, everyone, p])
             }
+            // Migrations run with foreign keys off: nothing cascades.
+            try db.execute(sql: "DELETE FROM personGroupMember WHERE groupId = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM personGroup WHERE id = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM personGroupMemberGone WHERE groupUuid = ?", arguments: [uuid])
             try db.execute(sql: "DELETE FROM personGroupAlias WHERE fromUuid = ? OR intoUuid = ?", arguments: [uuid, uuid])

@@ -128,6 +128,40 @@ final class ProjectTests: XCTestCase {
         }
     }
 
+    /// The real upgrade (foreign keys off while it runs): lists from before go to the projects their people appear
+    /// in, and the library opens.
+    func testListsFromBeforeProjectsGoToTheirProjects() throws {
+        let db = try DatabaseQueue(path: tmp.appendingPathComponent("lists.sqlite").path)
+        try LibraryStore.migrator.migrate(db, upTo: "v28-person-tags")
+        try db.write { db in
+            let now = Date()
+            try db.execute(sql: "INSERT INTO project (id, name, createdAt, uuid) VALUES (1, 'Gala', ?, 'gala'), (2, 'Cup', ?, 'cup')",
+                           arguments: [now.addingTimeInterval(-60), now])
+            try db.execute(sql: "INSERT INTO source (id, path, kind, addedAt, projectId) VALUES (1, '/Gala', 'media', ?, 1), (2, '/Cup', 'media', ?, 2)",
+                           arguments: [now, now])
+            try db.execute(sql: "INSERT INTO person (id, name, createdAt, uuid) VALUES (1, 'An', ?, 'an'), (2, 'Bình', ?, 'binh'), (3, 'Cẩm', ?, 'cam')",
+                           arguments: [now, now, now])
+            for (media, source, person) in [(1, 1, 1), (2, 1, 2), (3, 2, 2)] {
+                try db.execute(sql: "INSERT INTO media (id, sourceId, path, kind, size, mtime, status) VALUES (?, ?, ?, 'photo', 1, 0, 'done')",
+                               arguments: [media, source, "/\(media).jpg"])
+                try db.execute(sql: "INSERT INTO face (mediaId, x, y, w, h, personId, assignment) VALUES (?, 0, 0, 1, 1, ?, 'user')",
+                               arguments: [media, person])
+            }
+            try db.execute(sql: "INSERT INTO personGroup (id, name, sortOrder, createdAt, uuid) VALUES (1, 'Cast', 0, ?, 'cast'), (2, 'VIP', 1, ?, 'vip')",
+                           arguments: [now, now])
+            try db.execute(sql: "INSERT INTO personGroupMember (groupId, personId) VALUES (1, 1), (1, 2), (1, 3), (2, 3)")
+        }
+        try LibraryStore.migrator.migrate(db)
+        try db.read { db in
+            let lists = try Row.fetchAll(db, sql: """
+                SELECT g.uuid, g.projectId, group_concat(gm.personId) AS people FROM personGroup g
+                LEFT JOIN (SELECT * FROM personGroupMember ORDER BY personId) gm ON gm.groupId = g.id GROUP BY g.id ORDER BY g.uuid
+                """).map { "\($0["uuid"] as String) \($0["projectId"] as Int64) \($0["people"] as String? ?? "")" }
+            XCTAssertEqual(lists, ["cast:cup 2 2", "cast:gala 1 1,2", "vip:cup 2 3"], "no one on VIP appears anywhere: the newest project, with everyone")
+            XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM personGroupMember WHERE groupId IN (1, 2)"), 0)
+        }
+    }
+
     func testEveryFeatureSeesOnlyTheOpenProject() throws {
         let gala = try project("Gala"), cup = try project("Cup")
         let sGala = try source("Gala", project: gala), sCup = try source("Cup", project: cup)
