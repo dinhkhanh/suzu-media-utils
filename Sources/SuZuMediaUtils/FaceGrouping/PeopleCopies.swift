@@ -75,16 +75,25 @@ final class PeopleCopies: ObservableObject {
     }
 }
 
-/// The background copies, above the status pill.
+/// The background copies, above the status pill. At most about two cards tall, the rest scrolled: a stack of them
+/// made the sidebar taller than the window, which pushed every screen's top under the title bar and its bottom out
+/// of the window.
 struct PeopleCopiesView: View {
     @ObservedObject var jobs: PeopleCopies
+    @State private var height: CGFloat = 0
+    static let maxHeight: CGFloat = 230
 
     var body: some View {
         if !jobs.jobs.isEmpty {
-            VStack(spacing: 6) {
-                ForEach(jobs.jobs) { PeopleCopyRow(job: $0, jobs: jobs) }
+            ScrollView {
+                VStack(spacing: 6) {
+                    ForEach(jobs.jobs.reversed()) { PeopleCopyRow(job: $0, jobs: jobs) }
+                }
+                .padding(.horizontal, 10)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
             }
-            .padding(.horizontal, 10)
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(height: min(height, Self.maxHeight))
         }
     }
 }
