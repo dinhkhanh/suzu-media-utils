@@ -209,7 +209,10 @@ public final class BodyParts: @unchecked Sendable {
     static func fromModel(_ image: CIImage) throws -> BodyParts {
         let model = try loadModel()
         let e = image.extent
-        let s = min(1, CGFloat(tileH) / e.height)
+        // Full tile height; a landscape photo a little smaller, so it takes two overlapping tiles instead of three
+        // (each run of the model takes most of a second, one at a time).
+        let full = min(1, CGFloat(tileH) / e.height)
+        let s = max(full * 0.88, min(full, CGFloat(2 * tileW - 96) / e.width))
         let (w, h, planes) = try cover(image, scale: s, model: model)
         var details: [(rect: CGRect, width: Int, height: Int, planes: [[Float]])] = []
         for face in faces(in: image) where face.height * e.height * s < 190 {
