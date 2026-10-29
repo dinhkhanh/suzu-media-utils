@@ -135,6 +135,7 @@ struct FaceImage: View {
     let faceId: Int64?
     var side: CGFloat = 96
     @State private var loaded: NSImage?
+    @State private var loadedFor: Int64?
 
     /// A crop already in memory draws at once; one that isn't is read off the main thread, so a grid of hundreds
     /// of people scrolls without waiting on the disk for each tile.
@@ -153,9 +154,10 @@ struct FaceImage: View {
         }
         .frame(width: side, height: side)
         .clipped()
-        .task(id: faceId) {
-            loaded = nil
-            guard let id = faceId, cached == nil, let dir = model.store?.facesDirectory else { return }
+        // Again when pictures came in from the team folder, for a face that had none.
+        .task(id: [faceId ?? -1, Int64(model.picturesFetched)]) {
+            if loadedFor != faceId { loaded = nil; loadedFor = faceId }
+            guard let id = faceId, cached == nil, loaded == nil, let dir = model.store?.facesDirectory else { return }
             let img = await Task.detached(priority: .userInitiated) { Thumbnails.shared.face(id, store: dir) }.value
             if !Task.isCancelled { loaded = img }
         }

@@ -59,6 +59,7 @@ public final class TeamSync: @unchecked Sendable {
     var cropsChecked: Set<Int64> = []
     /// Per team: the last file fetchMissingCrops tried, so files that can't be fetched yet don't hold up the rest.
     var cropRetryCursor: [Int64: Int64] = [:]
+    var cropsFetched = 0
     public let deviceId: String
     public var deviceName: String
     /// Log passes (names, pins, lists…): a teammate's change shows here within about this, plus the share's delay.
@@ -136,6 +137,9 @@ public final class TeamSync: @unchecked Sendable {
     }
 
     public func status(_ teamId: Int64) -> TeamStatus? { lock.withLock { statuses[teamId] } }
+    /// Goes up each time faces' pictures came in from a teammate's folder after their faces did (see
+    /// fetchMissingCrops): pictures shown empty are worth looking for again.
+    public var picturesFetched: Int { lock.withLock { cropsFetched } }
 
     static func infoURL(_ folder: URL) -> URL { folder.appendingPathComponent("team.json") }
     static func devicesURL(_ folder: URL) -> URL { folder.appendingPathComponent("devices", isDirectory: true) }
@@ -385,7 +389,7 @@ public final class TeamSync: @unchecked Sendable {
                 if try pullSummaries(team) { changed = true }
                 if try pullFaces(team) { changed = true }
                 try queueMissingCrops(team)
-                if try fetchMissingCrops(team) { changed = true }
+                if try fetchMissingCrops(team) { changed = true; lock.withLock { cropsFetched += 1 } }
             } catch let e {
                 error = e.localizedDescription
             }

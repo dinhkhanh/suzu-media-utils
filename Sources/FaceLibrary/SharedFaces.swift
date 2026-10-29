@@ -46,18 +46,24 @@ extension TeamSync {
     /// Crop files written to the share at once.
     static let cropCopyLanes = 8
 
-    /// Copies small files (face crops, thumbnails) to the team folder: their bytes only, `cropCopyLanes` at a
-    /// time. A missing source is skipped; a failed write leaves no partial file under the final name.
-    static func copyCrops(_ copies: [(from: URL, to: URL)]) {
-        guard !copies.isEmpty else { return }
+    /// Copies small files (face crops, thumbnails) to or from the team folder: their bytes only, `cropCopyLanes` at
+    /// a time. A missing source is skipped; a failed write leaves no partial file under the final name. Returns
+    /// which copies were made.
+    @discardableResult
+    static func copyCrops(_ copies: [(from: URL, to: URL)]) -> [Bool] {
+        guard !copies.isEmpty else { return [] }
+        let done = UnsafeMutableBufferPointer<Bool>.allocate(capacity: copies.count)
+        done.initialize(repeating: false)
+        defer { done.deallocate() }
         DispatchQueue.concurrentPerform(iterations: min(cropCopyLanes, copies.count)) { lane in
             var i = lane
             while i < copies.count {
                 let c = copies[i]
-                if let data = try? Data(contentsOf: c.from) { try? data.write(to: c.to, options: .atomic) }
+                if let data = try? Data(contentsOf: c.from), (try? data.write(to: c.to, options: .atomic)) != nil { done[i] = true }
                 i += cropCopyLanes
             }
         }
+        return Array(done)
     }
     /// Content keys computed per pass for waiting files (one read of 1 MB each).
     static let faceKeyBatch = 300
@@ -751,27 +757,25 @@ extension TeamSync {
     func fetchCrops(_ mid: Int64, from device: String, team: TeamRecord, key: String, boxes: String, faceIds: [Int64], db: Database) throws {
         let fm = FileManager.default
         let cropDir = Self.cropSource(Self.facesURL(team.url, device: device), key: key, boxes: boxes)
-        // The old flat layout counts as there only when it holds something: the parent folder stays after a set
-        // of crops moved out of it.
-        let folderThere = cropDir.lastPathComponent == boxes
-            ? fm.fileExists(atPath: cropDir.path)
-            : !((try? fm.contentsOfDirectory(at: cropDir, includingPropertiesForKeys: nil))?.filter { !$0.hasDirectoryPath }.isEmpty ?? true)
-        var complete = true
-        func fetch(_ name: String, to dst: URL) -> Bool {
-            guard !fm.fileExists(atPath: dst.path) else { return false }
-            let src = cropDir.appendingPathComponent(name)
-            guard folderThere, fm.fileExists(atPath: src.path) else {
-                if !folderThere { complete = false }
-                return false
-            }
-            if (try? fm.copyItem(at: src, to: dst)) == nil { complete = false; return false }
-            return true
+        // The folder listed once, not looked up per face: each look is a round trip to the NAS, and a video can
+        // have hundreds of faces. The old flat layout counts as there only when it holds pictures: the parent
+        // folder stays after a set of crops moved out of it.
+        let names = (try? fm.contentsOfDirectory(atPath: cropDir.path)).map(Set.init) ?? []
+        let folderThere = cropDir.lastPathComponent == boxes ? fm.fileExists(atPath: cropDir.path) : names.contains { $0.hasSuffix(".jpg") }
+        var copies: [(from: URL, to: URL)] = []
+        func want(_ name: String, to dst: URL) {
+            guard folderThere, names.contains(name), !fm.fileExists(atPath: dst.path) else { return }
+            copies.append((cropDir.appendingPathComponent(name), dst))
         }
-        for (i, fid) in faceIds.enumerated() { _ = fetch("\(i).jpg", to: store.faceCropURL(fid)) }
-        if fetch("thumb.jpg", to: store.thumbnailURL(mid)) {
+        for (i, fid) in faceIds.enumerated() { want("\(i).jpg", to: store.faceCropURL(fid)) }
+        let thumb = store.thumbnailURL(mid)
+        want("thumb.jpg", to: thumb)
+        // Bytes only, several at a time: a Finder-style copy also sets owner, mode and attributes, each a round trip.
+        let copied = Self.copyCrops(copies)
+        if zip(copies, copied).contains(where: { $0.0.to == thumb && $0.1 }) {
             try db.execute(sql: "UPDATE media SET thumbAt = ? WHERE id = ?", arguments: [Date().timeIntervalSince1970, mid])
         }
-        if complete { try db.execute(sql: "DELETE FROM cropRetry WHERE mediaId = ?", arguments: [mid]) }
+        if folderThere && !copied.contains(false) { try db.execute(sql: "DELETE FROM cropRetry WHERE mediaId = ?", arguments: [mid]) }
     }
 
     /// Files taken from teammates whose faces have no picture here, queued for fetchMissingCrops: once per team each
@@ -809,8 +813,11 @@ extension TeamSync {
     }
 
     /// Files taken from teammates whose crops or thumbnail couldn't all be copied: tried again, a batch per pass,
-    /// going round the queue (files that can't be fetched yet don't keep the ones after them waiting).
+    /// going round the queue (files that can't be fetched yet don't keep the ones after them waiting). A file per
+    /// transaction, and no more than `cropRetryTimeBox` per pass: videos with hundreds of faces each never hold the
+    /// library's writer (naming, merging, a card copying in) while the NAS delivers their pictures.
     static let cropRetryBatch = 200
+    static let cropRetryTimeBox: TimeInterval = 10
     func fetchMissingCrops(_ team: TeamRecord) throws -> Bool {
         let teamId = team.id!
         let after = lock.withLock { cropRetryCursor[teamId] ?? 0 }
@@ -821,12 +828,17 @@ extension TeamSync {
         lock.withLock { cropRetryCursor[teamId] = rows.count < Self.cropRetryBatch ? 0 : rows.last.map { $0["mediaId"] as Int64 } }
         guard !rows.isEmpty else { return false }
         var fetched = false
-        try store.db.write { db in
-            for r in rows {
-                let mid: Int64 = r["mediaId"]
+        let started = Date()
+        for r in rows {
+            let mid: Int64 = r["mediaId"]
+            if Date().timeIntervalSince(started) > Self.cropRetryTimeBox {
+                lock.withLock { cropRetryCursor[teamId] = mid - 1 }  // the rest on the next pass
+                break
+            }
+            try store.db.write { db in
                 let faceIds = try Int64.fetchAll(db, sql: "SELECT id FROM face WHERE mediaId = ? ORDER BY id", arguments: [mid])
                 guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM media WHERE id = ?)", arguments: [mid]) == true else {
-                    try db.execute(sql: "DELETE FROM cropRetry WHERE mediaId = ?", arguments: [mid]); continue
+                    try db.execute(sql: "DELETE FROM cropRetry WHERE mediaId = ?", arguments: [mid]); return
                 }
                 let before = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM cropRetry WHERE mediaId = ?", arguments: [mid]) ?? 0
                 try fetchCrops(mid, from: r["deviceId"], team: team, key: r["contentKey"], boxes: r["boxes"], faceIds: faceIds, db: db)

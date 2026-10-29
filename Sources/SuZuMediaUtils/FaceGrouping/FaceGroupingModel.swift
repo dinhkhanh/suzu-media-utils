@@ -192,6 +192,8 @@ final class FaceGroupingModel: ObservableObject {
     /// Projects shared with other Macs through a folder (see TeamSync), and how the sharing is going.
     @Published var teams: [TeamRecord] = []
     @Published var teamStatus: [Int64: TeamSync.TeamStatus] = [:]
+    /// Pictures of faces fetched from the team folder since the app started: the empty ones look again (FaceImage).
+    @Published var picturesFetched = 0
     /// The team NAS and the uploads to it (Settings → Team NAS, Copy from Cards → Team NAS).
     let nas = TeamNASModel()
     @Published var askShareTeam = false
@@ -379,6 +381,7 @@ final class FaceGroupingModel: ObservableObject {
         var status: [Int64: TeamSync.TeamStatus] = [:]
         for t in teams { if let s = sync.status(t.id!) { status[t.id!] = s } }
         if status != teamStatus { teamStatus = status }
+        if sync.picturesFetched != picturesFetched { picturesFetched = sync.picturesFetched }
     }
 
     private func applySources(_ list: [SourceSummary]) {
