@@ -28,6 +28,8 @@ public struct Exporter: Sendable {
         /// Named people in the file (for metadata) and where they are (for face-aware crops).
         public var people: [String] = []
         public var focus: FocusHint?
+        /// The RAW of a RAW+JPEG pair, going along with its JPEG: copied (or moved) as it is, never edited or tagged.
+        public var companion = false
     }
 
     /// Optional extras applied to every export.
@@ -49,6 +51,8 @@ public struct Exporter: Sendable {
         public var taken: ClosedRange<Double>?
         /// Where photos and videos go; either can be left out.
         public var kinds = KindFolders.together
+        /// Each photo's RAW (RAW+JPEG pairs) goes along with it, beside it.
+        public var withRaw = false
         public init() {}
     }
 
@@ -80,8 +84,9 @@ public struct Exporter: Sendable {
         public var items: [Item] = []
         /// Already in the person's folder.
         public var alreadyThere = 0
-        public var photos: Int { items.filter { !MediaKindHint.isVideo($0.from) }.count }
-        public var videos: Int { items.count - photos }
+        public var photos: Int { items.filter { !$0.companion && !MediaKindHint.isVideo($0.from) }.count }
+        public var videos: Int { items.filter { MediaKindHint.isVideo($0.from) }.count }
+        public var raws: Int { items.filter(\.companion).count }
         public var sharedCount: Int { items.filter(\.alsoHasOtherNamedPeople).count }
         public var copies: Int { items.filter { $0.operation == .copy }.count }
         public var options = Options()
@@ -328,8 +333,38 @@ public struct Exporter: Sendable {
                 plan.items[i].to = plan.items[i].to.deletingPathExtension().appendingPathExtension(recipe.fileExtension)
             }
         }
+        if options.withRaw { plan.items += try companions(of: plan.items) }
         plan.options = options
         return plan
+    }
+
+    /// The RAWs of the photos going out (a RAW+JPEG pair's RAW is a copy of its JPEG, `duplicateOf`), each to its
+    /// photo's folder under its own name, the way the photo goes.
+    func companions(of items: [Item]) throws -> [Item] {
+        let photos = items.filter { !MediaKindHint.isVideo($0.from) && !ImageLoader.isRaw($0.from) }
+        guard !photos.isEmpty else { return [] }
+        let raws = try store.db.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT id, path, duplicateOf FROM media
+                WHERE duplicateOf IN (\(Set(photos.map(\.mediaId)).map(String.init).joined(separator: ","))) AND \(ImageLoader.rawSQL("path"))
+                ORDER BY id
+                """)
+        }
+        let byPhoto = Dictionary(grouping: raws) { $0["duplicateOf"] as Int64 }
+        var out: [Item] = [], placed: Set<String> = []
+        for item in photos {
+            for r in byPhoto[item.mediaId] ?? [] {
+                let from = URL(fileURLWithPath: r["path"], isDirectory: false)
+                let to = item.to.deletingLastPathComponent().appendingPathComponent(from.lastPathComponent)
+                // A RAW copied to two places is one RAW: once per folder.
+                guard placed.insert(to.path).inserted else { continue }
+                var raw = Item(mediaId: r["id"], from: from, to: to, alsoHasOtherNamedPeople: item.alsoHasOtherNamedPeople,
+                               operation: item.operation, personName: item.personName, personId: item.personId)
+                raw.companion = true
+                out.append(raw)
+            }
+        }
+        return out
     }
 
     /// What one run gathers from the files finishing in any order.
@@ -352,7 +387,7 @@ public struct Exporter: Sendable {
         let slots = DispatchSemaphore(value: max(1, workers))
         for (i, item) in plan.items.enumerated() {
             if isCancelled() { break }
-            let edit = plan.options.recipe.flatMap { MediaKindHint.isVideo(item.from) ? nil : $0 }
+            let edit = plan.options.recipe.flatMap { MediaKindHint.isVideo(item.from) || item.companion ? nil : $0 }
             let work = { [self] in
                 if isCancelled() { return }  // stopped while it waited for a worker
                 let outcome = Swift.Result { try self.perform(item, edit: edit, policy: policy, writeNames: plan.options.writeNames, tally: tally) }
@@ -416,7 +451,7 @@ public struct Exporter: Sendable {
             }
         case .copy:
             try Self.copy(item.from, to: dest)
-            if writeNames { _ = try? Metadata.writePeople(item.people, to: dest) }
+            if writeNames, !item.companion { _ = try? Metadata.writePeople(item.people, to: dest) }
             try recordCopy(of: item.mediaId, at: dest)
         }
         return true

@@ -1,6 +1,7 @@
 import GRDB
 import XCTest
 @testable import FaceLibrary
+import MediaKit
 
 /// Projects: each event is a set of folders; people and their names are shared by every project.
 final class ProjectTests: XCTestCase {
@@ -265,6 +266,33 @@ final class ProjectTests: XCTestCase {
                        [photos.appendingPathComponent("01 Opening/a.jpg").path, photos.appendingPathComponent("02 Awards/c.jpg").path,
                         videos.appendingPathComponent("01 Opening/b.mp4").path].sorted())
         XCTAssertEqual(try targets(.folders(photos: nil, videos: videos)), [videos.appendingPathComponent("01 Opening/b.mp4").path], "videos only")
+    }
+
+    /// With RAW files, a RAW+JPEG pair's RAW goes beside its JPEG, unedited, in a person's export and a session's.
+    func testRawFilesGoAlongWithTheirPhotos() throws {
+        let cup = try project("Cup"), sCup = try source("Cup", project: cup), an = try person("An")
+        let jpeg = try photo("IMG_1.jpg", source: sCup, person: an)
+        try photo("IMG_2.jpg", source: sCup, person: an)
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE media SET takenAt = 1790000000")
+            var raw = MediaRecord(sourceId: sCup, path: tmp.appendingPathComponent("IMG_1.CR2").path, kind: .photo, size: 1, mtime: 0, contentKey: "raw")
+            raw.status = .done; raw.duplicateOf = jpeg.media; raw.takenAt = 1_790_000_000
+            try raw.insert(db)
+        }
+        let out = tmp.appendingPathComponent("out")
+        var o = Exporter.Options(); o.project = cup
+        let exporter = Exporter(store: store)
+        XCTAssertEqual(try exporter.plan(personId: an, name: "An", base: out, options: o).items.count, 2, "off: photos only")
+        o.withRaw = true
+        let person = try exporter.plan(personId: an, name: "An", base: out, options: o)
+        XCTAssertEqual(person.items.map(\.to.path).sorted(), ["An/IMG_1.CR2", "An/IMG_1.jpg", "An/IMG_2.jpg"].map { out.appendingPathComponent($0).path })
+        XCTAssertEqual([person.photos, person.raws], [2, 1])
+        let session = try store.db.read { db in try EventSessions.list(db, project: cup) }[0]
+        XCTAssertEqual(try exporter.planSessions([(range: session.range, folder: "01")], base: out, options: o).items.map(\.to.lastPathComponent).sorted(),
+                       ["IMG_1.CR2", "IMG_1.jpg", "IMG_2.jpg"])
+        o.recipe = EditRecipe()
+        XCTAssertEqual(try exporter.plan(personId: an, name: "An", base: out, options: o).items.map(\.to.lastPathComponent).sorted(),
+                       ["IMG_1.CR2", "IMG_1.jpg", "IMG_2.jpg"], "the RAW is not edited into a second JPEG")
     }
 }
 

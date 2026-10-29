@@ -36,6 +36,7 @@ struct ExportSheet: View {
     @State private var topN: Int?
     @State private var bestOfBurst = false
     @State private var skipBlurry = false
+    @State private var withRaw = false
     @State private var plan: Exporter.Plan?
     @State private var planning = false
     /// Ignore the session picked in the People view and export the whole event.
@@ -87,7 +88,7 @@ struct ExportSheet: View {
             // The session picked in the bar, else all of them.
             chosenSessions = Set(model.currentSession.map { [$0.index] } ?? model.sessions.map(\.index))
         }
-        .task(id: "\(name)|\(base?.path ?? "")|\(chosen.sorted())|\(chosenSessions.sorted())|\(editPhotos)|\(recipe.hashValue)|\(writeNames)|\(topN ?? 0)|\(bestOfBurst)|\(skipBlurry)|\(wholeEvent)|\(kindLayout)|\(photosChild)|\(videosChild)|\(photosBase?.path ?? "")|\(videosBase?.path ?? "")") { await replan() }
+        .task(id: "\(name)|\(base?.path ?? "")|\(chosen.sorted())|\(chosenSessions.sorted())|\(editPhotos)|\(recipe.hashValue)|\(writeNames)|\(topN ?? 0)|\(bestOfBurst)|\(skipBlurry)|\(withRaw)|\(wholeEvent)|\(kindLayout)|\(photosChild)|\(videosChild)|\(photosBase?.path ?? "")|\(videosBase?.path ?? "")") { await replan() }
     }
 
     @ViewBuilder
@@ -148,6 +149,7 @@ struct ExportSheet: View {
         o.topN = topN
         o.bestOfBurst = bestOfBurst
         o.skipBlurry = skipBlurry
+        o.withRaw = withRaw
         o.project = model.currentProject
         o.taken = wholeEvent || isSessions ? nil : model.sessionRange
         switch kindLayout {
@@ -225,6 +227,8 @@ struct ExportSheet: View {
             }
             Toggle("Skip blurry shots (main face out of focus)", isOn: $skipBlurry).toggleStyle(.checkbox)
                 .help("Photos whose biggest face is soft, as the Files browser marks them, are left out")
+            Toggle("Include RAW files (from cameras shooting RAW+JPEG)", isOn: $withRaw).toggleStyle(.checkbox)
+                .help("Each photo's RAW goes beside it, as it is: edits and names apply to the JPEG only")
             Toggle("Write people's names into the files (Lightroom, Photos, Bridge)", isOn: $writeNames)
                 .toggleStyle(.checkbox)
                 .disabled(editPhotos)
@@ -243,7 +247,7 @@ struct ExportSheet: View {
     /// The plan's photos (who's in them and where) to preview the edit on.
     var previewSamples: [ToolItem] {
         let items: [Exporter.Item] = plan?.items ?? []
-        return items.filter { !MediaTypes.videos.contains($0.from.pathExtension.lowercased()) }.prefix(200)
+        return items.filter { !$0.companion && !MediaTypes.videos.contains($0.from.pathExtension.lowercased()) }.prefix(200)
             .map { ToolItem(url: $0.from, personName: $0.personName, people: $0.people, focus: $0.focus) }
     }
 
@@ -321,7 +325,7 @@ struct ExportSheet: View {
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             } else {
-                Text("\(plan.photos) photos and \(plan.videos) videos will be \(mode == .copy ? "copied" : "moved").")
+                Text("\(plan.photos) photos\(plan.raws > 0 ? " (with \(plan.raws) RAW files)" : "") and \(plan.videos) videos will be \(mode == .copy ? "copied" : "moved").")
             }
             if let left = leftOut { Text("\(left) are left out: \(kindLayout == 1 ? "no folder name" : "no folder chosen") for them.").foregroundStyle(.secondary) }
             if plan.alreadyThere > 0 { Text("\(plan.alreadyThere) are already in place.").foregroundStyle(.secondary) }
