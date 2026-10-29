@@ -38,8 +38,10 @@ public enum EditPipeline {
             throw Failure.unreadable(url.lastPathComponent)
         }
         let sourceSpace = image.colorSpace
+        // Deep when the decoded pixels are (a 10-bit HEIC, a 16-bit TIFF): a RAW develops to 8 bits here, and a 16-bit
+        // PNG of it took seconds to write at twice the size for nothing.
+        let deep = (image.cgImage.map(\.bitsPerComponent) ?? props?[kCGImagePropertyDepth] as? Int ?? 8) > 8
         image = try apply(recipe, to: image, focus: focus)
-        let deep = (props?[kCGImagePropertyDepth] as? Int ?? 8) > 8
         guard let cg = pixels(image, format: recipe.outputFormat, sourceSpace: sourceSpace, deep: deep) else {
             throw Failure.write(dest.lastPathComponent)
         }
@@ -106,8 +108,13 @@ public enum EditPipeline {
     public static func apply(_ recipe: EditRecipe, to input: CIImage, focus: FocusHint?, previewLongSide: Int? = nil) throws -> CIImage {
         // Healed first, on the photo as shot (where the strokes are kept).
         var (image, focus) = orient(Healing.apply(recipe.heal ?? [], to: input, amount: recipe.healAmount ?? 1), recipe.look, focus: focus)
-        image = tone(image, recipe)
-        if let degrees = rotation(recipe, image) { (image, focus) = rotate(image, degrees: degrees, focus: focus) }
+        // Auto tone, the people's parts and the horizon are measured on a copy the size of the editor's preview, as
+        // the preview measures them: on a whole 24-megapixel photo they took seconds each, for the same answer.
+        let probe = analysisCopy(image)
+        let auto = recipe.autoTone ? autoAdjustments(probe, strength: recipe.autoToneStrength) : nil
+        let parts = recipe.retouch?.isActive == true ? BodyParts.find(in: probe) : nil
+        image = tone(image, recipe, auto: auto, findParts: { _ in parts })
+        if let degrees = rotation(recipe, probe) { (image, focus) = rotate(image, degrees: degrees, focus: focus) }
         let size = image.extent.size
         // Cropped to the export's shape, or, zoomed in by hand, to the photo's own shape.
         if let ratio = cropRatio(recipe, size: size, focus: focus) {
@@ -134,6 +141,21 @@ public enum EditPipeline {
         }
         if let wm = recipe.watermark { image = try watermark(image, spec: wm) }
         return image
+    }
+
+    /// Long side of the copy a photo is measured on (`analysisCopy`): the editor preview's.
+    public static let analysisSide: CGFloat = 1600
+
+    /// The image scaled down to `analysisSide` and rendered once, so each measurement reads that many pixels and
+    /// not the whole photo again; small images as they are.
+    static func analysisCopy(_ image: CIImage) -> CIImage {
+        let e = image.extent, long = max(e.width, e.height)
+        guard long > analysisSide * 1.2, e.width.isFinite else { return image }
+        let k = analysisSide / long
+        let small = image.transformed(by: CGAffineTransform(translationX: -e.minX, y: -e.minY))
+            .applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: k, kCIInputAspectRatioKey: 1])
+        guard let cg = context.createCGImage(small, from: small.extent) else { return image }
+        return CIImage(cgImage: cg)
     }
 
     // MARK: - Tone
@@ -732,6 +754,8 @@ public enum EditPipeline {
         for k in [kCGImagePropertyPixelWidth, kCGImagePropertyPixelHeight, kCGImagePropertyOrientation] { props[k] = nil }
         if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] { tiff[kCGImagePropertyTIFFOrientation] = nil; props[kCGImagePropertyTIFFDictionary] = tiff }
         if format == .jpeg { props[kCGImageDestinationLossyCompressionQuality] = quality }
+        // One filter for every row, not ImageIO's pick per row: half the time on a 24-megapixel photo, and smaller.
+        if format == .png { props[kCGImagePropertyPNGDictionary] = [kCGImagePropertyPNGCompressionFilter: IMAGEIO_PNG_FILTER_UP] }
         props[kCGImagePropertyOrientation] = 1
         if !people.isEmpty {
             var iptc = props[kCGImagePropertyIPTCDictionary] as? [CFString: Any] ?? [:]

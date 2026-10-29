@@ -586,6 +586,18 @@ final class StraightenTests: XCTestCase {
         XCTAssertNil(EditPipeline.rotation(r, tilted))
     }
 
+    /// A full-size photo is measured on a preview-size copy (auto tone, horizon): the same tilt is found and levelled.
+    func testABigPhotoIsMeasuredOnASmallCopy() throws {
+        let big = scene(tilt: 5).transformed(by: CGAffineTransform(scaleX: 4, y: 4))
+        XCTAssertEqual(EditPipeline.analysisCopy(big).extent.width, EditPipeline.analysisSide, accuracy: 1)
+        var r = EditRecipe()
+        r.straighten = true
+        r.autoTone = true
+        let level = try EditPipeline.apply(r, to: big, focus: nil)
+        XCTAssertGreaterThan(level.extent.width, 4000, "the photo itself stays full size")
+        XCTAssertLessThan(abs(EditPipeline.horizonTilt(level) ?? 0), 1)
+    }
+
     func testFacesTurnWithThePhoto() {
         // A face right of centre stays right of centre after a small turn, and inside the frame.
         let (_, f) = EditPipeline.rotate(CIImage(color: .gray).cropped(to: CGRect(x: 0, y: 0, width: 1200, height: 800)), degrees: 3,
