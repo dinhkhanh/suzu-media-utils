@@ -311,9 +311,11 @@ final class FaceGroupingModel: ObservableObject {
         applySources(sources)
         applyTeamStatus()
         guard dirty, !refreshing, let db = store?.db else { return }
-        // While files pour in, every commit marks the data dirty: re-read at most every 3 s then.
+        // While files pour in, every commit marks the data dirty: re-read at most every 3 s then. A copy to people's
+        // or sessions' folders (or a card) records each file as it lands: every 10 s, when nothing is processed.
         let busy = service.processor.queuedCount > 0 || service.processor.backgroundCount > 0
-        if !urgent, busy, now.timeIntervalSince(lastRefresh) < 3 { return }
+        let wait: Double = busy ? 3 : ToolWork.isActive ? 10 : 0
+        if !urgent, now.timeIntervalSince(lastRefresh) < wait { return }
         urgent = false
         lastRefresh = now
         dirty = false

@@ -300,6 +300,9 @@ final class SharedFacesTests: XCTestCase {
     /// Whatever emptied a queue (the role changing hands mid-pass, an edited folder dropping faces), the processing
     /// Mac notices the file no longer matches what it published and sends it again.
     func testAFileThatDriftedWithoutBeingQueuedIsPublishedAgain() throws {
+        // Every pass goes round (the processing Mac rests between rounds).
+        TeamSync.faceSweepRest = 0
+        defer { TeamSync.faceSweepRest = 600 }
         let team = try XCTUnwrap(try a.sync.teams().first)
         try a.sync.setProcessor(team.id!, thisMac: true)
         let an = try a.person("An")
@@ -333,6 +336,29 @@ final class SharedFacesTests: XCTestCase {
         XCTAssertEqual(records(), before + 1)
         XCTAssertEqual(try a.store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM facePublished WHERE fromShare") }, 2)
         XCTAssertEqual(try a.store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM facePublish") }, 0)
+    }
+
+    /// The comparison with the team folder rests between rounds: a drifted file is caught by the next round, not
+    /// on every pass.
+    func testTheDriftCheckRestsBetweenRounds() throws {
+        let team = try XCTUnwrap(try a.sync.teams().first)
+        try a.sync.setProcessor(team.id!, thisMac: true)
+        let an = try a.person("An")
+        let (m, _) = try processed("p1.jpg", person: an, vector: vector(1))
+        let w = try waiting("p1.jpg")
+        exchange()
+        let bo = try a.person("Bo")
+        try a.store.db.write { db in
+            try db.execute(sql: "UPDATE face SET personId = ? WHERE mediaId = ?", arguments: [bo, m])
+            try db.execute(sql: "DELETE FROM facePublish")
+            try db.execute(sql: "DELETE FROM faceChange")
+        }
+        exchange()
+        XCTAssertEqual(try faces(b, media: w)[0].personId, try b.personId(named: "An"), "a round just went by: resting")
+        TeamSync.faceSweepRest = 0
+        defer { TeamSync.faceSweepRest = 600 }
+        exchange()
+        XCTAssertEqual(try faces(b, media: w)[0].personId, try b.personId(named: "Bo"), "the next round catches it")
     }
 
     /// A Mac that took a laptop's ungrouped record after the processing Mac's (logs read in any order) keeps the

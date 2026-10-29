@@ -66,6 +66,7 @@ enum ToolWork {
     /// Jobs under way (several cards can copy at once): the library's extras wait until the last one is done, and
     /// face work goes on with fewer workers so the transfers get the disk and the network first.
     private static var active = 0
+    static var isActive: Bool { active > 0 }
     static func begin() {
         active += 1
         faces?.service?.processor.extrasPaused = true

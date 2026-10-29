@@ -67,6 +67,9 @@ extension TeamSync {
     static let faceApplyChunk = 100
     /// Files compared per pass with what the team folder holds for them (see reconcilePublished).
     static let faceSweepBatch = 2000
+    /// Seconds between rounds of that comparison: it is a safety net, and going round a big library without a
+    /// pause read and hashed 2,000 files' faces every 5 s, for ever.
+    static var faceSweepRest: Double = 600
     /// Bytes of this Mac's own records read back per pass to learn what the team folder holds (once per library).
     static let faceSeedBytes = 48 << 20
 
@@ -372,6 +375,7 @@ extension TeamSync {
         let state = try state(teamId)
         guard state["pubseed"] == "done" else { return try seedPublished(team, state: state) }
         let cursor = Int64(state["pubsweep"] ?? "0") ?? 0
+        if cursor == 0, let round = Double(state["pubround"] ?? ""), Date().timeIntervalSince1970 - round < Self.faceSweepRest { return }
         // Edited folders' files are left out: they have no faces by design, and no teammate takes faces for them.
         let (mids, rows, published) = try store.db.read { db -> ([Int64], [Row], [Int64: (sig: String, boxes: String)]) in
             let mids = try Int64.fetchAll(db, sql: """
@@ -390,7 +394,7 @@ extension TeamSync {
             return (mids, rows, published)
         }
         guard let last = mids.last else {
-            try setState(teamId, ["pubsweep": "0"])  // round again from the start
+            try setState(teamId, ["pubsweep": "0", "pubround": String(Date().timeIntervalSince1970)])  // round again from the start, in a while
             return
         }
         var faces: [Int64: [FacePayload]] = [:]
