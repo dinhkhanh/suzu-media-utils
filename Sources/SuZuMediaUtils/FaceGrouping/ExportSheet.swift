@@ -7,11 +7,14 @@ enum ExportScope: Identifiable {
     case all
     /// Search results or a smart album, exported into one folder.
     case media([Int64], title: String)
+    /// The open project's sessions, each into a folder of its own.
+    case sessions
     var id: String {
         switch self {
         case .person(let p): "p\(p)"
         case .all: "all"
         case .media(let ids, let t): "m\(t)\(ids.count)"
+        case .sessions: "sessions"
         }
     }
 }
@@ -24,6 +27,7 @@ struct ExportSheet: View {
     let mode: ExportMode
     @State var name: String
     @State private var chosen: Set<Int64> = []
+    @State private var chosenSessions: Set<Int> = []
     @State private var base: URL?
     @State private var policy = CollisionPolicy.skip
     @State private var editPhotos = false
@@ -51,6 +55,7 @@ struct ExportSheet: View {
 
     var isAll: Bool { if case .all = scope { true } else { false } }
     var isMedia: Bool { if case .media = scope { true } else { false } }
+    var isSessions: Bool { if case .sessions = scope { true } else { false } }
     var verb: String { mode == .copy ? "Copy" : "Move" }
     var folder: String { Exporter.folderName(name) }
     var named: [PersonSummary] { model.people.filter { $0.name != nil && $0.faces > 0 } }
@@ -58,9 +63,10 @@ struct ExportSheet: View {
     var body: some View {
         ScrollView {
         VStack(alignment: .leading, spacing: 14) {
-            Text(isAll ? "\(verb) everyone's files to their folders" : "\(verb) to “\(folder.isEmpty ? "…" : folder)” folder")
+            Text(isAll ? "\(verb) everyone's files to their folders" : isSessions ? "\(verb) each session to its own folder"
+                 : "\(verb) to “\(folder.isEmpty ? "…" : folder)” folder")
                 .font(.title2.bold())
-            if let s = model.currentSession, !isMedia {
+            if let s = model.currentSession, !isMedia, !isSessions {
                 HStack {
                     Image(systemName: "timer")
                     Text(wholeEvent ? "The whole event" : "Only the “\(model.sessionTitle(s))” session (\(model.sessionTime(s)))")
@@ -76,22 +82,28 @@ struct ExportSheet: View {
         }
         .frame(maxHeight: 860)
         .frame(width: editPhotos ? 960 : 620)
-        .onAppear { chosen = Set(named.map(\.id)) }
-        .task(id: "\(name)|\(base?.path ?? "")|\(chosen.sorted())|\(editPhotos)|\(recipe.hashValue)|\(writeNames)|\(topN ?? 0)|\(bestOfBurst)|\(skipBlurry)|\(wholeEvent)|\(kindLayout)|\(photosChild)|\(videosChild)|\(photosBase?.path ?? "")|\(videosBase?.path ?? "")") { await replan() }
+        .onAppear {
+            chosen = Set(named.map(\.id))
+            // The session picked in the bar, else all of them.
+            chosenSessions = Set(model.currentSession.map { [$0.index] } ?? model.sessions.map(\.index))
+        }
+        .task(id: "\(name)|\(base?.path ?? "")|\(chosen.sorted())|\(chosenSessions.sorted())|\(editPhotos)|\(recipe.hashValue)|\(writeNames)|\(topN ?? 0)|\(bestOfBurst)|\(skipBlurry)|\(wholeEvent)|\(kindLayout)|\(photosChild)|\(videosChild)|\(photosBase?.path ?? "")|\(videosBase?.path ?? "")") { await replan() }
     }
 
     @ViewBuilder
     var form: some View {
         if isAll {
             peopleList
+        } else if isSessions {
+            sessionList
         } else {
             TextField(isMedia ? "Folder name" : "Person's name (folder name)", text: $name).textFieldStyle(.roundedBorder)
         }
         if kindLayout != 2 {
             VStack(alignment: .leading, spacing: 6) {
-                Text(isAll ? "Put each person's folder:" : "Put the “\(folder)” folder:").font(.headline)
+                Text(isAll ? "Put each person's folder:" : isSessions ? "Put each session's folder:" : "Put the “\(folder)” folder:").font(.headline)
                 Picker("", selection: Binding(get: { base == nil ? 0 : 1 }, set: { if $0 == 0 { base = nil } else { choose() } })) {
-                    Text(isMedia ? "Inside Pictures/SuZu Exports" : "Inside each file's source folder").tag(0)
+                    Text(isSessions ? "Inside Pictures/SuZu Exports/\(folder.isEmpty ? "…" : folder)" : isMedia ? "Inside Pictures/SuZu Exports" : "Inside each file's source folder").tag(0)
                     Text(base.map { "Inside \($0.path)" } ?? "Inside another folder…").tag(1)
                 }
                 .pickerStyle(.radioGroup)
@@ -125,7 +137,7 @@ struct ExportSheet: View {
             Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
             Button(isAll ? "\(verb) All" : verb) { run() }
                 .keyboardShortcut(.defaultAction)
-                .disabled((!isAll && folder.isEmpty) || (plan?.items.isEmpty ?? true))
+                .disabled((!isAll && !isSessions && folder.isEmpty) || (plan?.items.isEmpty ?? true))
         }
     }
 
@@ -137,7 +149,7 @@ struct ExportSheet: View {
         o.bestOfBurst = bestOfBurst
         o.skipBlurry = skipBlurry
         o.project = model.currentProject
-        o.taken = wholeEvent ? nil : model.sessionRange
+        o.taken = wholeEvent || isSessions ? nil : model.sessionRange
         switch kindLayout {
         case 1: o.kinds = .subfolders(photos: photosChild, videos: videosChild)
         case 2: o.kinds = .folders(photos: photosBase, videos: videosBase)
@@ -153,7 +165,7 @@ struct ExportSheet: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Photos and videos:").font(.headline)
             Picker("", selection: $kindLayout) {
-                Text("Together in \(isAll ? "each person's" : "the “\(folder)”") folder").tag(0)
+                Text("Together in \(isAll ? "each person's" : isSessions ? "each session's" : "the “\(folder)”") folder").tag(0)
                 Text("In two folders inside it").tag(1)
                 Text("In two folders I choose").tag(2)
             }
@@ -171,7 +183,7 @@ struct ExportSheet: View {
                     }
                 }
                 .padding(.leading, 20)
-                Text("e.g. “\(isAll ? "Name" : folder.isEmpty ? "Name" : folder)/\(photosChild.isEmpty ? "…" : photosChild)/”. Leave a name empty to copy only the other kind.")
+                Text("e.g. “\(isAll ? "Name" : isSessions ? sessionFolder(model.sessions.first) : folder.isEmpty ? "Name" : folder)/\(photosChild.isEmpty ? "…" : photosChild)/”. Leave a name empty to copy only the other kind.")
                     .font(.caption).foregroundStyle(.secondary).padding(.leading, 20)
             } else if kindLayout == 2 {
                 Grid(alignment: .leading, verticalSpacing: 6) {
@@ -179,7 +191,7 @@ struct ExportSheet: View {
                     kindFolderRow("Videos", $videosBase, key: "peopleExportVideos")
                 }
                 .padding(.leading, 20)
-                Text("\(isAll ? "Each person gets a folder" : "The “\(folder.isEmpty ? "…" : folder)” folder goes") inside each. Choose only one to copy only photos or only videos.")
+                Text("\(isAll ? "Each person gets a folder" : isSessions ? "Each session gets a folder" : "The “\(folder.isEmpty ? "…" : folder)” folder goes") inside each. Choose only one to copy only photos or only videos.")
                     .font(.caption).foregroundStyle(.secondary).padding(.leading, 20)
             }
         }
@@ -206,7 +218,7 @@ struct ExportSheet: View {
             HStack {
                 Picker("", selection: $topN) {
                     Text("All of them").tag(Int?.none)
-                    ForEach([10, 20, 50, 100], id: \.self) { Text("Best \($0) per person").tag(Int?.some($0)) }
+                    ForEach([10, 20, 50, 100], id: \.self) { Text("Best \($0) per \(isSessions ? "session" : "person")").tag(Int?.some($0)) }
                 }
                 .labelsHidden().fixedSize()
                 Toggle("Skip similar shots (best of each burst)", isOn: $bestOfBurst).toggleStyle(.checkbox)
@@ -265,6 +277,41 @@ struct ExportSheet: View {
         }
     }
 
+    /// "03 Awards", "04 18.05–19.40": numbered so the folders sort in the order of the event.
+    func sessionFolder(_ s: EventSession?) -> String {
+        guard let s else { return "01 Opening" }
+        return String(format: "%02d ", s.index + 1) + model.sessionTitle(s).replacingOccurrences(of: ":", with: ".")
+    }
+
+    var sessionList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Sessions (\(chosenSessions.count) of \(model.sessions.count))").font(.headline)
+                Spacer()
+                Button("All") { chosenSessions = Set(model.sessions.map(\.index)) }.controlSize(.small)
+                Button("None") { chosenSessions = [] }.controlSize(.small)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(model.sessions) { s in
+                        Toggle(isOn: Binding(get: { chosenSessions.contains(s.index) },
+                                             set: { if $0 { chosenSessions.insert(s.index) } else { chosenSessions.remove(s.index) } })) {
+                            HStack {
+                                Text(sessionFolder(s))
+                                Spacer()
+                                Text(s.videos > 0 ? "\(s.photos) photos · \(s.videos) videos" : "\(s.photos) photos")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 180)
+            Text("Folders are named after the sessions; right-click a session in the bar to name it first.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
     func summary(_ plan: Exporter.Plan) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             if isAll && mode == .move {
@@ -308,6 +355,8 @@ struct ExportSheet: View {
         let exporter = service.exporter, options = options, base = base, mode = mode, name = name, folder = folder
         let scope = scope
         let people = named.filter { chosen.contains($0.id) }.map { (id: $0.id, name: $0.name!) }
+        let sessions = model.sessions.filter { chosenSessions.contains($0.index) }.map { (range: $0.range, folder: sessionFolder($0)) }
+        let exports = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0].appendingPathComponent("SuZu Exports")
         planning = true
         let result = await Task.detached(priority: .userInitiated) { () -> Exporter.Plan? in
             switch scope {
@@ -316,8 +365,11 @@ struct ExportSheet: View {
             case .person(let id):
                 return folder.isEmpty ? nil : try? exporter.plan(personId: id, name: name, base: base, mode: mode, options: options)
             case .media(let ids, _):
-                let root = base ?? FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0].appendingPathComponent("SuZu Exports")
-                return folder.isEmpty ? nil : try? exporter.planMedia(ids, folder: name, base: root, options: options)
+                return folder.isEmpty ? nil : try? exporter.planMedia(ids, folder: name, base: base ?? exports, options: options)
+            case .sessions:
+                // Without a folder chosen, the sessions go in one named after the event.
+                return try? exporter.planSessions(sessions, base: base ?? exports.appendingPathComponent(folder.isEmpty ? "Sessions" : folder, isDirectory: true),
+                                                  options: options)
             }
         }.value
         guard !Task.isCancelled else { return }
@@ -335,9 +387,9 @@ struct ExportSheet: View {
         // Show in Finder: the person's folder (not the Photos folder inside it); for everyone, the one holding theirs.
         var shown = plan.items.first?.to.deletingLastPathComponent()
         if kindLayout == 1 { shown = shown?.deletingLastPathComponent() }
-        if isAll { shown = shown?.deletingLastPathComponent() }
+        if isAll || isSessions { shown = shown?.deletingLastPathComponent() }
         model.exports.start(plan, exporter: service.exporter, policy: policy, workers: min(6, ToolWork.parallelism),
-                            target: isAll ? "everyone's folders" : "“\(folder)”", mode: mode, folder: shown)
+                            target: isAll ? "everyone's folders" : isSessions ? "each session's folder" : "“\(folder)”", mode: mode, folder: shown)
         dismiss()
     }
 }

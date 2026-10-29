@@ -239,6 +239,33 @@ final class ProjectTests: XCTestCase {
         XCTAssertThrowsError(try LibraryService.checkNewFolder(tmp.path, store: store))
         XCTAssertNoThrow(try LibraryService.checkNewFolder(tmp.appendingPathComponent("Event 2").path, store: store))
     }
+
+    /// Each session into a folder of its own, photos and videos together or each to a place of their own (like
+    /// the copy from cards); another project's files at the same time stay out.
+    func testEachSessionGoesToItsOwnFolder() throws {
+        let cup = try project("Cup"), other = try project("Other")
+        let sCup = try source("Cup", project: cup), sOther = try source("Other", project: other)
+        let day = 1_790_000_000.0
+        for (name, source, kind, t) in [("a.jpg", sCup, MediaKind.photo, 0.0), ("b.mp4", sCup, .video, 600), ("c.jpg", sCup, .photo, 4 * 3600),
+                                         ("x.jpg", sOther, .photo, 300)] {
+            var m = MediaRecord(sourceId: source, path: tmp.appendingPathComponent(name).path, kind: kind, size: 1, mtime: 0, contentKey: name)
+            m.status = .done; m.takenAt = day + t
+            try store.db.write { db in try m.insert(db) }
+        }
+        let sessions = try store.db.read { db in try EventSessions.list(db, project: cup) }
+        XCTAssertEqual(sessions.count, 2)
+        let chosen = [(range: sessions[0].range, folder: "01 Opening"), (range: sessions[1].range, folder: "02 Awards")]
+        let base = tmp.appendingPathComponent("out"), photos = tmp.appendingPathComponent("P"), videos = tmp.appendingPathComponent("V")
+        func targets(_ kinds: Exporter.KindFolders) throws -> [String] {
+            var o = Exporter.Options(); o.project = cup; o.kinds = kinds
+            return try Exporter(store: store).planSessions(chosen, base: base, options: o).items.map(\.to.path).sorted()
+        }
+        XCTAssertEqual(try targets(.together), ["01 Opening/a.jpg", "01 Opening/b.mp4", "02 Awards/c.jpg"].map { base.appendingPathComponent($0).path })
+        XCTAssertEqual(try targets(.folders(photos: photos, videos: videos)),
+                       [photos.appendingPathComponent("01 Opening/a.jpg").path, photos.appendingPathComponent("02 Awards/c.jpg").path,
+                        videos.appendingPathComponent("01 Opening/b.mp4").path].sorted())
+        XCTAssertEqual(try targets(.folders(photos: nil, videos: videos)), [videos.appendingPathComponent("01 Opening/b.mp4").path], "videos only")
+    }
 }
 
 final class SessionTests: XCTestCase {
@@ -284,4 +311,5 @@ final class SessionTests: XCTestCase {
         // Wider gaps merge the two sessions.
         XCTAssertEqual(try store.db.read { db in try EventSessions.list(db, project: p.id, gap: 5 * 3600) }.count, 1)
     }
+
 }

@@ -207,6 +207,30 @@ public struct Exporter: Sendable {
         return try decorate(plan, options: options)
     }
 
+    /// Each session's photos and videos into "<base>/<folder>/" (the event's files captured in its time range, as
+    /// the session bar counts them; `options.kinds` routes the kinds). Always copies. Best of burst and Top N go
+    /// per session.
+    public func planSessions(_ sessions: [(range: ClosedRange<Double>, folder: String)], base: URL, options: Options) throws -> Plan {
+        var plan = Plan()
+        for s in sessions {
+            let rows = try store.db.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT m.id, m.path FROM media m LEFT JOIN source s ON s.id = m.sourceId
+                    WHERE m.duplicateOf IS NULL AND NOT m.skippedAsEdited AND m.takenAt BETWEEN ? AND ? AND \(ProjectScope.sql(options.project))
+                    ORDER BY m.takenAt
+                    """, arguments: [s.range.lowerBound, s.range.upperBound])
+            }
+            let dir = base.appendingPathComponent(Self.folderName(s.folder), isDirectory: true)
+            for r in rows {
+                let from = URL(fileURLWithPath: r["path"], isDirectory: false)
+                guard let dir = Self.routed(dir, for: from, options.kinds) else { continue }
+                plan.items.append(Item(mediaId: r["id"], from: from, to: dir.appendingPathComponent(from.lastPathComponent),
+                                       alsoHasOtherNamedPeople: false, operation: .copy, personName: s.folder))
+            }
+        }
+        return try decorate(plan, options: options)
+    }
+
     /// Files straight into `base` (flat rules). Always copies.
     public func planFlat(_ mediaIds: [Int64], base: URL, options: Options) throws -> Plan {
         guard !mediaIds.isEmpty else { return Plan() }

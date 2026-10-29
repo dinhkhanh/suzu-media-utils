@@ -9,6 +9,7 @@ struct SessionBar: View {
     var divider = false
     @State private var renaming: EventSession?
     @State private var newName = ""
+    @State private var exporting = false
 
     var body: some View {
         // Shown whenever the open project has capture times, even as one session, so every screen looks the same
@@ -52,7 +53,11 @@ struct SessionBar: View {
                 }
                 .menuStyle(.borderlessButton).fixedSize()
                 .help("Sessions split wherever nobody shot for \(model.sessionGapMinutes) minutes")
+                Button { exporting = true } label: { Image(systemName: "square.and.arrow.up") }
+                    .buttonStyle(.borderless)
+                    .help("Copy each session to its own folder, photos and videos together or apart")
             }
+            .sheet(isPresented: $exporting) { ExportSheet(scope: .sessions, mode: .copy, initialName: model.projectName) }
             .padding(.horizontal, 16).padding(.vertical, 8)
             .alert("Rename Session", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
                 TextField("Name", text: $newName, prompt: Text("e.g. Opening, Final, Awards"))
