@@ -330,6 +330,8 @@ struct EditPreview: View {
     var notes: [ToolItem: String] = [:]
     /// Reports which photo is shown, for controls elsewhere that edit just that one.
     var shown: Binding<URL?>? = nil
+    /// Where the screen has no photos of its own to add (Settings), a button in the empty preview to choose some.
+    var choosePhotos: (() -> Void)? = nil
     @State private var index = 0
     @State private var gridMode = false
     /// The strip re-centres for the arrows, not when a visible thumbnail is clicked.
@@ -619,7 +621,12 @@ struct EditPreview: View {
                 } else if samples.isEmpty {
                     VStack(spacing: 8) {
                         Image(systemName: "photo.on.rectangle.angled").font(.system(size: 40))
-                        Text("Add photos or people to preview the edit").font(.callout)
+                        if let choosePhotos {
+                            Text("Choose a few photos to preview the edit on").font(.callout)
+                            Button("Choose Photos…", action: choosePhotos).padding(.top, 4)
+                        } else {
+                            Text("Add photos or people to preview the edit").font(.callout)
+                        }
                     }
                     .foregroundStyle(.white.opacity(0.45))
                 }

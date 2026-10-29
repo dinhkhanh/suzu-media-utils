@@ -1294,6 +1294,8 @@ struct WatermarkSettings: View {
     @State private var selection: String?
     @State private var draft: WatermarkPreset?
     @State private var samples: [ToolItem] = []
+    /// Photos chosen for the preview here, shown instead of the open project's photos of people.
+    @AppStorage("watermarkPreviewPhotos") private var chosen = ""
     @State private var strength = FeatureEdits.defaultStrength
 
     var body: some View {
@@ -1323,10 +1325,17 @@ struct WatermarkSettings: View {
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.secondary.opacity(0.3)))
                 if let binding = draftBinding {
                     VStack(alignment: .leading, spacing: 10) {
-                        TextField("Name", text: binding.name).textFieldStyle(.roundedBorder).font(.headline)
+                        HStack(spacing: 10) {
+                            TextField("Name", text: binding.name).textFieldStyle(.roundedBorder).font(.headline)
+                            if !chosen.isEmpty {
+                                Button("Use Project's Photos") { chosen = ""; Task { await loadSamples() } }
+                                    .help("Preview on the open project's photos of people again")
+                            }
+                            Button("Choose Photos…", action: choosePhotos).help("Preview the watermark on photos of your own")
+                        }
                         HStack(alignment: .top, spacing: 14) {
                             EditPreview(recipe: Binding(get: { previewRecipe }, set: { r in if let w = r.watermark { draft?.spec = w } }),
-                                        samples: samples, filmstrip: false, perPhotoCrop: false)
+                                        samples: samples, filmstrip: false, perPhotoCrop: false, choosePhotos: choosePhotos)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                             // The fields column is the preview's height whatever the kind, so the pane never grows
@@ -1358,7 +1367,21 @@ struct WatermarkSettings: View {
         .onChange(of: selection, initial: true) { draft = presets.preset(selection) }
         .onChange(of: draft) { if let d = draft, d != presets.preset(d.id) { presets.upsert(d) } }
         .onChange(of: strength) { FeatureEdits.defaultStrength = strength }
-        .task { samples = await model.samples(limit: 6) }
+        .task { await loadSamples() }
+    }
+
+    /// The photos chosen here that are still there, otherwise the open project's photos of people.
+    func loadSamples() async {
+        let mine = chosen.split(separator: "\n").map(String.init).filter { FileManager.default.fileExists(atPath: $0) }
+        samples = mine.isEmpty ? await model.samples(limit: 6) : mine.map { ToolItem(url: URL(fileURLWithPath: $0)) }
+    }
+
+    func choosePhotos() {
+        Panels.choose(folders: false, files: true, multiple: true, types: [.image], prompt: "Preview") { urls in
+            let picked = Array(urls.prefix(6))
+            chosen = picked.map(\.path).joined(separator: "\n")
+            samples = picked.map { ToolItem(url: $0) }
+        }
     }
 
     var draftBinding: Binding<WatermarkPreset>? {
