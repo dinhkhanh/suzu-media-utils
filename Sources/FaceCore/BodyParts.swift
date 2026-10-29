@@ -203,6 +203,7 @@ public final class BodyParts: @unchecked Sendable {
     }
 
     static let tileW = 576, tileH = 768, outW = 288, outH = 384
+    static let predicting = NSLock()
 
     /// The model over the whole photo, then a closer pass on faces too small there for their lips.
     static func fromModel(_ image: CIImage) throws -> BodyParts {
@@ -288,6 +289,10 @@ public final class BodyParts: @unchecked Sendable {
                 vDSP_vfltu8(src.baseAddress! + c, 4, ptr + c * plane, 1, vDSP_Length(plane))
             }
         }
+        // One prediction at a time: Core ML aborted the app (a Metal assertion) when two exports' photos ran the
+        // model at once. The GPU runs one anyway; the result is read out before the next may start.
+        predicting.lock()
+        defer { predicting.unlock() }
         let result = try model.prediction(from: MLDictionaryFeatureProvider(dictionary: ["image": input]))
         guard let masks = result.featureValue(for: "masks")?.multiArrayValue else { throw CocoaError(.coderReadCorrupt) }
         let n = outW * outH
