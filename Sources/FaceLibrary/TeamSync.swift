@@ -426,7 +426,8 @@ public final class TeamSync: @unchecked Sendable {
     /// One change in a device's log.
     struct Op: Codable {
         /// device, person, merge, session, rule, summary (deferred only), card, cardFile, face, folder, cover,
-        /// pin (uuid = the person, deleted = unpinned), watermark (uuid = the saved watermark, name, deleted),
+        /// pin (uuid = the person, deleted = unpinned), bio (uuid = the person, name = the note, none = cleared),
+        /// tag (uuid = the person, name = the tag, deleted = taken off), watermark (uuid = the saved watermark, name, deleted),
         /// list (uuid, name, deleted), listMember (uuid = the list, into = the person, deleted = taken off)
         var t: String
         var at: Double
@@ -675,6 +676,13 @@ public final class TeamSync: @unchecked Sendable {
             ops.append(Op(t: "pin", at: at, uuid: uuid, deleted: !(r["pinned"] as Bool)))
             updates["pub:pin:\(uuid)"] = "\(at)"
         }
+        // Notes on who people are, newest wins.
+        for r in try store.db.read({ db in try Row.fetchAll(db, sql: "SELECT uuid, bio, bioAt FROM person WHERE bioAt IS NOT NULL") }) {
+            let uuid: String = r["uuid"], at: Double = r["bioAt"]
+            guard state["pub:bio:\(uuid)"] != "\(at)" else { continue }
+            ops.append(Op(t: "bio", at: at, uuid: uuid, name: r["bio"]))
+            updates["pub:bio:\(uuid)"] = "\(at)"
+        }
         // Saved watermarks, with their logo and banner files.
         let (wmOps, wmUpdates) = try watermarkOps(team, state: state)
         ops += wmOps
@@ -683,8 +691,12 @@ public final class TeamSync: @unchecked Sendable {
         let (lookOps, lookUpdates) = try lookOps(state: state)
         ops += lookOps
         updates.merge(lookUpdates) { _, b in b }
+        // Tags on people.
+        let (tagOps, tagUpdates) = try tagOps(state: state)
+        ops += tagOps
+        updates.merge(tagUpdates) { _, b in b }
         // Lists of people and who is on them.
-        let (listOps, listUpdates) = try listOps(state: state)
+        let (listOps, listUpdates) = try listOps(teamId: teamId, state: state)
         ops += listOps
         updates.merge(listUpdates) { _, b in b }
         var wrote = false
@@ -808,7 +820,7 @@ public final class TeamSync: @unchecked Sendable {
     /// Mac for good (0.8.3 did this to the first team and edited folders). When a newer version first reads a
     /// team, it goes over what it had already read once more, for just the kinds it learnt since. A new kind of
     /// entry is added here with the next version number.
-    static let lateKinds: [(version: Int, kinds: Set<String>)] = [(2, ["folder"]), (3, ["pin"]), (4, ["watermark", "list", "listMember"]), (5, ["look"])]
+    static let lateKinds: [(version: Int, kinds: Set<String>)] = [(2, ["folder"]), (3, ["pin"]), (4, ["watermark", "list", "listMember"]), (5, ["look"]), (6, ["bio", "tag"])]
     static var readerVersion: Int { lateKinds.map(\.version).max() ?? 1 }
 
     /// Reads what this Mac already read of each teammate's log again, applying only the kinds learnt since
@@ -1310,6 +1322,9 @@ public final class TeamSync: @unchecked Sendable {
         case "listMember":
             return try applyListMemberOp(op, team: team, db: db)
 
+        case "tag":
+            return try applyTagOp(op, team: team, db: db)
+
         case "pin":
             guard let uuid = op.uuid else { return .ignored }
             guard let pid = try Self.resolve(uuid, db: db) else { return .deferred }
@@ -1323,6 +1338,17 @@ public final class TeamSync: @unchecked Sendable {
             // Known here now: not sent back as this Mac's own change.
             let local: String = try String.fetchOne(db, sql: "SELECT uuid FROM person WHERE id = ?", arguments: [pid]) ?? uuid
             try db.execute(sql: "INSERT OR REPLACE INTO syncState (teamId, key, value) VALUES (?, ?, ?)", arguments: [team.id, "pub:pin:\(local)", "\(op.at)"])
+            return .applied(people: [], remote: [])
+
+        case "bio":
+            guard let uuid = op.uuid else { return .ignored }
+            guard let pid = try Self.resolve(uuid, db: db) else { return .deferred }
+            let current = try Double?.fetchOne(db, sql: "SELECT bioAt FROM person WHERE id = ?", arguments: [pid]) ?? nil
+            guard op.at > (current ?? 0) else { return .ignored }
+            try db.execute(sql: "UPDATE person SET bio = ?, bioAt = ? WHERE id = ?", arguments: [op.name, op.at, pid])
+            // Known here now: not sent back as this Mac's own change.
+            let local: String = try String.fetchOne(db, sql: "SELECT uuid FROM person WHERE id = ?", arguments: [pid]) ?? uuid
+            try db.execute(sql: "INSERT OR REPLACE INTO syncState (teamId, key, value) VALUES (?, ?, ?)", arguments: [team.id, "pub:bio:\(local)", "\(op.at)"])
             return .applied(people: [], remote: [])
 
         case "summary":

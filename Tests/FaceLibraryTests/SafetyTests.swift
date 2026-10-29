@@ -148,9 +148,11 @@ final class SafetyTests: XCTestCase {
     func testListsAndPinsSurviveAMerge() throws {
         let an = try person("An"), twin = try person(nil), other = try person("Bình")
         try store.db.write { db in
-            let cast = try PersonGroups.create("Cast", db: db)
-            XCTAssertEqual(try PersonGroups.create(" cast ", db: db), cast, "one list per name, any case")
-            let vip = try PersonGroups.create("VIP", db: db)
+            var gala = ProjectRecord(name: "Gala")
+            try gala.insert(db)
+            let cast = try PersonGroups.create("Cast", project: gala.id!, db: db)
+            XCTAssertEqual(try PersonGroups.create(" cast ", project: gala.id!, db: db), cast, "one list per name, any case")
+            let vip = try PersonGroups.create("VIP", project: gala.id!, db: db)
             try PersonGroups.set(cast, people: [twin, other], member: true, db: db)
             try PersonGroups.set(vip, people: [an], member: true, db: db)
             try PersonGroups.pin([twin], true, db: db)

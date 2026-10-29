@@ -1,37 +1,47 @@
 import Foundation
 import GRDB
 
-/// Lists of people travel to teammates (see PersonGroups): `list` (uuid, name; deleted = the list was deleted) and
+/// Lists of people travel to teammates (see PersonGroups): `list` (uuid, name, project; deleted = the list was deleted) and
 /// `listMember` (uuid = the list, into = the person; deleted = taken off it). The newest change wins; what was
 /// taken away is remembered (`personGroupGone`, `personGroupMemberGone`) so an older copy doesn't bring it back.
+/// A list goes to the team its project is shared with; a list without a project (from before lists were a
+/// project's) is ignored.
 extension TeamSync {
-    /// Lists, their members and what was taken away, since last published.
-    func listOps(state: [String: String]) throws -> (ops: [Op], updates: [String: String]) {
+    /// The team's projects' lists, their members and what was taken away, since last published.
+    func listOps(teamId: Int64, state: [String: String]) throws -> (ops: [Op], updates: [String: String]) {
         var ops: [Op] = []
         var updates: [String: String] = [:]
         try store.db.read { db in
-            for r in try Row.fetchAll(db, sql: "SELECT uuid, name, updatedAt FROM personGroup") {
+            for r in try Row.fetchAll(db, sql: """
+                SELECT g.uuid, g.name, g.updatedAt, pr.uuid AS project FROM personGroup g JOIN project pr ON pr.id = g.projectId WHERE pr.teamId = ?
+                """, arguments: [teamId]) {
                 let uuid: String = r["uuid"], at: Double = r["updatedAt"]
                 guard state["pub:list:\(uuid)"] != "\(at)" else { continue }
-                ops.append(Op(t: "list", at: at, uuid: uuid, name: r["name"]))
+                ops.append(Op(t: "list", at: at, uuid: uuid, name: r["name"], project: r["project"]))
                 updates["pub:list:\(uuid)"] = "\(at)"
             }
-            for r in try Row.fetchAll(db, sql: "SELECT uuid, at FROM personGroupGone") {
+            for r in try Row.fetchAll(db, sql: """
+                SELECT g.uuid, g.at, g.project FROM personGroupGone g JOIN project pr ON pr.uuid = g.project WHERE pr.teamId = ?
+                """, arguments: [teamId]) {
                 let uuid: String = r["uuid"], at: Double = r["at"]
                 guard state["pub:list:\(uuid)"] != "x\(at)" else { continue }
-                ops.append(Op(t: "list", at: at, uuid: uuid, deleted: true))
+                ops.append(Op(t: "list", at: at, uuid: uuid, deleted: true, project: r["project"]))
                 updates["pub:list:\(uuid)"] = "x\(at)"
             }
             for r in try Row.fetchAll(db, sql: """
                 SELECT g.uuid AS list, p.uuid AS person, m.at FROM personGroupMember m
-                JOIN personGroup g ON g.id = m.groupId JOIN person p ON p.id = m.personId
-                """) {
+                JOIN personGroup g ON g.id = m.groupId JOIN person p ON p.id = m.personId JOIN project pr ON pr.id = g.projectId
+                WHERE pr.teamId = ?
+                """, arguments: [teamId]) {
                 let list: String = r["list"], person: String = r["person"], at: Double = r["at"]
                 guard state["pub:lm:\(list):\(person)"] != "\(at)" else { continue }
                 ops.append(Op(t: "listMember", at: at, uuid: list, into: person))
                 updates["pub:lm:\(list):\(person)"] = "\(at)"
             }
-            for r in try Row.fetchAll(db, sql: "SELECT groupUuid, personUuid, at FROM personGroupMemberGone") {
+            for r in try Row.fetchAll(db, sql: """
+                SELECT mg.groupUuid, mg.personUuid, mg.at FROM personGroupMemberGone mg
+                JOIN personGroup g ON g.uuid = mg.groupUuid JOIN project pr ON pr.id = g.projectId WHERE pr.teamId = ?
+                """, arguments: [teamId]) {
                 let list: String = r["groupUuid"], person: String = r["personUuid"], at: Double = r["at"]
                 guard state["pub:lm:\(list):\(person)"] != "x\(at)" else { continue }
                 ops.append(Op(t: "listMember", at: at, uuid: list, into: person, deleted: true))
@@ -55,7 +65,14 @@ extension TeamSync {
     }
 
     func applyListOp(_ op: Op, team: TeamRecord, db: Database) throws -> Outcome {
-        guard let uuid = op.uuid else { return .ignored }
+        // No project: a teammate's list from before lists were a project's.
+        guard let uuid = op.uuid, op.project != nil else { return .ignored }
+        let projectId: Int64
+        switch try Self.resolveProject(op.project, team: team, db: db) {
+        case .found(let id): projectId = id
+        case .unknown: return .deferred
+        case .gone: return .ignored
+        }
         func published(_ local: String, _ value: String) throws {
             // Known here now: not sent back as this Mac's own change.
             try db.execute(sql: "INSERT OR REPLACE INTO syncState (teamId, key, value) VALUES (?, ?, ?)", arguments: [team.id, "pub:list:\(local)", value])
@@ -65,12 +82,12 @@ extension TeamSync {
             if let l = try Self.resolveList(uuid, db: db) {
                 guard op.at >= l.updatedAt else { return .ignored }  // renamed here since: kept
                 try db.execute(sql: "DELETE FROM personGroup WHERE id = ?", arguments: [l.id])
-                try db.execute(sql: "INSERT OR REPLACE INTO personGroupGone (uuid, at) VALUES (?, ?)", arguments: [l.uuid, op.at])
+                try db.execute(sql: "INSERT OR REPLACE INTO personGroupGone (uuid, at, project) VALUES (?, ?, ?)", arguments: [l.uuid, op.at, op.project])
                 try published(l.uuid, "x\(op.at)")
                 return .applied(people: [], remote: [])
             }
             guard op.at > (gone ?? 0) else { return .ignored }
-            try db.execute(sql: "INSERT OR REPLACE INTO personGroupGone (uuid, at) VALUES (?, ?)", arguments: [uuid, op.at])
+            try db.execute(sql: "INSERT OR REPLACE INTO personGroupGone (uuid, at, project) VALUES (?, ?, ?)", arguments: [uuid, op.at, op.project])
             try published(uuid, "x\(op.at)")
             return .ignored
         }
@@ -83,7 +100,7 @@ extension TeamSync {
             try published(l.uuid, "\(op.at)")
             return .applied(people: [], remote: [])
         }
-        if let existing = try PersonGroups.find(name, db: db) {
+        if let existing = try PersonGroups.find(name, project: projectId, db: db) {
             // Both Macs made a list of that name: the smaller id becomes the one everybody uses.
             let theirs: String = try String.fetchOne(db, sql: "SELECT uuid FROM personGroup WHERE id = ?", arguments: [existing]) ?? ""
             if uuid < theirs {
@@ -96,8 +113,8 @@ extension TeamSync {
             }
             return .applied(people: [], remote: [])
         }
-        let last = try Int.fetchOne(db, sql: "SELECT MAX(sortOrder) FROM personGroup") ?? -1
-        var g = PersonGroupRecord(name: name, sortOrder: last + 1, uuid: uuid, updatedAt: op.at)
+        let last = try Int.fetchOne(db, sql: "SELECT MAX(sortOrder) FROM personGroup WHERE projectId = ?", arguments: [projectId]) ?? -1
+        var g = PersonGroupRecord(name: name, sortOrder: last + 1, projectId: projectId, uuid: uuid, updatedAt: op.at)
         try g.insert(db)
         try published(uuid, "\(op.at)")
         return .applied(people: [], remote: [])

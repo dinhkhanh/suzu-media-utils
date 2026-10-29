@@ -20,6 +20,8 @@ struct PeopleGrid: View {
     @Binding var path: NavigationPath
     @State private var search = ""
     @State private var filter: PeopleFilter
+    /// Only people with every one of these tags (their keys, see PersonNames.key).
+    @State private var tagFilter: Set<String> = []
     let scope: PeopleScope
     @State private var selected: Set<Int64> = []
     @FocusState private var editing: Int64?
@@ -30,6 +32,8 @@ struct PeopleGrid: View {
     @State private var exportAll: ExportMode?
     @State private var galleryExport = false
     @State private var findingByPhoto = false
+    /// The selection bar's tag popover is open.
+    @State private var tagging = false
     /// The person whose face space enlarged (see `Peek`).
     @State private var peek: PeekState<Int64>?
     @State private var pointer = Peek<Int64>()
@@ -54,7 +58,9 @@ struct PeopleGrid: View {
     var shown: [PersonSummary] {
         inScope.filter { p in
             (filter == .all || (filter == .named) == (p.name != nil))
-                && (search.isEmpty || (p.name ?? "").localizedCaseInsensitiveContains(search))
+                && (search.isEmpty || (p.name ?? "").localizedCaseInsensitiveContains(search)
+                    || p.tags.contains { $0.localizedCaseInsensitiveContains(search) })
+                && (tagFilter.isEmpty || tagFilter.isSubset(of: p.tags.map(PersonNames.key)))
         }
     }
     var unnamed: Int { inScope.count { $0.name == nil } }
@@ -99,7 +105,7 @@ struct PeopleGrid: View {
         }
         .navigationTitle(model.currentSession.map { "\(title) · \(model.sessionTitle($0))" } ?? title)
         .navigationSubtitle("\(named + unnamed) · \(named) named" + (unnamed > 0 ? " · \(unnamed) to name" : ""))
-        .searchable(text: $search, prompt: "Search names")
+        .searchable(text: $search, prompt: "Search names and tags")
         .sheet(isPresented: $suggesting) { CelebritySheet() }
         .sheet(item: $exportAll) { ExportSheet(scope: .all, mode: $0) }
         .sheet(isPresented: $galleryExport) { GalleryExportSheet() }
@@ -114,6 +120,24 @@ struct PeopleGrid: View {
                     }
                 }
                 .pickerStyle(.segmented)
+            }
+            if !model.tags.isEmpty || !tagFilter.isEmpty {
+                ToolbarItem {
+                    Menu {
+                        ForEach(model.tags, id: \.self) { t in
+                            let key = PersonNames.key(t)
+                            Toggle(t, isOn: Binding(get: { tagFilter.contains(key) },
+                                                    set: { if $0 { tagFilter.insert(key) } else { tagFilter.remove(key) } }))
+                        }
+                        if !tagFilter.isEmpty {
+                            Divider()
+                            Button("Show Everyone") { tagFilter = [] }
+                        }
+                    } label: {
+                        Label(tagFilter.isEmpty ? "Tags" : "Tags (\(tagFilter.count))", systemImage: tagFilter.isEmpty ? "tag" : "tag.fill")
+                    }
+                    .help("Show only the people with the chosen tags (all of them)")
+                }
             }
             if let group {
                 ToolbarItem {
@@ -239,7 +263,10 @@ struct PeopleGrid: View {
                 Label("Add to List", systemImage: "list.bullet")
             }
             .fixedSize()
-            .help("Put the selected people on a list: cast, sponsors, VIP…")
+            .help("Put the selected people on a list of this event: cast, sponsors, VIP…")
+            Button { tagging = true } label: { Label("Tag", systemImage: "tag") }
+                .popover(isPresented: $tagging, arrowEdge: .top) { BulkTags(people: selected).padding(14).frame(width: 320) }
+                .help("Tag the selected people: singer, actor, model, KOL…")
             if selected.count == 1, let id = selected.first {
                 Button("Open") { path.append(PersonRoute(id: id)) }
             }
@@ -281,6 +308,105 @@ extension PeopleGrid {
     }
 }
 
+/// A person's tags, each a chip (click to take it off), then a field to add one: it suggests the tags in use as
+/// you type; ⏎ adds what was typed, as a new tag if no one has it yet.
+struct TagsRow: View {
+    @EnvironmentObject var model: FaceGroupingModel
+    let personId: Int64
+    let tags: [String]
+    @State private var text = ""
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(tags, id: \.self) { t in
+                Chip(title: t, help: "Tagged \(t) — click to take off", action: { model.setTag(t, people: [personId], on: false) }) {
+                    Image(systemName: "tag").font(.caption)
+                }
+            }
+            TagField(prompt: tags.isEmpty ? "Add a tag: singer, actor, KOL…" : "Add a tag", except: tags) {
+                model.setTag($0, people: [personId], on: true)
+            }
+            .frame(width: tags.isEmpty ? 220 : 120)
+        }
+    }
+}
+
+/// A field to add a tag: it suggests the tags in use as you type (a pick adds it); ⏎ adds what was typed, as a new
+/// tag if no one has it yet.
+struct TagField: View {
+    @EnvironmentObject var model: FaceGroupingModel
+    let prompt: String
+    /// Tags not suggested (the person's own).
+    var except: [String] = []
+    let add: (String) -> Void
+    @State private var text = ""
+
+    var body: some View {
+        TextField(prompt, text: $text)
+            .textFieldStyle(.plain)
+            .font(.callout)
+            .textInputSuggestions {
+                ForEach(matches(text), id: \.self) { t in Text(t).textInputCompletion(t) }
+            }
+            .onChange(of: text) { old, new in
+                // A pick replaces the text with one of the tags suggested for it (not typing its last letter).
+                let typedOneMore = new.hasPrefix(old) && new.count == old.count + 1
+                if !typedOneMore, matches(old).contains(new) { commit(new) }
+            }
+            .onSubmit { commit(text) }
+            .help("Type to pick a tag in use, or press ⏎ to make a new one; tags apply in every project")
+    }
+
+    /// Tags in use that contain what was typed, other than `except`.
+    func matches(_ text: String) -> [String] {
+        let typed = text.trimmingCharacters(in: .whitespaces)
+        guard !typed.isEmpty else { return [] }
+        let skip = Set(except.map(PersonNames.key))
+        return Array(model.tags.filter { $0.localizedCaseInsensitiveContains(typed) && !skip.contains(PersonNames.key($0)) }.prefix(8))
+    }
+
+    func commit(_ raw: String) {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        text = ""
+        guard !t.isEmpty, !except.contains(where: { PersonNames.key($0) == PersonNames.key(t) }) else { return }
+        add(t)
+    }
+}
+
+/// Tags for several people at once: a field to tag them all, then the tags any of them has: filled when all of
+/// them have it (click to take it off them all), else click to give it to the rest.
+struct BulkTags: View {
+    @EnvironmentObject var model: FaceGroupingModel
+    let people: Set<Int64>
+
+    var body: some View {
+        let chosen = model.people.filter { people.contains($0.id) }
+        // Each tag once (any spelling), in the order of the tags in use.
+        let keys = Set(chosen.flatMap(\.tags).map(PersonNames.key))
+        let tags = model.tags.filter { keys.contains(PersonNames.key($0)) }
+        VStack(alignment: .leading, spacing: 10) {
+            Text(people.count == 1 ? "Tag 1 person" : "Tag \(people.count) people").font(.headline)
+            TagField(prompt: "Add a tag: singer, actor, KOL…") { model.setTag($0, people: people, on: true) }
+                .padding(.horizontal, 8).padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.1)))
+            if !tags.isEmpty {
+                FlowLayout(spacing: 6) {
+                    ForEach(tags, id: \.self) { t in
+                        let key = PersonNames.key(t)
+                        let n = chosen.count { $0.tags.contains { PersonNames.key($0) == key } }
+                        let all = n == chosen.count
+                        Chip(t, count: all ? nil : "\(n)/\(chosen.count)", on: all,
+                             help: all ? "Everyone selected is tagged \(t) — click to take it off them all"
+                                       : "\(n) of \(chosen.count) tagged \(t) — click to tag them all") {
+                            model.setTag(t, people: people, on: !all)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The lists, ticked for the people who are on them, then "New List…" and the usual names not made yet.
 struct ListsMenu: View {
     @EnvironmentObject var model: FaceGroupingModel
@@ -290,6 +416,14 @@ struct ListsMenu: View {
     let chosen: [PersonSummary]
 
     var body: some View {
+        if model.currentProject == nil {
+            Text("Open a project to use its lists")
+        } else {
+            menu
+        }
+    }
+
+    @ViewBuilder var menu: some View {
         ForEach(groups) { g in
             let on = !chosen.isEmpty && chosen.allSatisfy { $0.groups.contains(g.id) }
             Toggle(g.name, isOn: Binding(get: { on }, set: { model.setGroup(g.id, people: people, member: $0) }))
@@ -483,6 +617,8 @@ struct PersonDetail: View {
     let personId: Int64
     @Binding var path: NavigationPath
     @State private var name = ""
+    @State private var bio = ""
+    @FocusState private var bioFocused: Bool
     @State private var tab = DetailTab.photos
     @State private var media: [PersonMedia] = []
     @State private var faces: [FaceItem] = []
@@ -539,6 +675,10 @@ struct PersonDetail: View {
         .onChange(of: topN) { relist() }
         // The name, once the model has the person (and after a rename elsewhere); not while it is being typed.
         .onChange(of: person?.name, initial: true) { if name != (person?.name ?? ""), name.isEmpty || name == person?.name { name = person?.name ?? "" } }
+        // The note likewise (a teammate's edit), not while it is being typed.
+        .onChange(of: person?.bio, initial: true) { if !bioFocused { bio = person?.bio ?? "" } }
+        .onChange(of: bioFocused) { if !bioFocused { commitBio() } }
+        .onDisappear(perform: commitBio)
         .sheet(isPresented: $notifyRule) { RuleSheet(presetPerson: personId, notifyOnly: true) }
         .sheet(isPresented: $videoExport) { VideoExportSheet(personId: personId, name: person?.name ?? "Person") }
         .sheet(item: $export) { mode in
@@ -598,6 +738,14 @@ struct PersonDetail: View {
                             .help("Also in \(otherProjects.joined(separator: ", ")): a name given here applies to all of them")
                     }
                 }
+                TextField("Add a note: singer, actor, model, KOL…", text: $bio)
+                    .textFieldStyle(.plain)
+                    .font(.callout)
+                    .focused($bioFocused)
+                    .onSubmit(commitBio)
+                    .frame(maxWidth: 420, alignment: .leading)
+                    .help("Who this person is; the note applies in every project")
+                TagsRow(personId: personId, tags: person?.tags ?? [])
                 Text(summary).foregroundStyle(.secondary)
                 HStack(spacing: 6) {
                     ForEach(model.groups.filter { person?.groups.contains($0.id) == true }) { g in
@@ -609,7 +757,7 @@ struct PersonDetail: View {
                         Label("Add to list", systemImage: "plus.circle").font(.callout.weight(.medium)).foregroundStyle(.secondary)
                     }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().tint(.primary)
-                    .help("Cast, sponsors, VIP…: the lists this person is on")
+                    .help("Cast, sponsors, VIP…: the lists this person is on at this event")
                 }
                 .padding(.top, 2)
                 if !companions.isEmpty || !alsoWith.isEmpty {
@@ -671,6 +819,12 @@ struct PersonDetail: View {
             path.removeLast()
             path.append(PersonRoute(id: survivor))
         }
+    }
+
+    func commitBio() {
+        let trimmed = bio.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed != (person?.bio ?? "") else { return }
+        model.setBio(personId, trimmed)
     }
 
     // MARK: - Tabs and controls

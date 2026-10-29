@@ -18,6 +18,10 @@ struct PersonSummary: Identifiable, Hashable {
     var pinned = false
     /// The lists this person is on (PersonGroupSummary ids).
     var groups: Set<Int64> = []
+    /// A short note on who they are (singer, actor, model, KOL…).
+    var bio: String?
+    /// Their tags, in the order given (see PersonTags).
+    var tags: [String] = []
     var displayName: String { name ?? "Unnamed" }
 }
 
@@ -161,8 +165,10 @@ final class FaceGroupingModel: ObservableObject {
     @Published var people: [PersonSummary] = []
     /// Everyone with a name, in any project: names are given once and shared by all projects.
     @Published var knownPeople: [PersonSummary] = []
-    /// Lists of people, in sidebar order.
+    /// The open project's lists of people, in sidebar order (none in All Projects: a list is one event's).
     @Published var groups: [PersonGroupSummary] = []
+    /// Every tag on someone, the most used first (see PersonTags).
+    @Published var tags: [String] = []
     /// Set to ask for a new list's name; the people in it are put on the list once it is made.
     @Published var askNewGroup: Set<Int64>?
     /// Set to ask for a list's new name.
@@ -322,13 +328,13 @@ final class FaceGroupingModel: ObservableObject {
                  project == nil ? [] : try EventSessions.list(db, project: project, gap: gap),
                  try TeamRecord.order(Column("joinedAt")).fetchAll(db),
                  try Self.fetchOverview(db, project: project),
-                 try Self.fetchGroups(db))
+                 try Self.fetchGroups(db, project: project), try PersonTags.all(db: db))
             }
             await MainActor.run {
                 defer { self.refreshing = false }
                 // The project changed while reading: the next tick reads the new one.
                 guard project == self.currentProject, range == self.sessionRange else { self.dirty = true; return }
-                if let (people, sources, stats, albums, rules, projects, known, sessions, teams, overview, groups) = result {
+                if let (people, sources, stats, albums, rules, projects, known, sessions, teams, overview, groups, tags) = result {
                     if teams != self.teams { self.teams = teams; self.applyTeamStatus(); self.nas.teamsChanged(teams) }
                     if sessions != self.sessions {
                         if sessions.count > self.sessions.count, !self.sessions.isEmpty, let s = sessions.last {
@@ -351,6 +357,7 @@ final class FaceGroupingModel: ObservableObject {
                     }
                     if known != self.knownPeople { self.knownPeople = known }
                     if groups != self.groups { self.groups = groups }
+                    if tags != self.tags { self.tags = tags }
                     if people != self.people { self.people = people }
                     self.applySources(sources)
                     if stats != self.stats { self.stats = stats }
@@ -452,12 +459,13 @@ final class FaceGroupingModel: ObservableObject {
         return try Row.fetchAll(db, sql: """
             SELECT y.* FROM (
                 SELECT x.*, (SELECT \(BestShot.coverOrderSQL) FROM face f WHERE f.id = x.cover) AS look FROM (
-                    SELECT p.id, p.name, p.pinnedAt IS NOT NULL AS pinned, COUNT(*) AS faces,
+                    SELECT p.id, p.name, p.bio, p.pinnedAt IS NOT NULL AS pinned, COUNT(*) AS faces,
                         COUNT(DISTINCT CASE WHEN m.kind = 'photo' THEN m.id END) AS photos,
                         COUNT(DISTINCT CASE WHEN m.kind = 'video' THEN m.id END) AS videos,
                         COALESCE((SELECT c.id FROM face c WHERE c.id = p.coverFaceId AND c.personId = p.id),
                                  \(BestShot.coverSubquery(project: project))) AS cover,
-                        (SELECT group_concat(groupId) FROM personGroupMember gm WHERE gm.personId = p.id) AS groups
+                        (SELECT group_concat(groupId) FROM personGroupMember gm WHERE gm.personId = p.id) AS groups,
+                        (SELECT group_concat(name, char(31)) FROM (SELECT name FROM personTag t WHERE t.personId = p.id AND NOT t.removed ORDER BY t.at)) AS tags
                     FROM person p
                     JOIN face f ON f.personId = p.id
                     JOIN media m ON m.id = f.mediaId
@@ -471,12 +479,14 @@ final class FaceGroupingModel: ObservableObject {
             """).map {
             PersonSummary(id: $0["id"], name: $0["name"], faces: $0["faces"], photos: $0["photos"], videos: $0["videos"],
                           coverFaceId: $0["cover"], pinned: $0["pinned"],
-                          groups: Set((($0["groups"] as String?) ?? "").split(separator: ",").compactMap { Int64($0) }))
+                          groups: Set((($0["groups"] as String?) ?? "").split(separator: ",").compactMap { Int64($0) }), bio: $0["bio"],
+                          tags: (($0["tags"] as String?) ?? "").split(separator: "\u{1F}").map(String.init))
         }
     }
 
-    nonisolated static func fetchGroups(_ db: Database) throws -> [PersonGroupSummary] {
-        try Row.fetchAll(db, sql: "SELECT id, name FROM personGroup ORDER BY sortOrder, id")
+    nonisolated static func fetchGroups(_ db: Database, project: Int64?) throws -> [PersonGroupSummary] {
+        guard let project else { return [] }
+        return try Row.fetchAll(db, sql: "SELECT id, name FROM personGroup WHERE projectId = ? ORDER BY sortOrder, id", arguments: [project])
             .map { PersonGroupSummary(id: $0["id"], name: $0["name"]) }
     }
 
@@ -828,11 +838,22 @@ final class FaceGroupingModel: ObservableObject {
         log(on ? "Pinned \(who)" : "Unpinned \(who)", icon: on ? "star.fill" : "star")
     }
 
-    /// Makes a list (or finds the one of that name) and puts `ids` on it.
+    func setBio(_ id: Int64, _ bio: String) { perform { try $0.setBio(id, bio) } }
+
+    /// Tags people, or takes the tag off them; a name not used yet makes a new tag.
+    func setTag(_ name: String, people ids: Set<Int64>, on: Bool) {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty else { return }
+        perform { try $0.setTag(n, people: Array(ids), on: on) }
+        let who = ids.count == 1 ? (people.first { $0.id == ids.first }?.displayName ?? "1 person") : "\(ids.count) people"
+        log(on ? "\(who) tagged \(n)" : "Tag \(n) taken off \(who)", icon: "tag")
+    }
+
+    /// Makes a list in the open project (or finds its list of that name) and puts `ids` on it.
     func createGroup(_ name: String, people ids: Set<Int64> = []) {
         let n = name.trimmingCharacters(in: .whitespaces)
-        guard !n.isEmpty else { return }
-        perform { try $0.createGroup(n, people: Array(ids)) }
+        guard !n.isEmpty, let project = currentProject else { return }
+        perform { try $0.createGroup(n, project: project, people: Array(ids)) }
         log(ids.isEmpty ? "List \(n) made" : "\(ids.count == 1 ? "1 person" : "\(ids.count) people") put on \(n)", icon: "list.bullet")
     }
 

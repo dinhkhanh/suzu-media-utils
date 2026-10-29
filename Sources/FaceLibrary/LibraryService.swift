@@ -687,11 +687,23 @@ public final class LibraryService: @unchecked Sendable {
         teamSync.pushSoon()
     }
 
-    /// Makes a list (or finds the one of that name) and puts `people` on it.
+    /// Tags people (`on`) or takes the tag off them; a new name makes a new tag.
+    public func setTag(_ name: String, people: [Int64], on: Bool) throws {
+        try store.db.write { db in try PersonTags.set(name, people: people, on: on, db: db) }
+        teamSync.pushSoon()
+    }
+
+    /// The short note on who the person is (singer, actor, model, KOL…); empty clears it.
+    public func setBio(_ personId: Int64, _ bio: String) throws {
+        try store.db.write { db in try PersonGroups.setBio(personId, bio, db: db) }
+        teamSync.pushSoon()
+    }
+
+    /// Makes a list in the project (or finds its list of that name) and puts `people` on it.
     @discardableResult
-    public func createGroup(_ name: String, people: [Int64] = []) throws -> Int64 {
+    public func createGroup(_ name: String, project: Int64, people: [Int64] = []) throws -> Int64 {
         try store.db.write { db in
-            let id = try PersonGroups.create(name, db: db)
+            let id = try PersonGroups.create(name, project: project, db: db)
             try PersonGroups.set(id, people: people, member: true, db: db)
             teamSync.pushSoon()
             return id

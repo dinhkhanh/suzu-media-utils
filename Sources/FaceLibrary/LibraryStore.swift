@@ -549,6 +549,34 @@ public final class LibraryStore: @unchecked Sendable {
             /// An event folder's loose files as a unit of their own (StagingWatcher).
             try db.alter(table: "nasUpload") { t in t.add(column: "filesOnly", .boolean).notNull().defaults(to: false) }
         }
+        m.registerMigration("v27-person-bio") { db in
+            /// A short note on who the person is (singer, actor, model, KOL…), and when it was last set, so the
+            /// newest note wins across the team.
+            try db.alter(table: "person") { t in
+                t.add(column: "bio", .text)
+                t.add(column: "bioAt", .double)
+            }
+        }
+        m.registerMigration("v28-person-tags") { db in
+            /// Tags on people (see PersonTags): one row per person and tag, kept when taken off (`removed`) so the
+            /// newest change wins across the team.
+            try db.create(table: "personTag") { t in
+                t.column("personId", .integer).notNull().references("person", onDelete: .cascade)
+                t.column("key", .text).notNull()
+                t.column("name", .text).notNull()
+                t.column("at", .double).notNull()
+                t.column("removed", .boolean).notNull().defaults(to: false)
+                t.primaryKey(["personId", "key"])
+            }
+            try db.create(index: "personTag_key", on: "personTag", columns: ["key"])
+        }
+        m.registerMigration("v29-project-lists") { db in
+            /// A list belongs to one project (see PersonGroups): the main cast at one event can be a guest at the
+            /// next. A deleted list remembers its project, so the deletion goes to that project's team.
+            try db.alter(table: "personGroup") { t in t.add(column: "projectId", .integer).indexed().references("project", onDelete: .cascade) }
+            try db.alter(table: "personGroupGone") { t in t.add(column: "project", .text) }
+            try PersonGroups.splitByProject(db: db)
+        }
         return m
     }
 }

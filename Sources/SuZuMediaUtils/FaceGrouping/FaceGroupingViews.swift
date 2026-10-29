@@ -93,6 +93,8 @@ struct FaceGroupingSidebar: View {
                 .badge(model.rules.filter(\.enabled).count)
                 .tag(AppRoute.faces(.rules))
         }
+        // A list is one event's: none in All Projects.
+        if model.currentProject != nil {
         Section("Lists", isExpanded: $listsOpen) {
             ForEach(model.groups) { g in
                 Label(g.name, systemImage: "list.bullet")
@@ -110,6 +112,7 @@ struct FaceGroupingSidebar: View {
                     let missing = PersonGroups.suggestedNames.filter { n in !model.groups.contains { PersonNames.key($0.name) == PersonNames.key(n) } }
                     ForEach(missing, id: \.self) { n in Button(n) { model.createGroup(n) } }
                 }
+        }
         }
         if !albums.isEmpty {
             Section("Smart Albums") {

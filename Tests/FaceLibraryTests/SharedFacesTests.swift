@@ -374,6 +374,121 @@ final class SharedFacesTests: XCTestCase {
         XCTAssertFalse(try pinned(b, bAn))
     }
 
+    func testNotesOnPeopleTravelBothWays() throws {
+        let an = try a.person("An")
+        exchange()
+        let bAn = try XCTUnwrap(try b.personId(named: "An"))
+        func bio(_ mac: TeamSyncTests.Mac, _ pid: Int64) throws -> String? {
+            try mac.store.db.read { db in try String.fetchOne(db, sql: "SELECT bio FROM person WHERE id = ?", arguments: [pid]) }
+        }
+        try a.store.db.write { db in try PersonGroups.setBio(an, "  Singer ", db: db) }
+        XCTAssertEqual(try bio(a, an), "Singer")
+        exchange()
+        XCTAssertEqual(try bio(b, bAn), "Singer")
+        Thread.sleep(forTimeInterval: 0.01)
+        try b.store.db.write { db in try PersonGroups.setBio(bAn, "Singer, actress", db: db) }
+        exchange()
+        XCTAssertEqual(try bio(a, an), "Singer, actress", "edited on B, edited on A")
+        Thread.sleep(forTimeInterval: 0.01)
+        try a.store.db.write { db in try PersonGroups.setBio(an, "", db: db) }
+        exchange()
+        XCTAssertNil(try bio(b, bAn), "cleared on A, cleared on B")
+    }
+
+    /// A list is one project's: the same name in another project is another list, and stays on this Mac when only
+    /// the other project is the team's.
+    func testAListBelongsToOneProject() throws {
+        let an = try a.person("An")
+        var other = ProjectRecord(name: "Next event")
+        try a.store.db.write { db in try other.insert(db) }
+        let (gala, next) = try a.store.db.write { db -> (Int64, Int64) in
+            let gala = try PersonGroups.create("Cast", project: a.project, db: db)
+            let next = try PersonGroups.create("cast", project: other.id!, db: db)
+            try PersonGroups.set(gala, people: [an], member: true, db: db)
+            return (gala, next)
+        }
+        XCTAssertNotEqual(gala, next)
+        exchange()
+        let onB = try b.store.db.read { db in try Row.fetchAll(db, sql: "SELECT name, projectId FROM personGroup") }
+        XCTAssertEqual(onB.count, 1, "the other project isn't the team's")
+        XCTAssertEqual(onB.first?["projectId"] as Int64?, b.project)
+    }
+
+    /// Lists from before lists were a project's go to the projects their people appear in, with the same id on
+    /// every Mac, so the team ends with one copy of each.
+    func testOldListsSplitIntoProjectsTheSameOnEveryMac() throws {
+        let an = try a.person("An")
+        try processed("p1.jpg", person: an, vector: vector(1))
+        exchange()
+        let bAn = try XCTUnwrap(try b.personId(named: "An"))
+        let uuid = SyncIds.new()
+        for (mac, person) in [(a!, an), (b!, bAn)] {
+            try mac.store.db.write { db in
+                try db.execute(sql: "INSERT INTO personGroup (name, sortOrder, createdAt, uuid, updatedAt) VALUES ('VIP', 0, ?, ?, 1)", arguments: [Date(), uuid])
+                try db.execute(sql: "INSERT INTO personGroupMember (groupId, personId, at) VALUES (?, ?, 1)", arguments: [db.lastInsertedRowID, person])
+                try PersonGroups.splitByProject(db: db)
+            }
+        }
+        exchange()
+        for (mac, project) in [(a!, a.project), (b!, b.project)] {
+            let lists = try mac.store.db.read { db in try Row.fetchAll(db, sql: "SELECT id, uuid, projectId FROM personGroup") }
+            XCTAssertEqual(lists.count, 1)
+            XCTAssertEqual(lists.first?["projectId"] as Int64?, project)
+            XCTAssertEqual(lists.first?["uuid"] as String?, "\(uuid):\(try a.projectUuid())")
+        }
+        XCTAssertEqual(try a.store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM personGroupMember WHERE personId = ?", arguments: [an]) }, 1)
+    }
+
+    func testTagsAreReusedAndTravelBothWays() throws {
+        let an = try a.person("An"), binh = try a.person("Bình")
+        try a.store.db.write { db in
+            try PersonTags.set("KOL", people: [an], on: true, db: db)
+            try PersonTags.set(" kol ", people: [binh], on: true, db: db)
+            try PersonTags.set("Singer", people: [an], on: true, db: db)
+        }
+        XCTAssertEqual(try a.store.db.read { db in try PersonTags.of(binh, db: db) }, ["KOL"], "a tag in use keeps its spelling")
+        XCTAssertEqual(try a.store.db.read { db in try PersonTags.all(db: db) }, ["KOL", "Singer"], "the most used first")
+        exchange()
+        let bAn = try XCTUnwrap(try b.personId(named: "An"))
+        XCTAssertEqual(try b.store.db.read { db in try PersonTags.of(bAn, db: db) }, ["KOL", "Singer"])
+        Thread.sleep(forTimeInterval: 0.01)
+        try b.store.db.write { db in try PersonTags.set("Singer", people: [bAn], on: false, db: db) }
+        exchange()
+        XCTAssertEqual(try a.store.db.read { db in try PersonTags.of(an, db: db) }, ["KOL"], "taken off on B, taken off on A")
+        Thread.sleep(forTimeInterval: 0.01)
+        try a.store.db.write { db in try PersonTags.set("Singer", people: [an], on: true, db: db) }
+        exchange()
+        XCTAssertEqual(try b.store.db.read { db in try PersonTags.of(bAn, db: db) }, ["KOL", "Singer"], "and back on")
+    }
+
+    func testAMergedPersonKeepsEveryTag() throws {
+        let an = try a.person("An"), other = try a.person("Other")
+        try a.store.db.write { db in
+            try PersonTags.set("Actor", people: [an], on: true, db: db)
+            try PersonTags.set("Model", people: [other], on: true, db: db)
+            try PersonTags.set("Actor", people: [other], on: true, db: db)
+            try PersonNames.merge([other], into: an, db: db)
+        }
+        XCTAssertEqual(Set(try a.store.db.read { db in try PersonTags.of(an, db: db) }), ["Actor", "Model"])
+        XCTAssertEqual(try a.store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM personTag WHERE personId = ?", arguments: [other]) }, 0)
+    }
+
+    func testAMergedPersonKeepsANote() throws {
+        let an = try a.person("An"), other = try a.person("Other")
+        try a.store.db.write { db in
+            try PersonGroups.setBio(other, "Model", db: db)
+            try PersonNames.merge([other], into: an, db: db)
+        }
+        XCTAssertEqual(try a.store.db.read { db in try String.fetchOne(db, sql: "SELECT bio FROM person WHERE id = ?", arguments: [an]) }, "Model")
+        let kol = try a.person("Kol")
+        try a.store.db.write { db in
+            try PersonGroups.setBio(kol, "KOL", db: db)
+            try PersonNames.merge([an], into: kol, db: db)
+        }
+        XCTAssertEqual(try a.store.db.read { db in try String.fetchOne(db, sql: "SELECT bio FROM person WHERE id = ?", arguments: [kol]) }, "KOL",
+                       "the survivor's own note stays")
+    }
+
     /// A picture picked on a file whose content key wasn't known yet used to travel as "back to automatic".
     func testAPictureOnAFileWithoutAKeyYetTravels() throws {
         let team = try XCTUnwrap(try a.sync.teams().first)
@@ -467,7 +582,7 @@ final class SharedFacesTests: XCTestCase {
         }
         // Made on A with An on it.
         let vip = try a.store.db.write { db -> Int64 in
-            let id = try PersonGroups.create("VIP", db: db)
+            let id = try PersonGroups.create("VIP", project: a.project, db: db)
             try PersonGroups.set(id, people: [an], member: true, db: db)
             return id
         }
@@ -476,15 +591,15 @@ final class SharedFacesTests: XCTestCase {
         // Bo added on B, An taken off on B: A follows.
         Thread.sleep(forTimeInterval: 0.01)
         try b.store.db.write { db in
-            let id = try XCTUnwrap(try PersonGroups.find("VIP", db: db))
+            let id = try XCTUnwrap(try PersonGroups.find("VIP", project: b.project, db: db))
             try PersonGroups.set(id, people: [bBo], member: true, db: db)
             try PersonGroups.set(id, people: [bAn], member: false, db: db)
         }
         exchange()
         XCTAssertEqual(try lists(a), ["VIP": ["Bo"]])
         // "Cast" made on both Macs apart: one list everywhere, with everyone put on either.
-        try a.store.db.write { db in try PersonGroups.set(try PersonGroups.create("Cast", db: db), people: [bo], member: true, db: db) }
-        try b.store.db.write { db in try PersonGroups.set(try PersonGroups.create("Cast", db: db), people: [bAn], member: true, db: db) }
+        try a.store.db.write { db in try PersonGroups.set(try PersonGroups.create("Cast", project: a.project, db: db), people: [bo], member: true, db: db) }
+        try b.store.db.write { db in try PersonGroups.set(try PersonGroups.create("Cast", project: b.project, db: db), people: [bAn], member: true, db: db) }
         exchange()
         XCTAssertEqual(try lists(a), ["VIP": ["Bo"], "Cast": ["An", "Bo"]])
         XCTAssertEqual(try lists(b), ["VIP": ["Bo"], "Cast": ["An", "Bo"]])

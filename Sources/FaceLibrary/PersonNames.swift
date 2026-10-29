@@ -43,6 +43,7 @@ public enum PersonNames {
         try db.execute(sql: "UPDATE face SET personId = ? WHERE personId IN (\(list))", arguments: [target])
         try PersonMemory.merge(others, into: target, db: db)
         try PersonGroups.merge(others, into: target, db: db)
+        try PersonTags.merge(others, into: target, db: db)
         try db.execute(sql: "UPDATE face SET rejectedPersonId = ? WHERE rejectedPersonId IN (\(list))", arguments: [target])
         // A face taken from one of them and placed with the other: the user's later word (the merge) wins.
         try db.execute(sql: "UPDATE face SET rejectedPersonId = NULL WHERE rejectedPersonId = personId AND personId = ?", arguments: [target])
