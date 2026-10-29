@@ -347,6 +347,9 @@ public struct Exporter: Sendable {
                 group.enter()
                 DispatchQueue.global(qos: .userInitiated).async { work(); slots.signal(); group.leave() }
             } else {
+                // A move waits for the copies under way: a copy of the same photo to someone else (Move All's group
+                // photos) still reads it where it was.
+                if item.operation == .move { group.wait() }
                 work()
             }
         }
