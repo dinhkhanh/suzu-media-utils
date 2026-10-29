@@ -82,6 +82,13 @@ public final class GroupingEngine: @unchecked Sendable {
     public var passiveProjects: Set<Int64> = []
     public var processesAnything = true
     var reclusterWork: DispatchWorkItem?
+    /// Each project's waiting faces (how many, and the sum of their ids) when it was last clustered: the same pool
+    /// clusters the same way, so it is left alone until a face joins or leaves it. A big library keeps tens of
+    /// thousands of faces no one matches, and clustering them again took half a minute every time.
+    var clusteredPools: [Int64: Pool] = [:]
+    /// Waiting faces after the last clustering pass: a backlog this much bigger is clustered without waiting for quiet.
+    var waitingAfterRecluster = 0
+    struct Pool: Equatable { var count: Int; var idSum: Int64 }
 
     struct Person {
         /// Sum of member unit vectors; sum . u / count is u's mean similarity to them.
@@ -763,7 +770,7 @@ public final class GroupingEngine: @unchecked Sendable {
 
     // MARK: - Clustering the pending pool
 
-    func scheduleRecluster() {
+    func scheduleRecluster(now: Bool = false) {
         reclusterWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -773,29 +780,46 @@ public final class GroupingEngine: @unchecked Sendable {
         let pending = (try? store.db.read { db in
             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM face WHERE assignment = 'none' AND embedding IS NOT NULL")
         }) ?? 0
-        // Quiet period lets a batch finish arriving; a large backlog is clustered right away in chunks.
-        queue.asyncAfter(deadline: .now() + (pending >= settings.maxReclusterUnits ? 0 : 30), execute: work)
+        // Quiet period lets a batch finish arriving; a large new backlog is clustered right away in chunks. (Faces
+        // left waiting after earlier passes don't count: matching new files would wait behind every pass.)
+        let backlog = now || pending - waitingAfterRecluster >= settings.maxReclusterUnits
+        queue.asyncAfter(deadline: .now() + (backlog ? 0 : 30), execute: work)
+    }
+
+    func waitingPools() throws -> [Int64: Pool] {
+        try store.db.read { db in
+            Dictionary(uniqueKeysWithValues: try Row.fetchAll(db, sql: """
+                SELECT COALESCE(s.projectId, 0) AS p, COUNT(*) AS n, SUM(face.id) AS ids FROM face JOIN media ON media.id = face.mediaId
+                LEFT JOIN source s ON s.id = media.sourceId
+                WHERE face.assignment = 'none' AND face.embedding IS NOT NULL GROUP BY 1
+                """).map { ($0["p"] as Int64, Pool(count: $0["n"], idSum: $0["ids"])) })
+        }
     }
 
     /// Clusters waiting faces into new people, one project at a time (most recently active first): new groups form
     /// within an event, while names carry across projects through assignment and consolidation. Per project also
     /// keeps the n^2 pool small, and a backlog of old leftovers can't crowd out a new event's faces.
     func recluster() throws {
+        let pools = try waitingPools()
         let projects = try store.db.read { db in
             try Int64.fetchAll(db, sql: """
                 SELECT COALESCE(s.projectId, 0) FROM face JOIN media ON media.id = face.mediaId LEFT JOIN source s ON s.id = media.sourceId
                 WHERE face.assignment = 'none' AND face.embedding IS NOT NULL
                 GROUP BY 1 ORDER BY MAX(face.id) DESC
                 """)
-        }.filter { !passiveProjects.contains($0) }
+        }.filter { !passiveProjects.contains($0) && clusteredPools[$0] != pools[$0] }
         guard processesAnything else { return }
-        var more = false
-        for p in projects { more = try recluster(project: p) || more }
+        var more: Set<Int64> = []
+        for p in projects where try recluster(project: p) { more.insert(p) }
         // New groups may be people already known (formed earlier, or at another event); leftovers may match a
         // group just formed, or a person that just grew another look.
         try consolidate()
         if !projects.isEmpty { try assignAllPending() }
-        if more { scheduleRecluster() }
+        // The pools as this pass leaves them; one capped with more to find goes round again.
+        let after = try waitingPools()
+        for p in projects where !more.contains(p) { clusteredPools[p] = after[p] }
+        waitingAfterRecluster = after.values.reduce(0) { $0 + $1.count }
+        if !more.isEmpty { scheduleRecluster(now: true) }
     }
 
     /// Returns true when the pool was capped and produced groups, so another pass may find more.

@@ -211,6 +211,26 @@ final class GroupingTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(n, engine.settings.nearestThreshold)
     }
 
+    /// Faces left waiting are clustered again only when the project's waiting faces change: a big library keeps
+    /// tens of thousands no one matches, and clustering them again on every pass held up matching new files.
+    func testAnUnchangedPoolIsNotClusteredAgain() throws {
+        let a = direction()
+        let pair = [try photo(face(a)), try photo(face(a))]
+        try engine.recluster()
+        XCTAssertNil(try person(of: pair[0]), "two faces are not a group")
+        XCTAssertEqual(engine.waitingAfterRecluster, 2)
+
+        engine.settings.minGroupFaces = 2
+        try engine.recluster()
+        XCTAssertNil(try person(of: pair[0]), "the same faces, the same answer: left alone")
+
+        try photo(face(direction()))
+        try engine.recluster()
+        XCTAssertNotNil(try person(of: pair[0]), "a face arrived: the project is clustered again")
+        XCTAssertEqual(try person(of: pair[0]), try person(of: pair[1]))
+        XCTAssertEqual(engine.waitingAfterRecluster, 1)
+    }
+
     /// Two groups of one person that formed from different batches are merged once the second one exists.
     func testGroupsFormedApartAreMerged() throws {
         let a = direction(), b = direction()
