@@ -55,6 +55,10 @@ public final class TeamSync: @unchecked Sendable {
     var foreignFacesAt: [Int64: Date] = [:]
     /// Files taken from a copying Mac's record on the processing Mac, for the engine to group (see pullFaces).
     var takenToGroup: [Int64] = []
+    /// Teams whose taken files were checked for faces without pictures since the app started (see queueMissingCrops).
+    var cropsChecked: Set<Int64> = []
+    /// Per team: the last file fetchMissingCrops tried, so files that can't be fetched yet don't hold up the rest.
+    var cropRetryCursor: [Int64: Int64] = [:]
     public let deviceId: String
     public var deviceName: String
     /// Log passes (names, pins, lists…): a teammate's change shows here within about this, plus the share's delay.
@@ -380,6 +384,7 @@ public final class TeamSync: @unchecked Sendable {
                 if try publishFaces(team) { changed = true }
                 if try pullSummaries(team) { changed = true }
                 if try pullFaces(team) { changed = true }
+                try queueMissingCrops(team)
                 if try fetchMissingCrops(team) { changed = true }
             } catch let e {
                 error = e.localizedDescription

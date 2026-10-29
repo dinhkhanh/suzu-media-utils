@@ -193,6 +193,41 @@ final class SyncConvergenceTests: XCTestCase {
         XCTAssertEqual(try b.store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM cropRetry") }, 0)
     }
 
+    /// Shared processing: a face taken from the processing Mac that lost its picture with nothing queued to fetch
+    /// it again (taken by a version that looked for the crops in the old place) gets it back when the app starts.
+    func testAFaceTakenWithoutItsPictureGetsItWhenTheAppStarts() throws {
+        let team = try XCTUnwrap(try a.sync.teams().first)
+        try a.sync.setProcessor(team.id!, thisMac: true)
+        let an = try a.person("An", at: 100)
+        let (m, f) = try a.photo("p1.jpg", person: an, vector: vector(1), assignment: .auto)
+        try Data("crop".utf8).write(to: a.store.faceCropURL(f))
+        var d = Data(); while d.count < 2048 { d += Data("p1.jpg".utf8) }
+        try d.prefix(2048).write(to: a.root.appendingPathComponent("p1.jpg"))
+        let key = try XCTUnwrap(ContentKey.compute(a.root.appendingPathComponent("p1.jpg"), size: 2048))
+        try a.store.db.write { db in
+            try db.execute(sql: "UPDATE media SET contentKey = ? WHERE id = ?", arguments: [key, m])
+            try db.execute(sql: "INSERT OR IGNORE INTO facePublish (mediaId) VALUES (?)", arguments: [m])
+        }
+        a.sync.pushSoon(); a.sync.syncNow()
+        let url = b.root.appendingPathComponent("p1.jpg")
+        try d.prefix(2048).write(to: url)
+        var w = MediaRecord(sourceId: b.source, path: url.path, kind: .photo, size: 2048, mtime: 0, contentKey: nil)
+        try b.store.db.write { db in try w.insert(db) }
+        b.sync.syncNow(); b.settle(); b.sync.syncNow()
+        let bf = try XCTUnwrap(try b.store.db.read { db in try FaceRecord.fetchOne(db, sql: "SELECT * FROM face WHERE mediaId = ?", arguments: [w.id!]) })
+        let crop = b.store.faceCropURL(bf.id!)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: crop.path))
+        // Lost, and nothing asks for it again: while the app runs it stays lost.
+        try FileManager.default.removeItem(at: crop)
+        b.sync.syncNow()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: crop.path))
+        // The app starts again: the face's picture is fetched.
+        b.sync.lock.withLock { b.sync.cropsChecked = [] }
+        b.sync.syncNow()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: crop.path))
+        XCTAssertEqual(try b.store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM cropRetry") }, 0)
+    }
+
     func testAHalfWrittenLineDoesNotSwallowTheNextChange() throws {
         let an = try a.person("An", at: 100)
         try a.photo("a1.jpg", person: an, vector: vector(1))

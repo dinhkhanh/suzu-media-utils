@@ -770,13 +770,51 @@ extension TeamSync {
         if complete { try db.execute(sql: "DELETE FROM cropRetry WHERE mediaId = ?", arguments: [mid]) }
     }
 
-    /// Files taken from teammates whose crops or thumbnail couldn't all be copied: tried again, a batch per pass.
+    /// Files taken from teammates whose faces have no picture here, queued for fetchMissingCrops: once per team each
+    /// time the app starts. A Mac before 0.8.31 looked for a record's crops in `crops/<content key>/`, which the
+    /// processing Mac had since moved into a folder per set of faces: it took the record, dropped the pictures of
+    /// the faces it replaced, found none to copy, and nothing asked for them again, so people's pictures stayed
+    /// blank (named or not) after updating too.
+    func queueMissingCrops(_ team: TeamRecord) throws {
+        let teamId = team.id!
+        guard !lock.withLock({ cropsChecked.contains(teamId) }) else { return }
+        let rows = try store.db.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT f.id, f.mediaId, f.x, f.y, f.w, f.h, f.time, m.importedFrom, m.contentKey
+                FROM face f JOIN media m ON m.id = f.mediaId JOIN source s ON s.id = m.sourceId JOIN project p ON p.id = s.projectId
+                WHERE p.teamId = ? AND m.importedFrom IS NOT NULL AND m.contentKey IS NOT NULL
+                  AND m.id NOT IN (SELECT mediaId FROM cropRetry)
+                ORDER BY f.mediaId, f.id
+                """, arguments: [teamId])
+        }
+        var files: [Int64: (device: String, key: String, faces: [FacePayload], missing: Bool)] = [:]
+        for r in rows {
+            let mid: Int64 = r["mediaId"]
+            var file = files[mid] ?? (r["importedFrom"] as String, r["contentKey"] as String, [], false)
+            file.faces.append(FacePayload(x: r["x"], y: r["y"], w: r["w"], h: r["h"], t: r["time"], a: ""))
+            if !file.missing, !FileManager.default.fileExists(atPath: store.faceCropURL(r["id"]).path) { file.missing = true }
+            files[mid] = file
+        }
+        try store.db.write { db in
+            for (mid, f) in files where f.missing {
+                try db.execute(sql: "INSERT OR IGNORE INTO cropRetry (mediaId, teamId, deviceId, contentKey, boxes) VALUES (?, ?, ?, ?, ?)",
+                               arguments: [mid, teamId, f.device, f.key, Self.signature(f.faces).boxes])
+            }
+        }
+        lock.withLock { _ = cropsChecked.insert(teamId) }
+    }
+
+    /// Files taken from teammates whose crops or thumbnail couldn't all be copied: tried again, a batch per pass,
+    /// going round the queue (files that can't be fetched yet don't keep the ones after them waiting).
     static let cropRetryBatch = 200
     func fetchMissingCrops(_ team: TeamRecord) throws -> Bool {
+        let teamId = team.id!
+        let after = lock.withLock { cropRetryCursor[teamId] ?? 0 }
         let rows = try store.db.read { db in
-            try Row.fetchAll(db, sql: "SELECT mediaId, deviceId, contentKey, boxes FROM cropRetry WHERE teamId = ? ORDER BY mediaId LIMIT ?",
-                             arguments: [team.id, Self.cropRetryBatch])
+            try Row.fetchAll(db, sql: "SELECT mediaId, deviceId, contentKey, boxes FROM cropRetry WHERE teamId = ? AND mediaId > ? ORDER BY mediaId LIMIT ?",
+                             arguments: [teamId, after, Self.cropRetryBatch])
         }
+        lock.withLock { cropRetryCursor[teamId] = rows.count < Self.cropRetryBatch ? 0 : rows.last.map { $0["mediaId"] as Int64 } }
         guard !rows.isEmpty else { return false }
         var fetched = false
         try store.db.write { db in
