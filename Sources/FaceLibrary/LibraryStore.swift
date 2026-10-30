@@ -577,6 +577,10 @@ public final class LibraryStore: @unchecked Sendable {
             try db.alter(table: "personGroupGone") { t in t.add(column: "project", .text) }
             try PersonGroups.splitByProject(db: db)
         }
+        m.registerMigration("v30-rule-kind-folders") { db in
+            /// A rule can put photos and videos into two folders (DeliveryRule.splitKinds).
+            try db.alter(table: "deliveryRule") { t in t.add(column: "splitKinds", .boolean).notNull().defaults(to: false) }
+        }
         return m
     }
 }

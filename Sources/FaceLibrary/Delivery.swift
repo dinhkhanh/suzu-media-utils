@@ -32,6 +32,9 @@ public struct DeliveryRule: Codable, FetchableRecord, MutablePersistableRecord, 
     /// Base folder. nil = notify only.
     public var folder: String?
     public var layout = Layout.person
+    /// Photos and videos into two folders inside the person's folder (or the base folder for a flat rule):
+    /// "<Name>/Photos/", "<Name>/Videos/".
+    public var splitKinds = false
     public var recipe: String?
     public var writeNames = true
     public var enabled = true
@@ -49,7 +52,11 @@ public struct DeliveryRule: Codable, FetchableRecord, MutablePersistableRecord, 
         self.init(name: nil, query: q, folder: folder, layout: .person, recipe: recipe, writeNames: writeNames, projectId: projectId)
     }
 
-    public init(name: String?, query: MediaQuery, folder: String?, layout: Layout, recipe: EditRecipe?, writeNames: Bool, projectId: Int64?) {
+    /// The two folders' names when `splitKinds`.
+    public static let kindFolders = Exporter.KindFolders.subfolders(photos: "Photos", videos: "Videos")
+
+    public init(name: String?, query: MediaQuery, folder: String?, layout: Layout, splitKinds: Bool = false, recipe: EditRecipe?,
+                writeNames: Bool, projectId: Int64?) {
         self.name = name.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
         self.projectId = projectId
         var q = query
@@ -57,6 +64,7 @@ public struct DeliveryRule: Codable, FetchableRecord, MutablePersistableRecord, 
         self.query = String(decoding: (try? JSONEncoder().encode(q)) ?? Data(), as: UTF8.self)
         self.folder = folder
         self.layout = layout
+        self.splitKinds = splitKinds
         self.recipe = recipe.flatMap { try? JSONEncoder().encode($0) }.map { String(decoding: $0, as: UTF8.self) }
         self.writeNames = writeNames
     }
@@ -239,6 +247,7 @@ public struct DeliveryService: Sendable {
                 var opts = Exporter.Options()
                 opts.recipe = rule.editRecipe
                 opts.writeNames = rule.writeNames
+                if rule.splitKinds { opts.kinds = DeliveryRule.kindFolders }
                 let plan = rule.layout == .flat
                     ? try exporter.planFlat(items.map(\.mediaId), base: base, options: opts)
                     : try exporter.planPairs(items.map { ($0.mediaId, $0.personId, $0.name) }, base: base, options: opts)

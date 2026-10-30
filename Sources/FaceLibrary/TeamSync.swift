@@ -498,6 +498,8 @@ public final class TeamSync: @unchecked Sendable {
         var name: String?
         var folder: String?
         var layout: String
+        /// nil from Macs before it existed: together.
+        var splitKinds: Bool?
         var recipe: String?
         var writeNames: Bool
         var enabled: Bool
@@ -592,7 +594,7 @@ public final class TeamSync: @unchecked Sendable {
                 q.people = []
                 q.project = nil
                 q.sourceId = nil
-                let payload = RulePayload(name: rule.name, folder: rule.folder, layout: rule.layout.rawValue, recipe: rule.recipe,
+                let payload = RulePayload(name: rule.name, folder: rule.folder, layout: rule.layout.rawValue, splitKinds: rule.splitKinds, recipe: rule.recipe,
                                           writeNames: rule.writeNames, enabled: rule.enabled, people: uuids, query: q,
                                           createdAt: rule.createdAt.timeIntervalSince1970)
                 ops.append(Op(t: "rule", at: rule.updatedAt, uuid: rule.uuid, rule: payload, deleted: rule.deletedAt != nil, project: project.uuid))
@@ -1241,6 +1243,7 @@ public final class TeamSync: @unchecked Sendable {
             rule.setQuery(q)
             rule.folder = payload.folder
             rule.layout = DeliveryRule.Layout(rawValue: payload.layout) ?? .person
+            rule.splitKinds = payload.splitKinds ?? false
             rule.recipe = payload.recipe
             rule.writeNames = payload.writeNames
             rule.enabled = payload.enabled && op.deleted != true

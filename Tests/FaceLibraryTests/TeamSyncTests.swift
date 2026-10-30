@@ -317,7 +317,7 @@ final class TeamSyncTests: XCTestCase {
         var q = MediaQuery()
         q.people = [an]; q.bestOnly = true; q.crowd = .solo
         let out = tmp.appendingPathComponent("Out")
-        let rule = try DeliveryService(store: a.store).add(DeliveryRule(name: "Best of An", query: q, folder: out.path, layout: .flat, recipe: nil, writeNames: true, projectId: a.project), includeExisting: false)
+        let rule = try DeliveryService(store: a.store).add(DeliveryRule(name: "Best of An", query: q, folder: out.path, layout: .flat, splitKinds: true, recipe: nil, writeNames: true, projectId: a.project), includeExisting: false)
         exchange()
 
         let labels = try b.store.db.read { db in try Row.fetchAll(db, sql: "SELECT projectId, at, name FROM sessionLabel") }
@@ -332,6 +332,7 @@ final class TeamSyncTests: XCTestCase {
         XCTAssertEqual(r.name, "Best of An")
         XCTAssertEqual(r.projectId, b.project)
         XCTAssertEqual(r.layout, .flat)
+        XCTAssertTrue(r.splitKinds)
         XCTAssertEqual(r.folder, out.path)
         XCTAssertEqual(r.mediaQuery.people, [try XCTUnwrap(try b.personId(named: "An"))], "the rule's people are B's own ids for the same people")
         XCTAssertTrue(r.mediaQuery.bestOnly)
@@ -690,7 +691,7 @@ final class RuleTests: XCTestCase {
     func photo(_ name: String, faces: [(person: Int64?, score: Double)]) throws -> Int64 {
         let url = root.appendingPathComponent(name)
         try Data(repeating: UInt8(truncatingIfNeeded: name.hashValue), count: 1024).write(to: url)
-        var m = MediaRecord(sourceId: source, path: url.path, kind: .photo, size: 1024, mtime: 0, contentKey: name)
+        var m = MediaRecord(sourceId: source, path: url.path, kind: name.hasSuffix(".mov") ? .video : .photo, size: 1024, mtime: 0, contentKey: name)
         m.status = .done; m.width = 1500; m.height = 1000; m.takenAt = 1_700_000_000
         try store.db.write { db in try m.insert(db) }
         for (i, f) in faces.enumerated() {
@@ -753,6 +754,24 @@ final class RuleTests: XCTestCase {
         try service.add(DeliveryRule(personId: nil, folder: all.path, recipe: nil, writeNames: false, projectId: project), includeExisting: true)
         XCTAssertEqual(try service.run().copied, 3)
         XCTAssertEqual(files(all), ["An", "An/pair.jpg", "Bình", "Bình/binh.jpg", "Bình/pair.jpg"])
+    }
+
+    func testRuleCanPutPhotosAndVideosIntoTwoFolders() throws {
+        let an = try person("An"), binh = try person("Bình")
+        try photo("pair.jpg", faces: [(an, 0.9), (binh, 0.9)])
+        try photo("clip.mov", faces: [(an, 0.9)])
+        let service = DeliveryService(store: store)
+        let people = try folder("People")
+        try service.add(DeliveryRule(name: nil, query: MediaQuery(), folder: people.path, layout: .person, splitKinds: true, recipe: nil,
+                                     writeNames: false, projectId: project), includeExisting: true)
+        let flat = try folder("Flat")
+        try service.add(DeliveryRule(name: "All", query: MediaQuery(), folder: flat.path, layout: .flat, splitKinds: true, recipe: nil,
+                                     writeNames: false, projectId: project), includeExisting: true)
+        XCTAssertEqual(try service.run().copied, 5)
+        XCTAssertEqual(files(people), ["An", "An/Photos", "An/Photos/pair.jpg", "An/Videos", "An/Videos/clip.mov",
+                                       "Bình", "Bình/Photos", "Bình/Photos/pair.jpg"])
+        XCTAssertEqual(files(flat), ["Photos", "Photos/pair.jpg", "Videos", "Videos/clip.mov"])
+        XCTAssertEqual(try service.run().copied, 0, "nothing is sent twice")
     }
 
     func testNewRuleSkipsExistingFilesUnlessAsked() throws {

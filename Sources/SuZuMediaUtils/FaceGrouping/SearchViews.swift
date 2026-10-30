@@ -308,7 +308,8 @@ struct RulesView: View {
         var parts: [String] = [r.projectId.flatMap { id in model.projects.first { $0.id == id }?.name } ?? "All projects"]
         if let f = r.folder {
             let short = (f as NSString).abbreviatingWithTildeInPath
-            parts.append(r.layout == .person ? "Copy to \(short)/<Name>/" : "Copy to \(short)/")
+            let kinds = r.splitKinds ? "Photos|Videos/" : ""
+            parts.append(r.layout == .person ? "Copy to \(short)/<Name>/\(kinds)" : "Copy to \(short)/\(kinds)")
         } else { parts.append("Notify only") }
         if let e = r.editRecipe {
             var edits: [String] = []
@@ -342,6 +343,7 @@ struct RuleSheet: View {
     @State private var copy = true
     @State private var folder: URL?
     @State private var layout = DeliveryRule.Layout.person
+    @State private var splitKinds = false
     @State private var edit = false
     @State private var recipe = EditRecipe()
     @State private var writeNames = true
@@ -411,6 +413,9 @@ struct RuleSheet: View {
                     Text("Straight into the folder").tag(DeliveryRule.Layout.flat)
                 }
                 .pickerStyle(.radioGroup).padding(.leading, 20)
+                Toggle(layout == .person ? "Photos and videos in two folders (<Name>/Photos/, <Name>/Videos/)"
+                       : "Photos and videos in two folders (Photos/, Videos/)", isOn: $splitKinds)
+                    .padding(.leading, 20)
                 Text("Tip: a folder on the NAS, or inside Google Drive or Dropbox, to share automatically.").font(.caption).foregroundStyle(.secondary).padding(.leading, 20)
                 Toggle("Write names into the files", isOn: $writeNames).padding(.leading, 20)
                 Toggle("Edit photos (level, auto tone, crop, watermark, resize)", isOn: $edit).padding(.leading, 20)
@@ -441,6 +446,7 @@ struct RuleSheet: View {
             copy = rule.folder != nil
             folder = rule.folder.map { URL(fileURLWithPath: $0, isDirectory: true) }
             layout = rule.layout
+            splitKinds = rule.splitKinds
             edit = rule.editRecipe != nil
             recipe = rule.editRecipe ?? EditRecipe()
             writeNames = rule.writeNames
@@ -459,12 +465,13 @@ struct RuleSheet: View {
             r.setQuery(query)
             r.folder = copy ? folder?.path : nil
             r.layout = layout
+            r.splitKinds = splitKinds
             r.setRecipe(copy && edit ? recipe : nil)
             r.writeNames = writeNames
             model.updateRule(r)
         } else {
             model.addRule(DeliveryRule(name: name, query: query, folder: copy ? folder?.path : nil, layout: layout,
-                                       recipe: copy && edit ? recipe : nil, writeNames: writeNames, projectId: projectId),
+                                       splitKinds: splitKinds, recipe: copy && edit ? recipe : nil, writeNames: writeNames, projectId: projectId),
                           includeExisting: includeExisting)
         }
     }
