@@ -83,9 +83,12 @@ public enum CardCopier {
         }
     }
 
-    /// Room left where the copies go.
+    /// Room left where the copies go. "Important usage" counts purgeable space but only the startup disk knows it:
+    /// a NAS share or another disk reports 0 there, so their plain free space is used instead.
     public static func freeSpace(at url: URL) -> Int64? {
-        (try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage
+        let v = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
+        if let important = v?.volumeAvailableCapacityForImportantUsage, important > 0 { return important }
+        return v?.volumeAvailableCapacity.map(Int64.init)
     }
 
     public static func looksLikeCard(_ root: URL) -> Bool {
