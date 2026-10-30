@@ -631,6 +631,8 @@ struct PersonDetail: View {
     @State private var pointer = Peek<Int64>()
     @Environment(\.openWindow) private var openWindow
     @State private var export: ExportMode?
+    /// The selected photos and videos, copied as they are (no editing) into a folder named after the person.
+    @State private var exportSelected: ExportScope?
     @State private var sort = MediaSort.best
     @State private var collapseBursts = true
     @State private var topN: Int?
@@ -684,6 +686,7 @@ struct PersonDetail: View {
         .sheet(item: $export) { mode in
             ExportSheet(scope: .person(personId), mode: mode, initialName: person?.name ?? name)
         }
+        .sheet(item: $exportSelected) { ExportSheet(scope: $0, mode: .copy, initialName: person?.name ?? name) }
     }
 
     /// Reload when the person's contents change (new files assigned, edits) or the filter changes.
@@ -982,6 +985,8 @@ struct PersonDetail: View {
         let chosen = media.filter { selectedMedia.contains($0.id) }
         return SelectionBar(title: "\(chosen.count) selected", clear: { selectedMedia = [] }) {
             Button("Open in Edit & Export") { openInEditor(chosen) }.buttonStyle(.borderedProminent)
+            Button("Export…") { exportSelected = .media(chosen.map(\.id), title: person?.name ?? name) }
+                .help("Copy the selected photos and videos as they are, without editing, into a folder")
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(chosen.map(\.url)) }
             Button("Copy File Path") { Clipboard.copyPaths(chosen.map(\.url)) }
             if chosen.count == 1, let one = chosen.first {
