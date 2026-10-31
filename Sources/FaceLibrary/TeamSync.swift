@@ -475,6 +475,8 @@ public final class TeamSync: @unchecked Sendable {
         var rel: String?
         /// team / edited; mac = no longer shared.
         var share: String
+        /// Its subfolders left out of the library (nil from a Mac before them: what is here stays).
+        var excluded: [String]? = nil
     }
 
     struct CardPayload: Codable {
@@ -609,7 +611,7 @@ public final class TeamSync: @unchecked Sendable {
             let value = "\(at)|\(s.share.rawValue)|\(s.path)"
             guard state["pub:folder:\(s.uuid)"] != value else { continue }
             var op = Op(t: "folder", at: at, uuid: s.uuid, project: puuid)
-            op.folder = FolderPayload(path: s.path, rel: Self.relativePath(of: s.path, to: team.url), share: s.share.rawValue)
+            op.folder = FolderPayload(path: s.path, rel: Self.relativePath(of: s.path, to: team.url), share: s.share.rawValue, excluded: s.excluded)
             ops.append(op)
             updates["pub:folder:\(s.uuid)"] = value
         }
@@ -1061,6 +1063,7 @@ public final class TeamSync: @unchecked Sendable {
                 return .applied(people: [], remote: [])
             }
             try db.execute(sql: "UPDATE source SET share = ?, shareAt = ?, projectId = ? WHERE id = ?", arguments: [share.rawValue, now, projectId, s.id])
+            try Self.applyExcluded(f, to: s.id!, db: db)
             // The teammate's folder moved: follow when this Mac's copy of the path no longer works.
             if !FileManager.default.fileExists(atPath: s.path) {
                 let path = Self.resolvePath(f, team: team)
@@ -1079,6 +1082,7 @@ public final class TeamSync: @unchecked Sendable {
             guard same.kind == .media, same.share == .mac || uuid < same.uuid else { return .ignored }
             try db.execute(sql: "UPDATE source SET uuid = ?, share = ?, shareAt = ?, projectId = ? WHERE id = ?",
                            arguments: [uuid, share.rawValue, now, projectId, same.id])
+            try Self.applyExcluded(f, to: same.id!, db: db)
             lock.withLock { sourcesChanged = true }
             return .applied(people: [], remote: [])
         }
@@ -1087,9 +1091,17 @@ public final class TeamSync: @unchecked Sendable {
         var s = SourceRecord(path: path, kind: .media, projectId: projectId, share: share, uuid: uuid)
         s.shareAt = now
         s.fromDevice = device
+        s.excluded = f.excluded ?? []
         try s.insert(db)
         lock.withLock { sourcesChanged = true }
         return .applied(people: [], remote: [])
+    }
+
+    /// The folder's watcher takes out what is in a newly excluded subfolder, and finds what is in one brought back.
+    static func applyExcluded(_ f: FolderPayload, to id: Int64, db: Database) throws {
+        guard let excluded = f.excluded, var s = try SourceRecord.fetchOne(db, key: id), s.excluded != excluded else { return }
+        s.excluded = excluded
+        try s.update(db)
     }
 
     static func overlaps(_ path: String, excluding id: Int64?, db: Database) throws -> Bool {

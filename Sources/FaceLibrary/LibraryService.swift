@@ -224,7 +224,7 @@ public final class LibraryService: @unchecked Sendable {
         guard !f.rawWithJPEG else { return }
         let path = canonicalPath(f.landed)
         guard let source = (try? store.db.read { db in try SourceRecord.filter(Column("kind") == SourceKind.media.rawValue && Column("removedAt") == nil).fetchAll(db) })?
-            .filter({ path.hasPrefix($0.path + "/") }).max(by: { $0.path.count < $1.path.count }) else { return }
+            .filter({ path.hasPrefix($0.path + "/") }).max(by: { $0.path.count < $1.path.count }), !source.excludes(path) else { return }
         let mine = processor.processesLocally?(source.id) ?? true
         // The time as the share stored it (its precision, not the card's), or the scan would take the file for changed.
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path), let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 else { return }
@@ -440,6 +440,40 @@ public final class LibraryService: @unchecked Sendable {
     }
 
     public func rescan(_ sourceId: Int64) { monitor(sourceId)?.rescan() }
+
+    /// Leaves a subfolder of a folder out of the library, on the team's Macs too for a shared folder: it is no longer
+    /// listed, and its files leave with their faces and marks. The files on disk are not touched, and named people
+    /// are still recognised (PersonMemory). Call it off the main thread for big folders.
+    public func excludeFolder(_ folder: String, of sourceId: Int64) throws {
+        guard let s = try store.db.read({ db in try SourceRecord.fetchOne(db, key: sourceId) }), folder.hasPrefix(s.path + "/") else { return }
+        let name = String(folder.dropFirst(s.path.count + 1))
+        // Whatever was excluded inside it comes back with it, later.
+        let source = try setExcluded(sourceId) { $0 = $0.filter { !$0.hasPrefix(name + "/") } + [name] }
+        guard let source else { return }
+        let dropped = try SourceMonitor.dropExcluded(source, store: store)
+        engine.peopleChanged(dropped.people)
+        deleteEmptyPeople()
+        processor.enqueuePending()  // copies that lost their original without a face to take over
+    }
+
+    /// Brings an excluded subfolder back: the next look lists it, and its files are read as new ones.
+    public func includeFolder(_ name: String, of sourceId: Int64) throws {
+        _ = try setExcluded(sourceId) { $0.removeAll { $0 == name } }
+        monitor(sourceId)?.scanSoon()
+    }
+
+    private func setExcluded(_ sourceId: Int64, _ change: (inout [String]) -> Void) throws -> SourceRecord? {
+        let source = try store.db.write { db -> SourceRecord? in
+            guard var s = try SourceRecord.fetchOne(db, key: sourceId) else { return nil }
+            change(&s.excluded)
+            s.excluded.sort { $0.localizedStandardCompare($1) == .orderedAscending }
+            if s.share != .mac { s.shareAt = SyncIds.stamp(after: s.shareAt) }
+            try s.update(db)
+            return s
+        }
+        if source?.share != .mac { teamSync.pushSoon() }
+        return source
+    }
 
     /// Runs `body` while every folder watcher waits, so no scan sees files half-way through being renamed or
     /// relinked (it would take them for deleted and new files and drop their faces). Call it off the main thread.

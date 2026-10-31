@@ -230,6 +230,7 @@ struct SourceRow: View {
                 }
             }
             ShareMenu(source: source)
+            ExcludedFoldersMenu(source: source)
             Divider()
             Button(source.share == .mac ? "Remove from Library" : "Remove from Library and Team", role: .destructive) { model.removeSource(source.id) }
         }
@@ -262,6 +263,24 @@ struct ShareMenu: View {
     }
 
     static let explanation = "Team folders and edited folders appear on every Mac in the team; a folder only on this Mac stays here."
+}
+
+/// A folder's subfolders left out of the library; choosing one brings it back.
+struct ExcludedFoldersMenu: View {
+    @EnvironmentObject var model: FaceGroupingModel
+    let source: SourceSummary
+
+    var body: some View {
+        if !source.excluded.isEmpty {
+            Menu("Excluded Folders") {
+                Section("Include Again") {
+                    ForEach(source.excluded, id: \.self) { name in
+                        Button(name) { model.includeFolder(name, of: source.id) }
+                    }
+                }
+            }
+        }
+    }
 }
 
 extension SourceSummary {

@@ -369,6 +369,83 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(back, [named], "the same person's new photo gets the kept name; someone else doesn't")
     }
 
+    func setExcluded(_ names: [String]) throws {
+        try store.db.write { db in
+            var s = try XCTUnwrap(try SourceRecord.fetchOne(db, key: sourceId))
+            s.excluded = names
+            try s.update(db)
+        }
+    }
+
+    /// An excluded subfolder leaves the library and later looks skip it, with the files untouched; brought back, its
+    /// files are found again, even though the folder above hasn't changed since it was last listed.
+    func testAnExcludedSubfolderLeavesTheLibraryAndComesBack() throws {
+        try makeFile("keep/a.jpg", seed: 1)
+        let out = try makeFile("rejects/b.jpg", seed: 2)
+        try makeFile("rejects/deep/c.jpg", seed: 3)
+        try makeFile("rejects-not/d.jpg", seed: 4)
+        let m = monitor()
+        m.scan()
+        XCTAssertEqual(try media().count, 4)
+        try setExcluded(["rejects"])
+        m.scan()
+        XCTAssertEqual(try media().map(\.path).sorted(), [root.path + "/keep/a.jpg", root.path + "/rejects-not/d.jpg"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: out.path), "the file stays on disk")
+        try makeFile("rejects/e.jpg", seed: 5)
+        m.scan()
+        XCTAssertEqual(try media().count, 2, "a new file in it stays out")
+        try setExcluded([])
+        m.scan()
+        XCTAssertEqual(try media().count, 5)
+    }
+
+    /// Everything the folder holds is in the excluded subfolder: the empty listing isn't taken for a share hiccup.
+    func testExcludingTheOnlySubfolderEmptiesTheFolder() throws {
+        try makeFile("only/a.jpg")
+        let m = monitor()
+        m.scan()
+        try setExcluded(["only"])
+        m.scan()
+        XCTAssertEqual(try media().count, 0)
+    }
+
+    /// The same accented name, spelled in the other Unicode form than the disk's.
+    func testAnExcludedSubfolderMatchesInAnyUnicodeForm() throws {
+        try makeFile("Hội trường/a.jpg".precomposedStringWithCanonicalMapping)
+        let m = monitor()
+        m.scan()
+        XCTAssertEqual(try media().count, 1)
+        try setExcluded(["Hội trường".decomposedStringWithCanonicalMapping])
+        m.scan()
+        XCTAssertEqual(try media().count, 0)
+        try makeFile("Hội trường/b.jpg".precomposedStringWithCanonicalMapping, seed: 2)
+        m.scan()
+        XCTAssertEqual(try media().count, 0)
+    }
+
+    /// A copy outside the excluded subfolder carries on with the faces.
+    func testACopyOutsideAnExcludedSubfolderKeepsTheFaces() throws {
+        try makeFile("a/photo.jpg", seed: 1)
+        let m = monitor()
+        m.scan()
+        let original = try XCTUnwrap(try media().first)
+        try store.db.write { db in try db.execute(sql: "UPDATE media SET status = 'done' WHERE id = ?", arguments: [original.id]) }
+        var rng = SplitMix(seed: 3)
+        let person = try newPerson("Chi Pu")
+        _ = try addFace(mediaId: original.id!, personId: person, vector: jitter(identities(1, seed: 4)[0], &rng, amount: 0.2))
+        try makeFile("b/photo.jpg", seed: 1)
+        m.scan()
+        XCTAssertEqual(try media().count, 2)
+        try setExcluded(["a"])
+        m.scan()
+        let left = try XCTUnwrap(try media().first)
+        XCTAssertEqual(try media().count, 1)
+        XCTAssertEqual(left.path, root.path + "/b/photo.jpg")
+        XCTAssertNil(left.duplicateOf)
+        let faces = try store.db.read { db in try Int64.fetchAll(db, sql: "SELECT mediaId FROM face WHERE personId = ?", arguments: [person]) }
+        XCTAssertEqual(faces, [left.id!])
+    }
+
     func testEmptyListingOfNonEmptySourceDeletesNothing() throws {
         try makeFile("a.jpg")
         let m = monitor()

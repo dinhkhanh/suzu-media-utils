@@ -31,6 +31,8 @@ public final class SourceMonitor: @unchecked Sendable {
     struct FileInfo: Equatable { var size: Int64; var mtime: Double }
     struct DirEntry { var mtime: Double; var files: [String: FileInfo]; var subdirs: [String] }
     var dirCache: [String: DirEntry] = [:]
+    /// The subfolders left out, absolute; read at the start of each look (a teammate may have changed them).
+    var excluded: Set<String> = []
     /// Unsettled files: last seen size/mtime, when it last changed, and whether it was seen growing.
     var candidates: [String: (info: FileInfo, seen: Date, grew: Bool)] = [:]
     var stream: FSEventStreamRef?
@@ -263,7 +265,7 @@ public final class SourceMonitor: @unchecked Sendable {
             }
             out.merge(entry.files) { a, _ in a }
             foundCount = out.count
-            stack += entry.subdirs
+            stack += entry.subdirs.filter { !excluded.contains($0) }
         }
         if complete { dirCache = dirCache.filter { seenDirs.contains($0.key) } }
         // A file still being written grows without touching its folder's mtime: re-stat unsettled ones.
@@ -285,6 +287,7 @@ public final class SourceMonitor: @unchecked Sendable {
 
     func scan() {
         guard !cancelled else { return }
+        excludeWhatIsLeftOut()
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDir), isDir.boolValue else {
             isOnline = false  // unmounted or offline: keep everything, look again on the next tick
@@ -463,6 +466,31 @@ public final class SourceMonitor: @unchecked Sendable {
         }
         if !affected.isEmpty { onChange(false, affected) }
         if needFollowUp { scanSoon(after: settleInterval) }
+    }
+
+    /// Notes the subfolders left out and takes out what is still in the library from them (a teammate excluded one;
+    /// a look under way when it was excluded registered more). Before the folder's own check: this needs no share.
+    func excludeWhatIsLeftOut() {
+        guard let source = try? store.db.read({ db in try SourceRecord.fetchOne(db, key: sourceId) }) else { return }
+        excluded = Set(source.excluded.map { root.path + "/" + $0 })
+        guard !excluded.isEmpty, let dropped = try? Self.dropExcluded(source, store: store), dropped.count > 0 else { return }
+        onChange(true, dropped.people)  // copies that lost their original without a face to take over
+    }
+
+    /// Takes the files in a folder's excluded subfolders out of the library, as if they had been deleted (their
+    /// copies elsewhere carry on with their faces); the files stay on disk. Compared in Swift, not in SQL: the same
+    /// accented name can be spelled in two Unicode forms. Returns how many left and the people who lost faces.
+    static func dropExcluded(_ source: SourceRecord, store: LibraryStore) throws -> (count: Int, people: Set<Int64>) {
+        guard !source.excluded.isEmpty else { return (0, []) }
+        let rows = try store.db.read { db in try Row.fetchAll(db, sql: "SELECT id, path FROM media WHERE sourceId = ?", arguments: [source.id]) }
+        let ids: [Int64] = rows.filter { source.excludes($0["path"]) }.map { $0["id"] }
+        var people: Set<Int64> = []
+        for chunk in stride(from: 0, to: ids.count, by: batchSize).map({ ids[$0..<min($0 + batchSize, ids.count)] }) {
+            try store.db.write { db in
+                for id in chunk { people.formUnion(try remove(mediaId: id, db: db)) }
+            }
+        }
+        return (ids.count, people)
     }
 
     /// Folders whose files can be copies of each other: same kind, same project (two `?` for this source's id).

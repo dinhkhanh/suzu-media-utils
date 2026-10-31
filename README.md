@@ -110,6 +110,10 @@ and one for landscapes — logo, text or banner watermark, resize — auto tone
 - Files are tracked by content, so moving/renaming in Finder or copying never loses names or duplicates work. A whole
   event folder renamed or moved in Finder shows as Offline: right-click → **Locate Folder…** (or add it again) and it
   is relinked with every face and name.
+- A subfolder that doesn't belong (rejects, a backup, last year's card): right-click it in Files → **Exclude from
+  Library…**. Its files leave the library with their faces and marks and stay on disk, later looks skip it, and a team
+  folder's exclusions reach the team's Macs. It stays listed in Files, greyed with a minus badge and marked "excluded";
+  right-click it → **Include in Library** (or the project folder → **Excluded Folders**) brings it back.
 - One name, one person: names match in any case or Unicode form (a name typed in the app and the same name from a
   Finder folder), and "New Person…" with a name in use adds to that person.
 

@@ -60,6 +60,9 @@ struct SourceSummary: Identifiable, Hashable {
     /// A Rescan asked for and not done yet; `retried`: the unreadable files the last one queued again.
     var rescanning = false
     var retried = 0
+    /// Subfolders left out of the library, relative to `path`.
+    var excluded: [String] = []
+    var excludedPaths: [String] { excluded.map { path + "/" + $0 } }
     var name: String { (path as NSString).lastPathComponent }
 }
 
@@ -513,7 +516,7 @@ final class FaceGroupingModel: ObservableObject {
 
     nonisolated static func fetchSources(_ db: Database) throws -> [SourceSummary] {
         try Row.fetchAll(db, sql: """
-            SELECT s.id, s.path, s.kind, s.projectId, s.share, s.fromDevice,
+            SELECT s.id, s.path, s.kind, s.projectId, s.share, s.fromDevice, s.excluded,
                 COUNT(m.id) FILTER (WHERE m.duplicateOf IS NULL) AS files,
                 COUNT(m.id) FILTER (WHERE m.status = 'pending') AS pending,
                 COUNT(m.id) FILTER (WHERE m.status = 'failed') AS failed
@@ -523,7 +526,8 @@ final class FaceGroupingModel: ObservableObject {
             """).map {
             SourceSummary(id: $0["id"], path: $0["path"], kind: SourceKind(rawValue: $0["kind"]) ?? .media, projectId: $0["projectId"],
                           share: SourceShare(rawValue: $0["share"]) ?? .mac, fromDevice: $0["fromDevice"],
-                          files: $0["files"], pending: $0["pending"], failed: $0["failed"])
+                          files: $0["files"], pending: $0["pending"], failed: $0["failed"],
+                          excluded: (try? JSONDecoder().decode([String].self, from: Data(($0["excluded"] as String).utf8))) ?? [])
         }
     }
 
@@ -810,6 +814,18 @@ final class FaceGroupingModel: ObservableObject {
     func rescan(_ id: Int64) {
         service?.rescan(id)
         refresh()  // shows Rescanning at once, not on the next tick
+    }
+
+    /// Leaves a subfolder out of the library. Returns once its files have left.
+    func excludeFolder(_ folder: String, of source: Int64) async {
+        guard let service else { return }
+        let error = await Task.detached { Result { try service.excludeFolder(folder, of: source) }.failure }.value
+        if let error { actionError = error.localizedDescription } else { log("Excluded \((folder as NSString).lastPathComponent)", icon: "folder.badge.minus") }
+        refresh()
+    }
+
+    func includeFolder(_ name: String, of source: Int64) {
+        perform { try $0.includeFolder(name, of: source) }
     }
 
     /// The folder was renamed or moved in Finder: point the library at it again, keeping every face and name.

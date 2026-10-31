@@ -10,13 +10,16 @@ struct FileItem: Identifiable, Hashable {
     /// Photos and videos anywhere under a folder.
     var count = 0
     var offline = false
+    /// A subfolder left out of the library: shown, marked, with nothing in it.
+    var excluded = false
 
-    init(folder path: String, name: String? = nil, count: Int, offline: Bool = false) {
-        id = path; self.name = name ?? (path as NSString).lastPathComponent; self.count = count; self.offline = offline
+    init(folder path: String, name: String? = nil, count: Int, offline: Bool = false, excluded: Bool = false) {
+        id = path; self.name = name ?? (path as NSString).lastPathComponent; self.count = count; self.offline = offline; self.excluded = excluded
     }
     init(_ file: ProjectFile) { id = file.path; name = file.name; self.file = file }
 
     var isFolder: Bool { file == nil }
+    static let excludedIcon = "folder.badge.minus"
     static func items(_ n: Int) -> String { "\(n.formatted()) item\(n == 1 ? "" : "s")" }
     // Sort keys; folders sort among themselves by name.
     var date: Double { file.map { $0.takenAt ?? $0.mtime } ?? 0 }
@@ -29,7 +32,7 @@ struct FileItem: Identifiable, Hashable {
     }
     /// Why the library has nothing (yet) about the file.
     var note: String? {
-        guard let file else { return nil }
+        guard let file else { return excluded ? "Excluded from library" : nil }
         if file.duplicate { return "Copy of another file" }
         switch file.status {
         case .pending: return "Processing…"
@@ -139,6 +142,8 @@ struct FilesBrowser: View {
     @State private var exportScope: ExportScope?
     @State private var confirmWrite: [Int64]?
     @State private var writeResult: String?
+    /// The subfolder asked to be left out of the library, until the question is answered.
+    @State private var confirmExclude: String?
     @FocusState private var focused: Bool
     @AppStorage("files.list") private var asList = false
     @AppStorage("files.filter") private var filter = FileFilter.all
@@ -167,7 +172,7 @@ struct FilesBrowser: View {
         VStack(spacing: 0) {
             SessionBar(divider: true)
             HStack(spacing: 0) {
-                FolderColumn(counts: folderCounts, folder: folder, go: go)
+                FolderColumn(counts: folderCounts, folder: folder, go: go, exclude: { confirmExclude = $0 }, include: include)
                 Divider()
                 VStack(spacing: 0) {
                     filterRow
@@ -200,6 +205,12 @@ struct FilesBrowser: View {
         } message: {
             Text("Lightroom, Bridge and Photo Mechanic can then read them (in Lightroom: Metadata → Read Metadata from Files). This changes the original photos' metadata; the pixels stay as they are. Rejects are written as rating −1. Videos and RAW files are skipped.")
         }
+        .confirmationDialog("Exclude “\(confirmExclude.map { ($0 as NSString).lastPathComponent } ?? "")” from the library?",
+                            isPresented: Binding(get: { confirmExclude != nil }, set: { if !$0 { confirmExclude = nil } })) {
+            Button("Exclude", role: .destructive) { if let path = confirmExclude { exclude(path) } }
+        } message: {
+            Text(excludeMessage)
+        }
         .alert("Ratings & Labels", isPresented: Binding(get: { writeResult != nil }, set: { if !$0 { writeResult = nil } })) {
             Button("OK") { writeResult = nil }
         } message: {
@@ -221,7 +232,7 @@ struct FilesBrowser: View {
         .onChange(of: listing) { relist() }
         // Folders added, removed, moved or gone offline: not every tick of a scan's count, which would rebuild the
         // list on the main thread once a second while a card's files land.
-        .onChange(of: model.projectSources.map { "\($0.id)|\($0.path)|\($0.online)|\($0.share.rawValue)" }) { relist() }
+        .onChange(of: model.projectSources.map { "\($0.id)|\($0.path)|\($0.online)|\($0.share.rawValue)|\($0.excluded)" }) { relist() }
     }
 
     @ViewBuilder var content: some View {
@@ -236,6 +247,14 @@ struct FilesBrowser: View {
                 Text("Add this event's photo and video folders (local, external drive or NAS).")
             } actions: {
                 Button("Add Folder…") { model.addFolder(kind: .media) }
+            }
+        } else if let out = excludedFolder(holding: folder) {
+            ContentUnavailableView {
+                Label("Excluded from the library", systemImage: FileItem.excludedIcon)
+            } description: {
+                Text("The files in this folder stay on disk, but aren't read or shown here.")
+            } actions: {
+                Button("Include in Library") { include(out) }
             }
         } else if items.isEmpty {
             if !search.isEmpty {
@@ -283,7 +302,7 @@ struct FilesBrowser: View {
                     Text(item.name).lineLimit(1).truncationMode(.middle)
                     if let l = item.file?.label { Circle().fill(l.color).frame(width: 8, height: 8) }
                 }
-                .opacity(item.file?.flag == .reject ? 0.45 : 1)
+                .opacity(item.file?.flag == .reject || item.excluded ? 0.45 : 1)
                 .peekPopover(item.id, open: $peek, keys: key) { peekContent($0) }
             }
             .width(min: 180, ideal: 300)
@@ -304,7 +323,7 @@ struct FilesBrowser: View {
             }
             .width(min: 110, ideal: 150)
             TableColumn("Size", value: \.size) { item in
-                Text(item.isFolder ? FileItem.items(item.count) : item.size.formatted(.byteCount(style: .file)))
+                Text(item.excluded ? "--" : item.isFolder ? FileItem.items(item.count) : item.size.formatted(.byteCount(style: .file)))
                     .monospacedDigit().foregroundStyle(.secondary)
             }
             .width(min: 60, ideal: 80)
@@ -515,7 +534,15 @@ struct FilesBrowser: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(chosen.map(\.id).joined(separator: "\n"), forType: .string)
             }
-            Button("Export…") { export(ids) }
+            if chosen.contains(where: { !$0.excluded }) { Button("Export…") { export(ids) } }
+        }
+        if chosen.count == 1, let f = chosen.first, f.isFolder, source(containing: f.id) != nil {
+            Divider()
+            if f.excluded {
+                Button("Include in Library") { include(f.id) }
+            } else {
+                Button("Exclude from Library…") { confirmExclude = f.id }
+            }
         }
     }
 
@@ -603,7 +630,8 @@ struct FilesBrowser: View {
         let input = ListInput(files: files, folder: folder, filter: filter, session: model.sessionRange, minRating: minRating,
                               flag: flagFilter, label: labelFilter, people: withPeople, query: search.trimmingCharacters(in: .whitespaces),
                               subfolders: subfolders || marksFiltered, sort: sortKey, ascending: ascending,
-                              sources: model.projectSources.map { (path: $0.path, name: $0.name, online: $0.online) })
+                              sources: model.projectSources.map { (path: $0.path, name: $0.name, online: $0.online) },
+                              excluded: Set(model.projectSources.flatMap(\.excludedPaths)))
         relisting?.cancel()
         relisting = Task {
             let built = await Task.detached(priority: .userInitiated) { input.build() }.value
@@ -666,6 +694,40 @@ struct FilesBrowser: View {
         selection = []
     }
 
+    /// The project's folder a subfolder is inside (nil for the project's folders themselves).
+    func source(containing path: String) -> SourceSummary? {
+        model.projectSources.first { path.hasPrefix($0.path + "/") }
+    }
+
+    var excludeMessage: String {
+        guard let path = confirmExclude else { return "" }
+        let n = folderCounts.under[path] ?? 0
+        let team = source(containing: path)?.share == .mac ? "" : " It is left out on the team's Macs too."
+        return "\(FileItem.items(n)) leave the library with their faces, ratings and labels; the files stay on disk.\(team) The folder stays listed, marked as excluded; right-click it → Include in Library to bring it back, and its files are read again."
+    }
+
+    /// Leaves a subfolder out of the library. Shown inside it: goes to the folder above, as it is about to empty.
+    func exclude(_ path: String) {
+        guard let source = source(containing: path) else { return }
+        if let folder, folder == path || folder.hasPrefix(path + "/") { go(to: (path as NSString).deletingLastPathComponent) }
+        Task {
+            await model.excludeFolder(path, of: source.id)
+            await load()
+        }
+    }
+
+    /// Brings an excluded subfolder back.
+    func include(_ path: String) {
+        guard let source = source(containing: path) else { return }
+        model.includeFolder(String(path.dropFirst(source.path.count + 1)), of: source.id)
+    }
+
+    /// The excluded subfolder a folder is, or is inside.
+    func excludedFolder(holding path: String?) -> String? {
+        guard let path else { return nil }
+        return model.projectSources.flatMap(\.excludedPaths).first { path == $0 || path.hasPrefix($0 + "/") }
+    }
+
     /// One folder: go into it. Files: photos open in Edit & Export, videos in their own app.
     func open(_ ids: Set<String>) {
         let chosen = chosen(ids)
@@ -720,6 +782,8 @@ private struct ListInput: Sendable {
     var sort: FileSort
     var ascending: Bool
     var sources: [(path: String, name: String, online: Bool)]
+    /// Subfolders left out of the library, absolute: listed in the folder they are in, marked.
+    var excluded: Set<String>
 
     struct Built: Sendable {
         var items: [FileItem]
@@ -754,7 +818,9 @@ private struct ListInput: Sendable {
         var result: [FileItem]
         if let folder, !flat {
             let c = ProjectFiles.contents(of: folder, in: pool)
-            result = c.folders.map { FileItem(folder: $0.key, count: $0.value) } + c.files.map(FileItem.init)
+            let empty = FolderCounts.entries(in: folder, excluded: excluded).filter { c.folders[$0] == nil }
+            result = c.folders.map { FileItem(folder: $0.key, count: $0.value, excluded: excluded.contains($0.key)) }
+                + empty.map { FileItem(folder: $0, count: 0, excluded: excluded.contains($0)) } + c.files.map(FileItem.init)
         } else if flat {
             result = pool.map(FileItem.init)
         } else {
@@ -819,6 +885,15 @@ struct FolderCounts: Sendable {
         }
         subfolders = children.mapValues { $0.sorted { $0.localizedStandardCompare($1) == .orderedAscending } }
     }
+
+    /// The folders excluded subfolders add inside `folder`, which have no files to be found by: the ones directly in
+    /// it, and those on the way to a deeper one.
+    static func entries(in folder: String, excluded: Set<String>) -> Set<String> {
+        let prefix = folder + "/"
+        return Set(excluded.filter { $0.hasPrefix(prefix) }.compactMap { path in
+            path.dropFirst(prefix.count).split(separator: "/").first.map { prefix + $0 }
+        })
+    }
 }
 
 /// The search field's text, outside SwiftUI's view state (see `FilesBrowser.typed`).
@@ -828,12 +903,17 @@ final class SearchText {
 }
 
 /// The project's folders down the left of Files: each folder with how many files it holds, the open folder's
-/// subfolders under it, offline folders flagged. Right-click a folder for Finder, Rescan, Locate and Remove.
+/// subfolders under it, offline folders flagged. Right-click a folder for Finder, Rescan, Locate, Excluded Folders and
+/// Remove; a subfolder for Finder and Exclude.
 struct FolderColumn: View {
     @EnvironmentObject var model: FaceGroupingModel
     let counts: FolderCounts
     let folder: String?
     let go: (String?) -> Void
+    let exclude: (String) -> Void
+    let include: (String) -> Void
+
+    var excluded: Set<String> { Set(model.projectSources.flatMap(\.excludedPaths)) }
 
     var body: some View {
         ScrollView {
@@ -887,10 +967,10 @@ struct FolderColumn: View {
             .help(model.shareCaption(s))
         if let folder, folder == s.path || folder.hasPrefix(s.path + "/") {
             ForEach(subfolders(of: s.path), id: \.self) { sub in
-                row(title: (sub as NSString).lastPathComponent, icon: "folder", count: count(under: sub), path: sub, depth: 2)
+                subfolderRow(sub, depth: 2)
                 if folder != sub, folder.hasPrefix(sub + "/") {
                     ForEach(subfolders(of: folder), id: \.self) { deep in
-                        row(title: (deep as NSString).lastPathComponent, icon: "folder", count: count(under: deep), path: deep, depth: 3)
+                        subfolderRow(deep, depth: 3)
                     }
                 }
             }
@@ -899,17 +979,30 @@ struct FolderColumn: View {
 
     func count(under path: String) -> Int { counts.under[path] ?? 0 }
 
-    func subfolders(of path: String) -> [String] { counts.subfolders[path] ?? [] }
+    /// Those with files, and the excluded ones, in the same order.
+    func subfolders(of path: String) -> [String] {
+        let found = counts.subfolders[path] ?? []
+        let extra = FolderCounts.entries(in: path, excluded: excluded)
+        guard !extra.isEmpty else { return found }
+        return extra.union(found).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
 
-    func row(title: String, icon: String, count: Int, path: String?, depth: Int, offline: Bool = false) -> some View {
+    func subfolderRow(_ path: String, depth: Int) -> some View {
+        let out = excluded.contains(path)
+        return row(title: (path as NSString).lastPathComponent, icon: out ? FileItem.excludedIcon : "folder", count: count(under: path), path: path, depth: depth, excluded: out)
+            .contextMenu { subfolderMenu(path, excluded: out) }
+            .help(out ? "Excluded from the library: its files stay on disk, but aren't read or shown here. Right-click to include it again." : "")
+    }
+
+    func row(title: String, icon: String, count: Int, path: String?, depth: Int, offline: Bool = false, excluded: Bool = false) -> some View {
         let selected = folder == path
         return Button { go(path) } label: {
             HStack(spacing: 6) {
-                Image(systemName: icon).foregroundStyle(offline ? AnyShapeStyle(Color.notice) : selected ? AnyShapeStyle(.primary) : AnyShapeStyle(.tint))
+                Image(systemName: icon).foregroundStyle(offline ? AnyShapeStyle(Color.notice) : excluded ? AnyShapeStyle(.secondary) : selected ? AnyShapeStyle(.primary) : AnyShapeStyle(.tint))
                     .frame(width: 16)
-                Text(title).lineLimit(1).truncationMode(.middle)
+                Text(title).lineLimit(1).truncationMode(.middle).foregroundStyle(excluded ? Color.secondary : Color.primary)
                 Spacer(minLength: 4)
-                Text(offline ? "offline" : count.formatted()).font(.caption).foregroundStyle(offline ? Color.notice : .secondary).monospacedDigit()
+                Text(offline ? "offline" : excluded ? "excluded" : count.formatted()).font(.caption).foregroundStyle(offline ? Color.notice : .secondary).monospacedDigit()
             }
             .font(.callout)
             .padding(.vertical, 4).padding(.trailing, 8).padding(.leading, 8 + CGFloat(depth) * 14)
@@ -918,6 +1011,16 @@ struct FolderColumn: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    @ViewBuilder func subfolderMenu(_ path: String, excluded: Bool) -> some View {
+        Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path) }
+        Divider()
+        if excluded {
+            Button("Include in Library") { include(path) }
+        } else {
+            Button("Exclude from Library…") { exclude(path) }
+        }
     }
 
     @ViewBuilder func sourceMenu(_ s: SourceSummary) -> some View {
@@ -932,6 +1035,7 @@ struct FolderColumn: View {
             }
         }
         ShareMenu(source: s)
+        ExcludedFoldersMenu(source: s)
         Divider()
         Button(s.share == .mac ? "Remove from Library" : "Remove from Library and Team", role: .destructive) { model.removeSource(s.id) }
     }
@@ -999,9 +1103,9 @@ struct FileIcon: View, Equatable {
                     FileThumbnail(file: file, side: side)
                         .opacity(file.flag == .reject ? 0.4 : 1)
                 } else {
-                    Image(systemName: item.offline ? "externaldrive.badge.xmark" : "folder.fill")
+                    Image(systemName: item.excluded ? FileItem.excludedIcon : item.offline ? "externaldrive.badge.xmark" : "folder.fill")
                         .font(.system(size: side * 0.5))
-                        .foregroundStyle(item.offline ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tint))
+                        .foregroundStyle(item.offline || item.excluded ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tint))
                         .frame(width: side, height: side)
                 }
             }
@@ -1032,7 +1136,7 @@ struct FileIcon: View, Equatable {
     }
 
     var detail: String? {
-        if item.isFolder { return item.offline ? "Offline" : FileItem.items(item.count) }
+        if item.isFolder { return item.excluded ? "Excluded" : item.offline ? "Offline" : FileItem.items(item.count) }
         return item.note ?? (item.people.isEmpty ? nil : item.people)
     }
 
@@ -1041,7 +1145,7 @@ struct FileIcon: View, Equatable {
         if let file = item.file {
             FileThumbnail(file: file, side: 18, badges: false)
         } else {
-            Image(systemName: item.offline ? "externaldrive.badge.xmark" : "folder.fill").foregroundStyle(.tint).frame(width: 18, height: 18)
+            Image(systemName: item.excluded ? FileItem.excludedIcon : item.offline ? "externaldrive.badge.xmark" : "folder.fill").foregroundStyle(.tint).frame(width: 18, height: 18)
         }
     }
 }

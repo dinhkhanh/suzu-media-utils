@@ -547,6 +547,31 @@ final class TeamSyncTests: XCTestCase {
         XCTAssertNil(try sources(a).first { $0.uuid == teamFolder.uuid }?.removedAt)
     }
 
+    /// A team folder's excluded subfolders travel with it, and a later change follows (newest wins). A folder only
+    /// on this Mac keeps them to itself.
+    func testExcludedSubfoldersTravelWithATeamFolder() throws {
+        try a.sync.create(name: "Gala", folder: shared, project: a.project)
+        try joinAsTeammate()
+        let cards = tmp.appendingPathComponent("NAS/Events/Gala/Cards", isDirectory: true)
+        try FileManager.default.createDirectory(at: cards, withIntermediateDirectories: true)
+        var folder = SourceRecord(path: canonicalPath(cards), projectId: a.project, share: .team)
+        folder.excluded = ["Rejects"]
+        try a.store.db.write { db in try folder.insert(db) }
+        exchange()
+        XCTAssertEqual(try sources(b).first { $0.uuid == folder.uuid }?.excluded, ["Rejects"], "a folder arriving brings them")
+        try a.store.db.write { db in
+            try db.execute(sql: "UPDATE source SET excluded = ?, shareAt = ? WHERE id = ?", arguments: [#"["Backup"]"#, Date().timeIntervalSince1970 + 5, folder.id])
+        }
+        exchange()
+        XCTAssertEqual(try sources(b).first { $0.uuid == folder.uuid }?.excluded, ["Backup"])
+        // B changes it back: A follows.
+        try b.store.db.write { db in
+            try db.execute(sql: "UPDATE source SET excluded = '[]', shareAt = ? WHERE uuid = ?", arguments: [Date().timeIntervalSince1970 + 10, folder.uuid])
+        }
+        exchange()
+        XCTAssertEqual(try sources(a).first { $0.uuid == folder.uuid }?.excluded, [])
+    }
+
     func testAFolderAMacAlreadyHadBecomesTheTeamsAndStaysWhenUnshared() throws {
         try a.sync.create(name: "Gala", folder: shared, project: a.project)
         try joinAsTeammate()

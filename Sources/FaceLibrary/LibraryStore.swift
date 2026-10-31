@@ -581,6 +581,10 @@ public final class LibraryStore: @unchecked Sendable {
             /// A rule can put photos and videos into two folders (DeliveryRule.splitKinds).
             try db.alter(table: "deliveryRule") { t in t.add(column: "splitKinds", .boolean).notNull().defaults(to: false) }
         }
+        m.registerMigration("v31-source-excluded") { db in
+            /// Subfolders of a folder left out of the library (SourceRecord.excluded), as a JSON list.
+            try db.alter(table: "source") { t in t.add(column: "excluded", .text).notNull().defaults(to: "[]") }
+        }
         return m
     }
 }

@@ -50,15 +50,21 @@ public struct SourceRecord: Codable, FetchableRecord, MutablePersistableRecord, 
     public var fromDevice: String?
     /// Set when a teammate took the folder out of the team: this Mac forgets it in the background.
     public var removedAt: Double?
+    /// Subfolders left out of the library, relative to `path` (so they survive Locate Folder and a share mounted
+    /// elsewhere): never listed, and what was found in them leaves (SourceMonitor.dropExcluded).
+    public var excluded: [String]
 
     public init(path: String, kind: SourceKind = .media, projectId: Int64? = nil, share: SourceShare = .mac, uuid: String = SyncIds.new()) {
         self.path = path; self.kind = kind; addedAt = Date(); self.projectId = projectId
         self.uuid = uuid
         self.share = share
+        excluded = []
         shareAt = share == .mac ? nil : Date().timeIntervalSince1970
     }
     public mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
     public var url: URL { URL(fileURLWithPath: path, isDirectory: true) }
+    /// Whether a file at `path` is in one of the excluded subfolders.
+    public func excludes(_ file: String) -> Bool { excluded.contains { file.hasPrefix(path + "/" + $0 + "/") } }
 }
 
 /// One event (a wedding, a show, a match): a set of folders. People are shared across projects, so a name given in
