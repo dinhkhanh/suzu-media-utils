@@ -515,7 +515,7 @@ extension TeamSync {
         }
         let payload = MediaPayload(
             key: media.contentKey!, project: project, kind: media.kind.rawValue, w: media.width ?? 0, h: media.height ?? 0,
-            dur: media.duration, taken: media.takenAt, fp: media.featurePrint.map { $0.base64EncodedString() }, v: media.analysisVersion,
+            dur: media.duration, taken: media.takenAt, fp: media.featurePrint.flatMap { $0.isEmpty ? nil : $0.base64EncodedString() }, v: media.analysisVersion,
             faces: faces.map { f in
                 FacePayload(x: f.x, y: f.y, w: f.w, h: f.h, q: f.quality, t: f.time, tr: f.track, e: f.embedding?.base64EncodedString(),
                             ey: f.eyesOpen, sm: f.smile, sh: f.sharpness, yaw: f.yaw, pitch: f.pitch, sc: f.score,
@@ -736,7 +736,7 @@ extension TeamSync {
             try db.execute(sql: """
                 UPDATE media SET status = 'done', error = NULL, width = ?, height = ?, duration = ?, takenAt = ?, featurePrint = COALESCE(?, featurePrint),
                     analysisVersion = ?, importedFrom = ? WHERE id = ?
-                """, arguments: [payload.w, payload.h, payload.dur, payload.taken, payload.fp.flatMap { Data(base64Encoded: $0) }, payload.v, device, mid])
+                """, arguments: [payload.w, payload.h, payload.dur, payload.taken, payload.fp.flatMap { Data(base64Encoded: $0) }.flatMap { $0.isEmpty ? nil : $0 }, payload.v, device, mid])
             // On the processing Mac, a copier's ungrouped faces are this Mac's to group (after the transaction).
             if processorId == deviceId, payload.faces.contains(where: { $0.p == nil }) { lock.withLock { takenToGroup.append(mid) } }
             // The crops, so the faces have pictures here too. Any that can't be copied now (the share rewriting

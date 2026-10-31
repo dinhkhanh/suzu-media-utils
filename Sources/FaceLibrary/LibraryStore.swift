@@ -585,6 +585,11 @@ public final class LibraryStore: @unchecked Sendable {
             /// Subfolders of a folder left out of the library (SourceRecord.excluded), as a JSON list.
             try db.alter(table: "source") { t in t.add(column: "excluded", .text).notNull().defaults(to: "[]") }
         }
+        m.registerMigration("v32-retry-feature-prints") { db in
+            /// Photos marked unreadable for the burst check while their share was away (7,790 of one event's 8,096,
+            /// all readable now) were never tried again, and so never in a burst.
+            try db.execute(sql: "UPDATE media SET featurePrint = NULL WHERE LENGTH(featurePrint) = 0 AND NOT skippedAsEdited")
+        }
         return m
     }
 }

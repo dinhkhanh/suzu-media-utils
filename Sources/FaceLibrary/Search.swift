@@ -78,11 +78,7 @@ extension MediaQuery {
                 : "m.id IN (SELECT mediaId FROM face WHERE personId IN (\(ids)))")
         }
         if skipBlurry {
-            // The biggest face, when big enough to be the subject, decides; no measurement = not blurry.
-            conds.append("""
-                COALESCE((SELECT sf.sharpness FROM face sf WHERE sf.mediaId = m.id AND sf.time IS NULL AND sf.w >= \(ShotCuller.minFaceWidth)
-                          ORDER BY sf.w * sf.h DESC LIMIT 1), 1e9) >= \(ShotCuller.softFaceBelow)
-                """)
+            conds.append("NOT (\(Selection.blurrySQL("m.id")))")
         }
         switch crowd {
         case .any: break

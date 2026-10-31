@@ -113,6 +113,8 @@ struct PersonMedia: Identifiable, Hashable {
     var burstId: Int64?
     /// Other shots of the same burst hidden behind this one when bursts are collapsed.
     var hiddenInBurst = 0
+    /// The main face is out of focus (see `Selection.blurrySQL`).
+    var blurry = false
     var url: URL { URL(fileURLWithPath: path, isDirectory: false) }
 }
 
@@ -655,7 +657,7 @@ final class FaceGroupingModel: ObservableObject {
         let rows = (try? db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT m.id, m.path, m.kind, m.takenAt, m.burstId, f.id AS faceId, f.time,
-                    COALESCE(f.score, f.quality * 0.6, 0) AS score FROM face f
+                    COALESCE(f.score, f.quality * 0.6, 0) AS score, \(Selection.blurrySQL("m.id")) AS blurry FROM face f
                 JOIN media m ON m.id = f.mediaId LEFT JOIN source s ON s.id = m.sourceId
                 WHERE f.personId = ? AND \(ProjectScope.sql(project)) AND \(EventSessions.sql(taken))
                 ORDER BY m.path, score DESC
@@ -674,7 +676,7 @@ final class FaceGroupingModel: ObservableObject {
             guard seen.insert(id).inserted, allowed?.contains(id) ?? true else { return nil }
             return PersonMedia(id: id, path: r["path"], kind: MediaKind(rawValue: r["kind"]) ?? .photo,
                                faceId: r["faceId"], time: r["time"], score: r["score"],
-                               takenAt: (r["takenAt"] as Double?).map(Date.init(timeIntervalSince1970:)), burstId: r["burstId"])
+                               takenAt: (r["takenAt"] as Double?).map(Date.init(timeIntervalSince1970:)), burstId: r["burstId"], blurry: r["blurry"])
         }
     }
 

@@ -369,6 +369,54 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(back, [named], "the same person's new photo gets the kept name; someone else doesn't")
     }
 
+    /// Best N with similar and blurry shots left out: one shot of a burst, no blurry one, and the best of the rest
+    /// fill the N; a RAW is kept of its burst, but doesn't push better photos out of the best N.
+    func testBestShotsAreTheBestOfWhatIsLeftAfterSimilarAndBlurry() throws {
+        for i in 0..<6 { try makeFile("s/\(i).jpg", bytes: 100 + i) }
+        try makeFile("s/raw.arw", bytes: 300)
+        monitor().scan()
+        let person = try newPerson("Chi Pu")
+        let byName = Dictionary(try media().map { ($0.url.lastPathComponent, $0.id!) }, uniquingKeysWith: { a, _ in a })
+        func shot(_ name: String, score: Double, sharpness: Double = 500, burst: Int64? = nil) throws {
+            let m = byName[name]!, f = try addFace(mediaId: m, personId: person)
+            try store.db.write { db in
+                try db.execute(sql: "UPDATE face SET score = ?, sharpness = ?, w = 0.2, h = 0.2, time = NULL WHERE id = ?", arguments: [score, sharpness, f])
+                try db.execute(sql: "UPDATE media SET status = 'done', burstId = ? WHERE id = ?", arguments: [burst, m])
+            }
+        }
+        let burst = byName["0.jpg"]!
+        try shot("0.jpg", score: 0.90, burst: burst)
+        try shot("1.jpg", score: 0.89, burst: burst)
+        try shot("2.jpg", score: 0.88, burst: burst)
+        try shot("3.jpg", score: 0.87, sharpness: 20)
+        try shot("4.jpg", score: 0.80)
+        try shot("5.jpg", score: 0.70)
+        try shot("raw.arw", score: 0.10)
+        func best(_ n: Int?, similar: Bool, blurry: Bool) throws -> [String] {
+            try Selection.files(store, personIds: [person], kind: .photo, topN: n, bestOfBurst: similar, skipBlurry: blurry).map(\.url.lastPathComponent)
+        }
+        XCTAssertEqual(try best(3, similar: false, blurry: false), ["0.jpg", "1.jpg", "2.jpg"], "by score, the RAW doesn't come first")
+        XCTAssertEqual(try best(3, similar: true, blurry: false), ["0.jpg", "3.jpg", "4.jpg"])
+        XCTAssertEqual(try best(3, similar: true, blurry: true), ["0.jpg", "4.jpg", "5.jpg"])
+        XCTAssertEqual(try best(nil, similar: true, blurry: true), ["0.jpg", "4.jpg", "5.jpg", "raw.arw"])
+    }
+
+    /// Unreadable for the burst check isn't for good: the upgrade, a Rescan and a share coming back try again.
+    /// An edited folder's photos are skipped on purpose and stay so.
+    func testUnreadablePrintsAreTriedAgain() throws {
+        for i in 0..<2 { try makeFile("p/\(i).jpg", bytes: 100 + i) }
+        let m = monitor()
+        m.scan()
+        let ids = try media().map { $0.id! }
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE media SET featurePrint = X'', skippedAsEdited = (id = ?)", arguments: [ids[1]])
+        }
+        m.retryFailed()
+        let prints = try store.db.read { db in try Row.fetchAll(db, sql: "SELECT id, featurePrint FROM media ORDER BY id") }
+        XCTAssertNil(prints[0]["featurePrint"] as Data?)
+        XCTAssertEqual(prints[1]["featurePrint"] as Data?, Data())
+    }
+
     func setExcluded(_ names: [String]) throws {
         try store.db.write { db in
             var s = try XCTUnwrap(try SourceRecord.fetchOne(db, key: sourceId))

@@ -106,6 +106,8 @@ struct ToolInputView: View {
     @State private var chosen: Set<Int64> = []
     @State private var topN: Int? = nil
     @State private var bestOfBurst = true
+    /// The same setting as Edit & Export's Skip blurry, so ticking it there fills the best N from the sharp shots.
+    @AppStorage("batchExport.skipBlurry") private var skipBlurry = false
     @State private var search = ""
     @State private var resolving = false
     /// When the chosen files were shot (EXIF, else the file's date, as the library reckons it), so a session picked
@@ -137,7 +139,7 @@ struct ToolInputView: View {
         }
         .onChange(of: files) { if mode == 0 { items = fileItems() } }
         .onChange(of: mode) { mode == 0 ? (items = fileItems()) : resolve() }
-        .task(id: "\(chosen.sorted())|\(topN ?? 0)|\(bestOfBurst)|\(faces.currentProject ?? 0)|\(faces.sessionRange.map { "\($0)" } ?? "")") {
+        .task(id: "\(chosen.sorted())|\(topN ?? 0)|\(bestOfBurst)|\(skipBlurry)|\(faces.currentProject ?? 0)|\(faces.sessionRange.map { "\($0)" } ?? "")") {
             // Runs on appear too: with no files chosen here, the items are the ones handed in (photos opened from
             // the library) and stay.
             if mode == 1 { resolve() } else if !files.isEmpty { items = fileItems() }
@@ -214,6 +216,7 @@ struct ToolInputView: View {
                 }
                 .labelsHidden().fixedSize()
                 Toggle("Skip similar shots", isOn: $bestOfBurst).toggleStyle(.checkbox)
+                Toggle("Skip blurry shots", isOn: $skipBlurry).toggleStyle(.checkbox)
                 SessionPicker()
             }
         }
@@ -221,11 +224,11 @@ struct ToolInputView: View {
 
     func resolve() {
         guard let store = faces.store else { return }
-        let ids = Array(chosen), kind = mediaKind, topN = topN, burst = bestOfBurst, project = faces.currentProject, taken = faces.sessionRange
+        let ids = Array(chosen), kind = mediaKind, topN = topN, burst = bestOfBurst, blurry = skipBlurry, project = faces.currentProject, taken = faces.sessionRange
         let rawPairs = rawPairs
         resolving = true
         Task.detached(priority: .userInitiated) {
-            let files = (try? Selection.files(store, personIds: ids, kind: kind, topN: topN, bestOfBurst: burst, project: project, taken: taken)) ?? []
+            let files = (try? Selection.files(store, personIds: ids, kind: kind, topN: topN, bestOfBurst: burst, skipBlurry: blurry, project: project, taken: taken)) ?? []
             let raws = rawPairs ? ((try? await store.db.read { db in try Selection.rawPartners(db, mediaIds: files.map(\.mediaId)) }) ?? [:]) : [:]
             // A photo of two chosen people is listed once (the first person's), or the tools would edit it twice.
             var seen: Set<String> = []

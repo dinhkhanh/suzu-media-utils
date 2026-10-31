@@ -266,20 +266,25 @@ public final class Processor: @unchecked Sendable {
         }
     }
 
-    /// Photos without a feature print (for burst detection), done when the queue is idle.
-    public func enqueueFeaturePrints(limit: Int = 100) {
-        guard queuedCount == 0, backgroundCount == 0, !extrasPaused else { return }
+    /// Photos without a feature print (for burst detection), done when the queue is idle. Only of `sources`, the
+    /// folders that are there now: an offline share would read as thousands of unreadable photos, each never tried
+    /// again and never in a burst, so "best shots" filled up with near-identical ones.
+    public func enqueueFeaturePrints(limit: Int = 100, sources: [Int64]) {
+        guard queuedCount == 0, backgroundCount == 0, !extrasPaused, !sources.isEmpty else { return }
         let rows = (try? store.db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT id, path FROM media WHERE status = 'done' AND duplicateOf IS NULL AND kind = 'photo'
-                  AND featurePrint IS NULL ORDER BY id LIMIT ?
+                  AND featurePrint IS NULL AND sourceId IN (\(sources.map(String.init).joined(separator: ","))) ORDER BY id LIMIT ?
                 """, arguments: [limit])
         }) ?? []
         for r in rows {
             let id: Int64 = r["id"], path: String = r["path"]
             addBackground(id) { [self] in
-                // Empty blob = tried and unreadable, so it isn't retried forever.
-                let fp = MediaAnalyzer.quickFeaturePrint(URL(fileURLWithPath: path, isDirectory: false)).map(Vector.encode) ?? Data()
+                // Empty blob = tried and unreadable, so it isn't retried on every pass (a Rescan, or the folder coming
+                // back, tries again). A file not there right now (the share going away) isn't that: it stays to do.
+                let print = MediaAnalyzer.quickFeaturePrint(URL(fileURLWithPath: path, isDirectory: false)).map(Vector.encode)
+                guard print != nil || FileManager.default.fileExists(atPath: path) else { return }
+                let fp = print ?? Data()
                 try? store.db.write { db in try db.execute(sql: "UPDATE media SET featurePrint = ? WHERE id = ?", arguments: [fp, id]) }
             }
         }

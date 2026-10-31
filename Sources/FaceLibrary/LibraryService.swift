@@ -79,10 +79,11 @@ public final class LibraryService: @unchecked Sendable {
         settleEditedFolders()
         guard processor.queuedCount == 0, (try? pendingCount()) == 0 else { return false }
         if processor.backgroundCount > 0 { return false }
+        let reachable = lock.withLock { monitors.filter { $0.value.isReachable }.map(\.key) }
         let (old, noPrint, wantBursts, noThumb) = (try? store.db.read { db in
             (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'done' AND duplicateOf IS NULL AND analysisVersion < ?",
                               arguments: [BestShot.analysisVersion]) ?? 0,
-             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'done' AND duplicateOf IS NULL AND kind = 'photo' AND featurePrint IS NULL") ?? 0,
+             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'done' AND duplicateOf IS NULL AND kind = 'photo' AND featurePrint IS NULL AND sourceId IN (\(reachable.map(String.init).joined(separator: ",")))") ?? 0,
              try DeliveryService.rules(db).contains { $0.enabled && $0.mediaQuery.collapseBursts },
              try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM media WHERE status = 'done' AND duplicateOf IS NULL AND thumbAt IS NULL") ?? 0)
         }) ?? (0, 0, false, 0)
@@ -98,7 +99,7 @@ public final class LibraryService: @unchecked Sendable {
         // Thumbnails first: they are what the grids wait for.
         if noThumb > 0 { processor.enqueueThumbnails(limit: 100); return false }
         if old > 0 { processor.enqueueUpgrades(limit: 40); burstsDirty = true; return false }
-        if noPrint > 0 { processor.enqueueFeaturePrints(limit: 100); burstsDirty = true; return false }
+        if noPrint > 0 { processor.enqueueFeaturePrints(limit: 100, sources: reachable); burstsDirty = true; return false }
         if burstsDirty {
             burstsDirty = false
             _ = try? BurstGrouper(store: store).regroup()

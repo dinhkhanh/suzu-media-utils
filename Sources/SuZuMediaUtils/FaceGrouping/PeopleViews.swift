@@ -635,6 +635,7 @@ struct PersonDetail: View {
     @State private var exportSelected: ExportScope?
     @State private var sort = MediaSort.best
     @State private var collapseBursts = true
+    @State private var hideBlurry = false
     @State private var topN: Int?
     /// The Photos and Videos grids, worked out when what goes into them changes (see `relist`).
     @State private var lists = MediaLists()
@@ -674,6 +675,7 @@ struct PersonDetail: View {
         .task(id: reloadKey) { await reload() }
         .onChange(of: sort) { relist() }
         .onChange(of: collapseBursts) { relist() }
+        .onChange(of: hideBlurry) { relist() }
         .onChange(of: topN) { relist() }
         // The name, once the model has the person (and after a rename elsewhere); not while it is being typed.
         .onChange(of: person?.name, initial: true) { if name != (person?.name ?? ""), name.isEmpty || name == person?.name { name = person?.name ?? "" } }
@@ -865,6 +867,7 @@ struct PersonDetail: View {
                 let hidden = tab == .videos ? lists.hiddenVideos : lists.hiddenPhotos
                 Chip("Hide bursts", count: collapseBursts && hidden > 0 ? "−\(hidden)" : nil, on: collapseBursts,
                      help: "Show only the best photo of each burst of near-identical shots") { collapseBursts.toggle() }
+                Chip("Hide blurry", on: hideBlurry, help: "Leave out photos whose main face is out of focus") { hideBlurry.toggle() }
             }
         }
         .padding(.horizontal, 20)
@@ -879,22 +882,24 @@ struct PersonDetail: View {
         }
     }
 
-    /// The grid after session filter, sort, burst collapsing and Top N.
+    /// The grid after session filter, sort, blurry shots, burst collapsing and Top N.
     func shown(_ kind: MediaKind) -> [PersonMedia] { kind == .video ? lists.videos : lists.photos }
 
     /// Works the grids out again, when the media, the sort, bursts or Top N change. Not in `body`: every click
     /// (a selection) redraws the page, and sorting a few thousand photos there each time made selecting lag.
     func relist() {
         let photos = media.filter { $0.kind == .photo }, videos = media.filter { $0.kind == .video }
-        let p = Self.list(photos, sort: sort, collapseBursts: collapseBursts, topN: topN)
-        let v = Self.list(videos, sort: sort, collapseBursts: collapseBursts, topN: topN)
+        let p = Self.list(photos, sort: sort, collapseBursts: collapseBursts, hideBlurry: hideBlurry, topN: topN)
+        let v = Self.list(videos, sort: sort, collapseBursts: collapseBursts, hideBlurry: hideBlurry, topN: topN)
         lists = MediaLists(photos: p.items, videos: v.items, photoCount: photos.count, videoCount: videos.count,
                            hiddenPhotos: p.hidden, hiddenVideos: v.hidden)
     }
 
     /// One kind's grid, and how many shots its bursts hide.
-    static func list(_ all: [PersonMedia], sort: MediaSort, collapseBursts: Bool, topN: Int?) -> (items: [PersonMedia], hidden: Int) {
-        var items = all
+    /// Blurry shots go first, so a burst keeps a sharp one; Best N is what is left after both.
+    static func list(_ all: [PersonMedia], sort: MediaSort, collapseBursts: Bool, hideBlurry: Bool, topN: Int?) -> (items: [PersonMedia], hidden: Int) {
+        var items = hideBlurry ? all.filter { !$0.blurry } : all
+        let sharp = items.count
         if collapseBursts {
             var best: [Int64: Int] = [:]
             var out: [PersonMedia] = []
@@ -909,7 +914,7 @@ struct PersonDetail: View {
             }
             items = out
         }
-        let hidden = all.count - items.count
+        let hidden = sharp - items.count
         switch sort {
         case .best: items.sort { $0.score > $1.score }
         case .time: items.sort { ($0.takenAt ?? .distantPast, $0.path) < ($1.takenAt ?? .distantPast, $1.path) }

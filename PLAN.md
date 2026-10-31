@@ -967,3 +967,16 @@ the preview, regular size, on a dark disc, and takes no clicks.
 - Tests: `GroupingTests` (faces taken from a person take their look-alikes along, a new one stays away and is not
   likely, the group they form stays apart; faces moved to a name take their look-alikes along, a new one joins
   the name, through `corrected`).
+
+**Best N of what is left; bursts need their feature prints.** "Best 20" with similar shots skipped still held whole
+bursts: of one event's 8,096 photos 7,790 had the empty print that means "tried and unreadable", in one run of ids,
+all readable when tried again (the print pass had run while the share was away), and a photo without a print is never
+in a burst. The burst rule was not the problem: in one person's top 60, 59 of the 74 similar pairs are within 2 s.
+- The pass only takes folders that are there (`SourceMonitor.isReachable`); a file missing at that moment stays to do;
+  a Rescan or a folder coming back tries the unreadable ones again; migration v32 tries all of them again. An empty
+  print no longer travels to teammates or overwrites one here.
+- `Selection.files` cut the best N in its burst order, RAW files first, so N RAWs pushed better photos out; it now
+  ranks by score after choosing each burst's shot. It takes `skipBlurry` (the tools' picker, the same setting as Edit
+  & Export's Skip blurry), so sharp shots fill the N. The person page has Hide blurry (before bursts and Best N).
+  `Selection.blurrySQL` is the one definition, shared with search.
+- On that person, after prints: the top 20 goes down to rank 39 to find 20 different moments.

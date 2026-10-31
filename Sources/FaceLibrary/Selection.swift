@@ -53,9 +53,18 @@ public enum Selection {
         FocusHint(primary: box, others: (faces ?? []).filter { $0.id != face }.map(\.box))
     }
 
-    /// The files of the given people (best first per person), optionally only photos or videos, the best N, and the
-    /// best of each burst. Reads only the database, so it's fast even for NAS libraries.
-    public static func files(_ store: LibraryStore, personIds: [Int64], kind: MediaKind?, topN: Int?, bestOfBurst: Bool,
+    /// SQL: the shot is blurry. The biggest face, when big enough to be the subject, decides; no measurement = not blurry.
+    public static func blurrySQL(_ media: String) -> String {
+        """
+        COALESCE((SELECT sf.sharpness FROM face sf WHERE sf.mediaId = \(media) AND sf.time IS NULL AND sf.w >= \(ShotCuller.minFaceWidth)
+                  ORDER BY sf.w * sf.h DESC LIMIT 1), 1e9) < \(ShotCuller.softFaceBelow)
+        """
+    }
+
+    /// The files of the given people (best first per person), optionally only photos or videos, leaving out blurry
+    /// shots and all but the best of each burst, and then the best N of what is left: those two make room in the
+    /// best N for other shots. Reads only the database, so it's fast even for NAS libraries.
+    public static func files(_ store: LibraryStore, personIds: [Int64], kind: MediaKind?, topN: Int?, bestOfBurst: Bool, skipBlurry: Bool = false,
                              project: Int64? = nil, taken: ClosedRange<Double>? = nil) throws -> [PersonFile] {
         guard !personIds.isEmpty else { return [] }
         let ids = personIds.map(String.init).joined(separator: ",")
@@ -66,6 +75,7 @@ public enum Selection {
                 FROM face f JOIN media m ON m.id = f.mediaId JOIN person p ON p.id = f.personId LEFT JOIN source src ON src.id = m.sourceId
                 WHERE f.personId IN (\(ids)) AND p.name IS NOT NULL AND m.duplicateOf IS NULL AND m.status = 'done'
                   AND \(ProjectScope.sql(project, source: "src")) AND \(EventSessions.sql(taken)) \(kind.map { "AND m.kind = '\($0.rawValue)'" } ?? "")
+                  \(skipBlurry ? "AND NOT (\(blurrySQL("m.id")))" : "")
                 ORDER BY p.name COLLATE NOCASE, \(ImageLoader.rawSQL("m.path")) DESC, s DESC
                 """)
         }
@@ -83,19 +93,20 @@ public enum Selection {
         var out: [PersonFile] = []
         for (_, group) in Dictionary(grouping: rows, by: { $0["pid"] as Int64 }).sorted(by: { ($0.value[0]["name"] as String) < ($1.value[0]["name"] as String) }) {
             var seen: Set<Int64> = [], bursts: Set<Int64> = []
-            var list: [PersonFile] = []
+            var list: [(score: Double, file: PersonFile)] = []
+            // In this order (a RAW first) a burst keeps its shot; the list itself goes by score.
             for r in group {
                 let mid: Int64 = r["id"]
                 guard seen.insert(mid).inserted else { continue }
                 if bestOfBurst, let b = r["burstId"] as Int64?, !bursts.insert(b).inserted { continue }
-                list.append(PersonFile(mediaId: mid, url: URL(fileURLWithPath: r["path"], isDirectory: false), isVideo: (r["kind"] as String) == "video",
+                list.append((r["s"], PersonFile(mediaId: mid, url: URL(fileURLWithPath: r["path"], isDirectory: false), isVideo: (r["kind"] as String) == "video",
                                        personName: r["name"], people: (namesByMedia[mid] ?? []).sorted(),
                                        takenAt: (r["takenAt"] as Double?).map(Date.init(timeIntervalSince1970:)),
                                        focus: focus(face: r["faceId"], box: CGRect(x: r["x"] as Double, y: r["y"] as Double, width: r["w"] as Double, height: r["h"] as Double),
-                                                    in: boxes[mid])))
+                                                    in: boxes[mid]))))
             }
-            if let topN { list = Array(list.prefix(topN)) }
-            out += list
+            let ranked = list.enumerated().sorted { ($0.element.score, $1.offset) > ($1.element.score, $0.offset) }.map(\.element.file)
+            out += topN.map { Array(ranked.prefix($0)) } ?? ranked
         }
         return out
     }

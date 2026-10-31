@@ -18,6 +18,8 @@ public final class SourceMonitor: @unchecked Sendable {
     let queue: DispatchQueue
     public private(set) var isOnline = true
     public private(set) var isNetwork = false
+    /// Looked at and found there, and not gone since.
+    public var isReachable: Bool { watchConfigured && isOnline }
     /// True while a scan is listing or registering files; `foundCount` is the files listed so far.
     public private(set) var isScanning = false
     public private(set) var foundCount = 0
@@ -179,6 +181,10 @@ public final class SourceMonitor: @unchecked Sendable {
     @discardableResult
     func retryFailed() -> Int {
         guard !cancelled, FileManager.default.fileExists(atPath: root.path) else { return 0 }
+        // The burst check's unreadable photos too (an edited folder's are skipped on purpose).
+        try? store.db.write { db in
+            try db.execute(sql: "UPDATE media SET featurePrint = NULL WHERE sourceId = ? AND LENGTH(featurePrint) = 0 AND NOT skippedAsEdited", arguments: [sourceId])
+        }
         let ids = (try? store.db.read { db in
             try Int64.fetchAll(db, sql: "SELECT id FROM media WHERE sourceId = ? AND status = 'failed'", arguments: [sourceId])
         }) ?? []
