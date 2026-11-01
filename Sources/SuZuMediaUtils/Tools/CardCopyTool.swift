@@ -7,10 +7,17 @@ import SwiftUI
 /// card's next hand-over copies only what was shot since, however the earlier copies were moved or edited.
 ///
 /// Each mounted card is a panel: what is new on it as a sentence, where it goes, one button. The destination and
-/// the options sit in a column on the right.
+/// the options sit in a column on the right. The cards and their copies live with the app (`cardCopies`), not with
+/// this screen: a copy goes on when another screen opens, its progress and Stop are in the sidebar, and coming back
+/// shows it as it stands.
 struct CardCopyTool: View {
     @EnvironmentObject var faces: FaceGroupingModel
-    @StateObject private var model = CardCopyModel()
+    var body: some View { CardCopyScreen(model: faces.cardCopies) }
+}
+
+struct CardCopyScreen: View {
+    @EnvironmentObject var faces: FaceGroupingModel
+    @ObservedObject var model: CardCopyModel
     @AppStorage("cardCopyDestination") private var destinationPath = ""
     @AppStorage("cardCopyVerify") private var verify = true
     @AppStorage("cardCopyPerHandover") private var perHandover = true
@@ -81,8 +88,9 @@ struct CardCopyTool: View {
                     .help("Start every card that has new files, side by side")
             }
         }
+        .onAppear { model.screenOpened() }
+        .onDisappear { model.screenClosed() }
         .task { model.refresh(store: faces.store, sync: faces.service?.teamSync) }
-        .onChange(of: faces.store == nil) { model.refresh(store: faces.store, sync: faces.service?.teamSync) }
     }
 
     var subtitle: String {
@@ -238,8 +246,10 @@ struct CardCopyTool: View {
                 o.onCopied = { landed in service.fileLanded(landed) }
             }
         }
-        let toNAS = toNAS, event = nasEvent, perHandover = perHandover
+        // The copy outlives this screen: the closure holds what it needs, not the view.
+        let faces = faces, toNAS = toNAS, event = nasEvent, perHandover = perHandover
         model.copy(card.id, options: o, store: store) { outcome in
+            faces.log("\(card.name): \(CardCopyModel.brief(outcome))", icon: outcome.failed.isEmpty && outcome.interruption == nil ? "sdcard" : "exclamationmark.triangle")
             if let project, !outcome.copied.isEmpty || !outcome.skipped.isEmpty {
                 faces.addCopiedFolder(outcome.cardFolder, project: project)
                 if let v = outcome.videoCardFolder { faces.addCopiedFolder(v, project: project) }
@@ -359,6 +369,7 @@ struct CardRow: View {
                     // Labels fill the column, so the buttons are one width.
                     if card.copying {
                         Button { model.cancel(card.id) } label: { Text("Stop").frame(maxWidth: .infinity) }
+                            .disabled(card.stopping)
                     } else if let p = card.plan {
                         // Other cards may be copying meanwhile: to other disks at full speed, to the same one side by side.
                         Button { copy() } label: { Text("Copy New Files").frame(maxWidth: .infinity) }
@@ -512,27 +523,11 @@ struct CardRow: View {
         model.setLabel(card.id, typed, store: faces.store)
     }
 
-    func outcomeText(_ o: CardCopier.Outcome) -> String {
-        let took = Int(o.finished.timeIntervalSince(o.started).rounded())
-        let time = took >= 60 ? "\(took / 60) min \(took % 60) s" : "\(took) s"
-        var s = switch o.interruption {
-        case .cancelled: "Stopped: copied "
-        case .cardRemoved: "The card was removed in the middle of the copy: "
-        case .destinationLost: "The destination went away in the middle of the copy: "
-        case nil: "Copied "
-        }
-        s += "\(o.copied.count) files (\(o.bytes.formatted(.byteCount(style: .file))))"
-        if !o.skipped.isEmpty { s += ", \(o.skipped.count) already there" }
-        s += " in \(time)"
-        if o.interruption != nil, o.interruption != .cancelled { s += ". Those are safe; the rest is still new and goes on in the same folder." }
-        return s
-    }
-
     @ViewBuilder
     func outcome(_ o: CardCopier.Outcome) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Label(outcomeText(o), systemImage: o.interruption == nil && o.failed.isEmpty ? "checkmark.circle.fill" : "exclamationmark.circle")
+                Label(CardCopyModel.outcomeText(o) + CardCopyModel.resumeNote(o), systemImage: o.interruption == nil && o.failed.isEmpty ? "checkmark.circle.fill" : "exclamationmark.circle")
                     .foregroundStyle(o.failed.isEmpty && o.interruption == nil ? Color.good : Color.orange)
                 Spacer()
                 Button(o.videoFolder == nil ? "Show in Finder" : "Show Photos") { NSWorkspace.shared.activateFileViewerSelecting([o.folder]) }.controlSize(.small)
@@ -547,6 +542,60 @@ struct CardRow: View {
             }
         }
         .padding(.top, 2)
+    }
+}
+
+/// A card's copy in the sidebar, above the status pill with the other background copies: its progress and Stop, then
+/// its result until it is closed or Copy from Cards is opened (which shows the result on the card's panel). A click
+/// opens Copy from Cards.
+struct CardCopySidebarRow: View {
+    let card: CardCopyModel.Card
+    let model: CardCopyModel
+    let open: () -> Void
+
+    var title: String {
+        guard !card.copying, let o = card.outcome else { return "Copying \(card.name)" }
+        return switch o.interruption {
+        case .cancelled: "Stopped copying \(card.name)"
+        case .cardRemoved: "\(card.name) was removed"
+        case .destinationLost: "Destination lost: \(card.name)"
+        case nil: o.failed.isEmpty ? "Done: \(card.name)" : "Not all copied: \(card.name)"
+        }
+    }
+
+    /// A clean result, a result that needs a look, or nil while it is copying.
+    var clean: Bool? { card.copying ? nil : card.outcome.map { $0.failed.isEmpty && $0.interruption == nil } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Image(systemName: clean == nil ? "sdcard" : clean! ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(clean == nil ? AnyShapeStyle(.secondary) : clean! ? AnyShapeStyle(Color.good) : AnyShapeStyle(Color.notice))
+                Text(title).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+                if card.copying {
+                    Button("Stop") { model.cancel(card.id) }.controlSize(.small).disabled(card.stopping)
+                        .help("Nothing half-written is left; copying this card again goes on in the same folder.")
+                } else {
+                    Button { model.closeResult(card.id) } label: { Image(systemName: "xmark") }.buttonStyle(.plain).foregroundStyle(.secondary).help("Close")
+                }
+            }
+            if card.copying {
+                ProgressView(value: Double(card.progress.bytesDone), total: Double(max(1, card.progress.bytesTotal))).progressViewStyle(.linear).controlSize(.small)
+                Text(card.stopping ? "Stopping…" : "\(card.progress.done.formatted()) of \(card.progress.total.formatted()) files · \(card.progress.bytesTotal.formatted(.byteCount(style: .file)))")
+                    .font(.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+            } else if let o = card.outcome {
+                Text(CardCopyModel.brief(o) + CardCopyModel.resumeNote(o))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([o.folder]) }.controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 9).fill(.quaternary.opacity(0.5)))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: open)
+        .help("Open Copy from Cards")
     }
 }
 
@@ -590,7 +639,10 @@ struct KnownCardRow: View {
     }
 }
 
-/// The mounted cards and what the library knows of them. Looks again whenever a volume mounts or unmounts.
+/// The mounted cards and what the library knows of them. Lives as long as the app (`FaceGroupingModel.cardCopies`), so
+/// a copy under way and what was found on the cards don't depend on Copy from Cards being open. Looks again whenever
+/// a volume mounts or unmounts while that screen is open, and when it opens; a card put in while another screen is
+/// open isn't read until then.
 @MainActor
 final class CardCopyModel: ObservableObject {
     /// One look at a card (its plan being made). The card holds the look under way; a result from any other look
@@ -608,17 +660,26 @@ final class CardCopyModel: ObservableObject {
         /// fingerprints are reused, so that is a listing and a lookup).
         var lookAgain = false
         var copying = false
+        /// Stop was asked for; the copy ends once the check of the file under way is done.
+        var stopping = false
         var progress = CardCopier.Progress()
         var outcome: CardCopier.Outcome?
+        /// The outcome has been on screen in Copy from Cards, or was closed in the sidebar: the sidebar lets it go.
+        var resultSeen = false
         var error: String?
         /// Unmounted while it was being copied, or after an interrupted copy: kept on screen so the result shows.
         var gone = false
         var id: String { identity.uuid }
+        var name: String { plan?.card.displayName ?? identity.volumeName }
     }
 
     @Published var cards: [Card] = []
     @Published var known: [CardCopier.KnownCard] = []
     @Published var looking = false
+    /// How many Copy from Cards screens are open. A count: when SwiftUI rebuilds the screen, the old one's
+    /// onDisappear can come after the new one's onAppear.
+    private var screens = 0
+    var onScreen: Bool { screens > 0 }
     /// Cards with a destination of their own, by volume UUID (this Mac's paths: not part of the team's ledger).
     @Published private(set) var ownDestinations: [String: String] = UserDefaults.standard.dictionary(forKey: "cardCopyOwnDestinations") as? [String: String] ?? [:]
     private var again = false
@@ -634,13 +695,31 @@ final class CardCopyModel: ObservableObject {
         let nc = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
             observers.append(nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.refresh(store: self?.pending, sync: self?.pendingSync) }
+                Task { @MainActor in
+                    guard let self, self.onScreen else { return }
+                    self.refresh(store: self.pending, sync: self.pendingSync)
+                }
             })
         }
     }
 
     deinit {
         for o in observers { NSWorkspace.shared.notificationCenter.removeObserver(o) }
+    }
+
+    /// What the sidebar shows: copies under way, and results not yet seen.
+    var inSidebar: [Card] { cards.filter { $0.copying || ($0.outcome != nil && !$0.resultSeen) } }
+
+    /// Copy from Cards opened: the results are on the cards' panels now.
+    func screenOpened() {
+        screens += 1
+        for i in cards.indices where cards[i].outcome != nil && !cards[i].copying && !cards[i].resultSeen { cards[i].resultSeen = true }
+    }
+
+    func screenClosed() { screens = max(0, screens - 1) }
+
+    func closeResult(_ id: String) {
+        if let i = cards.firstIndex(where: { $0.id == id }) { cards[i].resultSeen = true }
     }
 
     /// SUZU_CARD_VOLUMES=/a:/b (testing): folders that stand for cards.
@@ -655,8 +734,9 @@ final class CardCopyModel: ObservableObject {
     /// in the background and a card's plan is made again if they brought a copy made on another Mac (reading them
     /// first used to hold the cards up for as long as a sync pass took, which under heavy processing is a while).
     ///
-    /// A card already planned keeps its plan when another card mounts or unmounts; `fresh` (Look Again, or another
-    /// library) plans every card again, and a card whose look failed is looked at once more either way.
+    /// A card already planned keeps its plan when another card mounts or unmounts or the screen is opened again;
+    /// `fresh` (Look Again, or another library) plans every card again, and a card whose look failed is looked at once
+    /// more either way. A card being copied is left alone: not looked at, and not even read to identify it.
     func refresh(store: LibraryStore?, sync: TeamSync? = nil, fresh: Bool = false) {
         let fresh = fresh || pending !== store
         pending = store
@@ -665,9 +745,13 @@ final class CardCopyModel: ObservableObject {
         // A card mounted while the last look was under way: look once more when it is done.
         if looking { again = true; againFresh = againFresh || fresh; return }
         looking = true
+        let copying = cards.filter { $0.copying && !$0.gone }.map(\.identity)
         Task {
             let (found, seen) = await Task.detached(priority: .userInitiated) { () -> ([CardCopier.Identity], [CardCopier.KnownCard]) in
-                (Self.volumes.compactMap { CardCopier.identify($0) }, (try? CardCopier.knownCards(store: store)) ?? [])
+                let found = Self.volumes.compactMap { v in
+                    copying.first { $0.volume.standardizedFileURL == v.standardizedFileURL && $0.isReachable } ?? CardCopier.identify(v)
+                }
+                return (found, (try? CardCopier.knownCards(store: store)) ?? [])
             }.value
             // Cards still there keep their state. A card back after being pulled starts over, keeping an interrupted
             // copy's result so the next copy goes on in its folder. A card pulled in the middle of its copy, or
@@ -749,7 +833,9 @@ final class CardCopyModel: ObservableObject {
     func copy(_ id: String, options: CardCopier.Options, store: LibraryStore, done: @escaping (CardCopier.Outcome) -> Void) {
         guard let i = cards.firstIndex(where: { $0.id == id }), let todo = cards[i].plan, !cards[i].copying, !cards[i].planning else { return }
         cards[i].copying = true
+        cards[i].stopping = false
         cards[i].outcome = nil
+        cards[i].resultSeen = false
         cards[i].error = nil
         cards[i].progress = CardCopier.Progress(total: todo.new.count, bytesTotal: todo.newBytes)
         let cancel = Cancel()
@@ -772,7 +858,9 @@ final class CardCopyModel: ObservableObject {
             known = (try? CardCopier.knownCards(store: store)) ?? []
             guard let i = cards.firstIndex(where: { $0.id == id }) else { return }
             cards[i].copying = false
+            cards[i].stopping = false
             cards[i].outcome = outcome
+            cards[i].resultSeen = onScreen
             done(outcome)
             if outcome.interruption == .cardRemoved || cards[i].gone || !cards[i].identity.isReachable {
                 cards[i].gone = true
@@ -783,7 +871,36 @@ final class CardCopyModel: ObservableObject {
         }
     }
 
-    func cancel(_ id: String) { cancels[id]?.flag = true }
+    func cancel(_ id: String) {
+        cancels[id]?.flag = true
+        if let i = cards.firstIndex(where: { $0.id == id }), cards[i].copying { cards[i].stopping = true }
+    }
+
+    /// "Copied 312 files (9.8 GB), 2 already there in 3 min 5 s"; an interrupted copy says so first.
+    static func outcomeText(_ o: CardCopier.Outcome) -> String {
+        let took = Int(o.finished.timeIntervalSince(o.started).rounded())
+        let time = took >= 60 ? "\(took / 60) min \(took % 60) s" : "\(took) s"
+        var s = switch o.interruption {
+        case .cancelled: "Stopped: copied "
+        case .cardRemoved: "The card was removed in the middle of the copy: "
+        case .destinationLost: "The destination went away in the middle of the copy: "
+        case nil: "Copied "
+        }
+        s += "\(o.copied.count) files (\(o.bytes.formatted(.byteCount(style: .file))))"
+        if !o.skipped.isEmpty { s += ", \(o.skipped.count) already there" }
+        s += " in \(time)"
+        return s
+    }
+
+    /// The outcome with the files that failed, for where there is no list of them (the sidebar, the activity).
+    static func brief(_ o: CardCopier.Outcome) -> String {
+        outcomeText(o) + (o.failed.isEmpty ? "" : ", \(o.failed.count) could not be copied")
+    }
+
+    /// After a card or destination went away: what became of the files.
+    static func resumeNote(_ o: CardCopier.Outcome) -> String {
+        o.interruption != nil && o.interruption != .cancelled ? ". Those are safe; the rest is still new and goes on in the same folder." : ""
+    }
 
     /// Lets a progress report through when a file finished or 0.25 s passed since the last one. Used from one
     /// copying thread at a time.

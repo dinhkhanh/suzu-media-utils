@@ -311,13 +311,14 @@ extension FaceGroupingModel {
 /// the team's sync. Click it for tonight's activity.
 struct FaceGroupingStatus: View {
     @EnvironmentObject var model: FaceGroupingModel
+    @Binding var route: AppRoute?
     @State private var showActivity = false
 
     var body: some View {
         // The rate changes every second during ingest; only this pill follows it (see ProcessingStatus). Background
-        // copies likewise follow their own progress (PeopleCopies).
+        // copies likewise follow their own progress (PeopleCopies, CardCopyModel).
         VStack(spacing: 0) {
-            PeopleCopiesView(jobs: model.exports)
+            BackgroundCopiesView(jobs: model.exports, cards: model.cardCopies) { route = .tool(.cards) }
             FaceGroupingStatusBody(model: model, processing: model.processing, nas: model.nas, showActivity: $showActivity)
         }
     }

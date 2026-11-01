@@ -193,6 +193,10 @@ hand, are matched by contents and not copied twice. Each card gets its own folde
 streamed through SHA-256 and read back, keep the original's times, and the card's folder can be added to the open
 project so faces are found as the files land. A card seen before can be forgotten (right-click) to copy it all again.
 
+A copy runs in the background: open any other screen and it goes on, with its progress and Stop above the status pill
+in the sidebar (click it to come back). Copy from Cards then shows the copy as it stands, without reading the card
+again. A result that finished elsewhere stays in the sidebar until it is closed or Copy from Cards is opened.
+
 Everything runs at once at an event, and the app is arranged for it: the card's folder joins the project before the
 first file lands, and each file is taken up **the moment it lands**, ahead of everything else waiting, with its
 faces read **from the card** (local, USB) while it is still in the slot, rather than back from the share minutes

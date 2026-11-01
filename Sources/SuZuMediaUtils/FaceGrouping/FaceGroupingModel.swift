@@ -185,6 +185,8 @@ final class FaceGroupingModel: ObservableObject {
     let processing = ProcessingStatus()
     /// Copies and moves to people's folders running in the background.
     let exports = PeopleCopies()
+    /// The memory cards and the copies off them, which go on whichever screen is open.
+    let cardCopies = CardCopyModel()
     var rate: Double { processing.rate }
     /// A refresh asked for by the user (a name, a merge) goes at once; the ones the database triggers during
     /// ingest wait a few seconds between them, so the screens aren't rebuilt under every click.
@@ -271,6 +273,8 @@ final class FaceGroupingModel: ObservableObject {
             return stats.pending > 0 || (self.service?.processor.queuedCount ?? 0) > 0 || exports.jobs.contains { $0.started && $0.result == nil }
         }
         nas.attach(store: service.store, teams: teams)
+        // Copy from Cards opened before the library was: it found no store to look with.
+        if cardCopies.onScreen { cardCopies.refresh(store: service.store, sync: service.teamSync) }
         applyWatching()
         service.start()
         observe()

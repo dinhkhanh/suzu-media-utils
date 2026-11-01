@@ -84,7 +84,7 @@ struct AppShell: View {
                     ToolsSidebar()
                 }
                 .listStyle(.sidebar)
-                FaceGroupingStatus()
+                FaceGroupingStatus(route: $route)
             }
             .navigationSplitViewColumnWidth(min: 220, ideal: 260)
             .toolbar { FaceGroupingSidebarToolbar() }
